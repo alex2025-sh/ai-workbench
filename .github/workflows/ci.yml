@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: gofmt
+        run: test -z "$(gofmt -s -l .)" || (gofmt -s -l . && exit 1)
+      - name: vet
+        run: go vet ./...
+      - name: test
+        run: go test ./...
+
+  # 校验 .api 与 SQL 能被 goctl 正确生成并编译通过（生成结果不提交）
+  codegen:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - name: install goctl
+        run: go install github.com/zeromicro/go-zero/tools/goctl@latest
+      - name: generate
+        run: make gen
+      - name: build generated code
+        run: go build ./...
