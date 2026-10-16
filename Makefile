@@ -1,16 +1,23 @@
 GOCTL ?= goctl
 STYLE ?= go_zero
 
-.PHONY: all gen gen-api gen-model tidy build vet test fmt check
+.PHONY: all gen gen-rpc gen-api gen-model tidy build vet test fmt check
 
 all: check
 
-## 代码生成（需要本地安装 goctl：go install github.com/zeromicro/go-zero/tools/goctl@latest）
-gen: gen-api gen-model tidy
+## 代码生成
+# 需要本地安装 goctl、protoc、protoc-gen-go、protoc-gen-go-grpc：
+#   go install github.com/zeromicro/go-zero/tools/goctl@latest
+#   goctl env check --install --verbose --force
+gen: gen-rpc gen-api gen-model tidy
 
-# 根据 app/api/workbench.api 生成 handler / logic / svc / types / etc 配置
+# 对外业务接口：根据 app/rpc/workbench.proto 生成 zrpc 服务（多 service，需 -m）
+gen-rpc:
+	cd app/rpc && $(GOCTL) rpc protoc workbench.proto --go_out=. --go-grpc_out=. --zrpc_out=. -m --style $(STYLE)
+
+# 第三方 HTTP 回调：根据 app/callback/callback.api 生成（仅 Lark 卡片回调）
 gen-api:
-	cd app/api && $(GOCTL) api go --api workbench.api --dir . --style $(STYLE)
+	cd app/callback && $(GOCTL) api go --api callback.api --dir . --style $(STYLE)
 
 # 根据 deploy/sql/*.sql 生成 internal/model 下的 *_model.go 与 *_model_gen.go
 gen-model:

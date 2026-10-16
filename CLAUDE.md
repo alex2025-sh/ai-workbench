@@ -12,16 +12,21 @@
 ## 技术栈与约定
 
 - Go 1.24，工具库为 [go-zero](https://github.com/zeromicro/go-zero)。
-- HTTP 服务由 `goctl api` 从 `app/api/workbench.api` 生成；数据访问层由 `goctl model` 从 `deploy/sql/*.sql` 生成到 `internal/model`。
+- **对外业务接口使用 gRPC**：协议写在 `app/rpc/workbench.proto`（RunService、TaskService、PlanService），由 `goctl rpc protoc` 生成 zrpc 服务。
+  - 业务 JSON 字段用 `bytes`（UTF-8 JSON）承载，不用 `google.protobuf.Struct`，避免数字变 double 丢精度。
+  - proto 的 `TaskStatus` 比存储值偏移 2（首值必须为 0），转换统一用 `internal/task` 的 `StatusToProto` / `StatusFromProto`。
+- **HTTP 只用于第三方回调**：`app/callback/callback.api` 只有 Lark 卡片回调（Lark 以 HTTP 推送），由 `goctl api` 生成。
+- 数据访问层由 `goctl model` 从 `deploy/sql/*.sql` 生成到 `internal/model`。
   - `*_gen.go` 每次生成都会覆盖，**不要手工修改**；自定义查询写在对应的 `*_model.go`。
-  - 改表结构或接口时先改 `.sql` / `.api`，再 `make gen`。
+  - 改表结构或接口时先改 `.sql` / `.proto` / `.api`，再 `make gen`。
 - 存储为 TiDB（MySQL 协议），外部时钟为 xxl-job，平台只依赖这两者，不引入 Temporal、Redis 等额外服务。
 - goctl 的 DDL 约束：单列主键（联合主键改为 `id` + 联合唯一键）、主键 `AUTO_INCREMENT`；TiDB 专用选项写在 `/*T! ... */` 注释中。
 
 ## 目录
 
 ```text
-app/api/          go-zero HTTP 服务（workbench.api；生成后含 handler/logic/svc/types/etc）
+app/rpc/          go-zero zrpc 服务：对外 gRPC 接口（workbench.proto；生成后含 pb/server/logic/svc/etc）
+app/callback/     go-zero HTTP 服务：仅 Lark 卡片回调（callback.api）
 app/worker/       引擎执行进程：Worker 池、推进器、xxl-job ticker
 deploy/sql/       表结构（goctl model 的输入）
 internal/model/   goctl 生成的数据访问层
@@ -53,10 +58,10 @@ internal/event/ ingest/ subscription/ registry/ mcp/ pkg/
 ## 常用命令
 
 ```bash
-make gen     # goctl 生成 api 与 model，然后 go mod tidy
+make gen     # goctl 生成 rpc、callback api 与 model，然后 go mod tidy
 make check   # go vet + go test + go build
 ```
 
 ## 当前进度
 
-骨架阶段：领域类型与接口已定义，`.api` 与 `.sql` 已就绪，生成代码尚未提交。下一步是引擎阶段一（见 `docs/workflow-engine.md`「分阶段实现」）。
+骨架阶段：领域类型与接口已定义，`.proto`、`.api` 与 `.sql` 已就绪，生成代码尚未提交。下一步是引擎阶段一（见 `docs/workflow-engine.md`「分阶段实现」）。

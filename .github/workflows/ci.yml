@@ -20,7 +20,7 @@ jobs:
       - name: test
         run: go test ./...
 
-  # 校验 .api 与 SQL 能被 goctl 正确生成并编译通过（生成结果不提交）
+  # 校验 .proto、.api 与 SQL 能被 goctl 正确生成并编译通过（生成结果不提交）
   codegen:
     runs-on: ubuntu-latest
     steps:
@@ -28,8 +28,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24"
-      - name: install goctl
-        run: go install github.com/zeromicro/go-zero/tools/goctl@latest
+      - name: install goctl, protoc and plugins
+        run: |
+          go install github.com/zeromicro/go-zero/tools/goctl@latest
+          goctl env check --install --verbose --force
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: generate
         run: make gen
       - name: build generated code

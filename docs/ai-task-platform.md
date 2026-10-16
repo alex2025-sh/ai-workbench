@@ -203,7 +203,7 @@ view:
 | 流程 | 6. 流程引擎 Workflow Engine | 按 DSL 驱动任务前进 | 发布期编译器（校验、拓扑分析、生成 Plan）；轻量引擎的推进器（死路径消除、信号、受控的环、任务状态同步），详见《轻量工作流引擎设计》；节点执行器注册表 |
 | 流程 | 7. 动作运行时 Action Runtime | 执行所有外部 IO | 引擎 Worker 池中的通用 `InvokeAction` 动作，分发到：skill 调用（MCP / Skillhub）、LLM（Eino → LiteLLM）、Lark、邮件、emit\_event |
 | 触达 | 8. 视图渲染器 View Renderer | 模板 + 任务 → 各渠道内容 | 渠道无关视图 DSL；Lark 卡片 / Web / 邮件渲染器；按 `x-pii` 脱敏、按 `x-format` 格式化 |
-| 触达 | 9. Lark 网关 Lark Gateway | 发送、回调、卡片更新 | 回调验签；open\_id → 内部用户；按任务表鉴权；调用引擎 Signal API；`task_id → message_id` 映射，状态变化时更新原卡片；降噪合并 |
+| 触达 | 9. Lark 网关 Lark Gateway | 发送、回调、卡片更新 | 回调验签；open\_id → 内部用户；按任务表鉴权；调用 RunService.Signal；`task_id → message_id` 映射，状态变化时更新原卡片；降噪合并 |
 | 控制面 | 10. 配置中心 Config Registry | 所有配置的版本与发布 | 事件类型、触发器、订阅、任务类型、workflow、模板、分配策略；草稿 → 审批 → 发布；dry-run 试运行 |
 | 控制面 | 11. AI 设计助手 + 平台 MCP | 对话生成配置 | Openclaw / Eino agent 调用平台 MCP（list\_skills、get\_skill\_schema、list\_node\_types、validate、dry\_run、save\_draft）；校验 — 修复循环 |
 | 横切 | 12. 公共库与可观测 | 各模块共用的能力 | JSON Schema 校验与 `x-` 扩展处理；expr 表达式；执行状态表 → 画布着色；指标（通知到联系时长、跟进率）；审计日志 |
@@ -240,12 +240,14 @@ flowchart TB
 
 ### Go 工程内部分包
 
-仓库采用 go-zero 工程约定：HTTP 服务由 `goctl api` 从 `.api` 文件生成，数据访问层由 `goctl model` 从 `deploy/sql/*.sql` 生成；领域逻辑放在仓库根目录的 `internal/` 下，供各服务共用。
+仓库采用 go-zero 工程约定：对外业务接口为 gRPC，由 `goctl rpc` 从 `app/rpc/workbench.proto` 生成 zrpc 服务；HTTP 只用于第三方回调（Lark），由 `goctl api` 从 `.api` 生成；数据访问层由 `goctl model` 从 `deploy/sql/*.sql` 生成；领域逻辑放在仓库根目录的 `internal/` 下，供各服务共用。
 
 ```text
 app/
-  api/                 # HTTP / Lark 回调 / 平台 MCP 入口（goctl api 生成 handler/logic/svc/types）
-    workbench.api
+  rpc/                 # 对外 gRPC 接口：RunService / TaskService / PlanService（goctl rpc 生成）
+    workbench.proto
+  callback/            # HTTP 回调：仅 Lark 卡片交互（goctl api 生成）
+    callback.api
   worker/              # 引擎 Worker 池、推进器、xxl-job ticker 处理器
 deploy/sql/            # 表结构，goctl model 的输入
 internal/
