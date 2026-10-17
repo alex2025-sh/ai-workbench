@@ -1,5 +1,5 @@
 # 本地开发配置。平台库与业务 mock 库可以是同一个 MySQL 8.0 / TiDB 实例的不同 database。
-DataSource: root:@tcp(127.0.0.1:3306)/ai_workbench?parseTime=true&loc=UTC&charset=utf8mb4
+DataSource: root:@tcp(127.0.0.1:3306)/ai_workbench?parseTime=true&loc=UTC&charset=utf8mb4&transaction_isolation=%27READ-COMMITTED%27
 BizDataSource: root:@tcp(127.0.0.1:3306)/biz_mock?parseTime=true&loc=UTC&charset=utf8mb4
 RelationsFile: deploy/mock/vip_rm.yaml
 

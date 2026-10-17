@@ -421,6 +421,7 @@ xxl-job 只通知一台机器，解决的是 ticker 不重复触发；这里防�
 | --- | --- |
 | worker 执行中崩溃 | 租约过期后 ticker 回收，job 重新认领，`attempt + 1` |
 | 提交事务失败 | 事务回滚，job 仍为认领状态，租约过期后重试 |
+| 不同 run 的事务在 `wf_job` 索引上死锁 | 推进事务整体重试（最多 5 次，每次重新加载状态）；MySQL 建议使用 READ-COMMITTED，正确性只依赖 run 行锁 |
 | 进程发版重启 | 状态全部在库中，重启后由 ticker 与 worker 继续 |
 | xxl-job 漏触发 | 下一次 tick 补上，延迟一个周期 |
 | 数据库短暂不可用 | worker 认领失败指数退避（参考 Camunda 的认领退避） |

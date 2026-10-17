@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"github.com/zeromicro/go-zero/core/stores/sqlx"
 
 	"github.com/alex2025-sh/ai-workbench/internal/flow/compiler"
@@ -48,16 +51,41 @@ type tx struct {
 }
 
 // Tx 在一个事务内执行 fn。MySQL / TiDB 默认即悲观事务，SELECT ... FOR UPDATE 锁行。
+//
+// 同一个 run 的推进由 run 行锁串行化；不同 run 的事务仍可能在 wf_job 的索引上互相死锁
+// （MySQL 可重复读下的间隙锁），因此遇到死锁或锁等待超时时整体重试：fn 每次都重新加载状态，重试是安全的。
+// 建议连接使用 READ-COMMITTED（DSN 加 transaction_isolation=%27READ-COMMITTED%27），正确性只依赖行锁，不依赖间隙锁。
 func (s *Store) Tx(ctx context.Context, fn func(t *tx) error) error {
-	return s.conn.TransactCtx(ctx, func(ctx context.Context, session sqlx.Session) error {
-		return fn(&tx{
-			ctx:   ctx,
-			runs:  s.runs.WithSession(session),
-			nodes: s.nodes.WithSession(session),
-			jobs:  s.jobs.WithSession(session),
-			evts:  s.evts.WithSession(session),
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		err = s.conn.TransactCtx(ctx, func(ctx context.Context, session sqlx.Session) error {
+			return fn(&tx{
+				ctx:   ctx,
+				runs:  s.runs.WithSession(session),
+				nodes: s.nodes.WithSession(session),
+				jobs:  s.jobs.WithSession(session),
+				evts:  s.evts.WithSession(session),
+			})
 		})
-	})
+		if !retryable(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(time.Duration(10*(attempt+1)+rand.Intn(20)) * time.Millisecond):
+		}
+	}
+	return err
+}
+
+// retryable 报告错误是否为死锁（1213）或锁等待超时（1205）。
+func retryable(err error) bool {
+	var me *mysql.MySQLError
+	if errors.As(err, &me) {
+		return me.Number == 1213 || me.Number == 1205
+	}
+	return err != nil && (strings.Contains(err.Error(), "Deadlock found") || strings.Contains(err.Error(), "Lock wait timeout"))
 }
 
 // ---- 转换 ----
