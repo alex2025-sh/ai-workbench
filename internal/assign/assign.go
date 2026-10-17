@@ -7,29 +7,33 @@ package assign
 import (
 	"context"
 	"encoding/json"
+
+	"github.com/alex2025-sh/ai-workbench/internal/flow/dsl"
 )
+
+// Policy 是一条分配策略，结构与 DSL 中的 assignment 相同（见 api/schema/task_type.schema.json）。
+type Policy = dsl.Assignment
 
 // ResolverType 是候选人解析器的类型。
 type ResolverType string
 
 const (
-	ResolverUser             ResolverType = "user"              // 固定指定某人
+	ResolverRelation         ResolverType = "relation"          // 业务关系，如 VIP → 负责 RM（来自关系 API）
+	ResolverUser             ResolverType = "user"              // 固定指定的人
 	ResolverGroup            ResolverType = "group"             // 用户组队列
-	ResolverRelation         ResolverType = "relation"          // 业务关系，如 VIP -> 负责 RM（来自关系 API）
-	ResolverAttribute        ResolverType = "attribute"         // 按地区、语言、客户等级等属性匹配
 	ResolverAgreement        ResolverType = "agreement"         // 跨部门协议：受理组、响应 SLA、升级联系人
 	ResolverPreviousAssignee ResolverType = "previous_assignee" // 固定为上一人工节点的实际处理人
+	ResolverExpr             ResolverType = "expr"              // 表达式求值得到 email
 )
 
 // Strategy 是从候选人中选出处理人的策略。
 type Strategy string
 
 const (
-	StrategyDirect     Strategy = "direct"
+	StrategyFirst      Strategy = "first"
 	StrategyClaim      Strategy = "claim" // 进入组队列，由组内成员认领（CAS）
 	StrategyRoundRobin Strategy = "round_robin"
 	StrategyLeastLoad  Strategy = "least_load"
-	StrategyRandom     Strategy = "random"
 )
 
 // 过滤器名称。职责分离（not_maker 等）由平台强制执行。
@@ -39,32 +43,6 @@ const (
 	FilterNotMaker       = "not_maker"
 	FilterWithinCapacity = "within_capacity"
 )
-
-// ResolverSpec 是策略链中的一个解析器。
-type ResolverSpec struct {
-	Type      ResolverType    `json:"type"`
-	User      string          `json:"user,omitempty"`
-	Group     string          `json:"group,omitempty"`
-	Relation  string          `json:"relation,omitempty"`
-	Agreement string          `json:"agreement,omitempty"`
-	Params    json.RawMessage `json:"params,omitempty"`
-}
-
-// Fallback 是所有解析器都无结果时的兜底。
-type Fallback struct {
-	Group    string   `json:"group"`
-	Strategy Strategy `json:"strategy"`
-}
-
-// Policy 是一条分配策略。
-type Policy struct {
-	Resolvers    []ResolverSpec `json:"resolvers"`
-	Filters      []string       `json:"filters,omitempty"`
-	Strategy     Strategy       `json:"strategy"`
-	Fallback     *Fallback      `json:"fallback,omitempty"`
-	Exclude      []string       `json:"exclude,omitempty"` // 表达式，如 task.maker、nodes.rm_followup.assignee
-	ClaimTimeout string         `json:"claim_timeout,omitempty"`
-}
 
 // Subject 是被分配的任务主体信息。
 type Subject struct {
