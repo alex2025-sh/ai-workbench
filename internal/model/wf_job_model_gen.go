@@ -45,8 +45,9 @@ type (
 		Kind        string         `db:"kind"`    // execute / timeout / wake / timer / sync_task
 		Payload     sql.NullString `db:"payload"` // sync_task 等 job 的参数
 		DueAt       time.Time      `db:"due_at"`
-		Status      string         `db:"status"` // pending / done / cancelled
-		Attempt     int64          `db:"attempt"`
+		Status      string         `db:"status"`       // pending / done / cancelled / failed（隔离的毒丸 job）
+		Attempt     int64          `db:"attempt"`      // 认领次数；(owner, attempt) 是一次认领的凭证
+		FailCount   int64          `db:"fail_count"`   // 处理失败次数（加载或提交失败，不含节点重试），超限后隔离
 		Owner       string         `db:"owner"`        // 租约持有者，空 = 未认领
 		LockedUntil sql.NullTime   `db:"locked_until"` // 租约到期时间
 		LastError   string         `db:"last_error"`
@@ -98,14 +99,14 @@ func (m *defaultWfJobModel) FindOneByIdemKey(ctx context.Context, idemKey string
 }
 
 func (m *defaultWfJobModel) Insert(ctx context.Context, data *WfJob) (sql.Result, error) {
-	query := fmt.Sprintf("insert into %s (%s) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", m.table, wfJobRowsExpectAutoSet)
-	ret, err := m.conn.ExecCtx(ctx, query, data.RunId, data.NodeId, data.Iteration, data.Kind, data.Payload, data.DueAt, data.Status, data.Attempt, data.Owner, data.LockedUntil, data.LastError, data.IdemKey)
+	query := fmt.Sprintf("insert into %s (%s) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", m.table, wfJobRowsExpectAutoSet)
+	ret, err := m.conn.ExecCtx(ctx, query, data.RunId, data.NodeId, data.Iteration, data.Kind, data.Payload, data.DueAt, data.Status, data.Attempt, data.FailCount, data.Owner, data.LockedUntil, data.LastError, data.IdemKey)
 	return ret, err
 }
 
 func (m *defaultWfJobModel) Update(ctx context.Context, newData *WfJob) error {
 	query := fmt.Sprintf("update %s set %s where `id` = ?", m.table, wfJobRowsWithPlaceHolder)
-	_, err := m.conn.ExecCtx(ctx, query, newData.RunId, newData.NodeId, newData.Iteration, newData.Kind, newData.Payload, newData.DueAt, newData.Status, newData.Attempt, newData.Owner, newData.LockedUntil, newData.LastError, newData.IdemKey, newData.Id)
+	_, err := m.conn.ExecCtx(ctx, query, newData.RunId, newData.NodeId, newData.Iteration, newData.Kind, newData.Payload, newData.DueAt, newData.Status, newData.Attempt, newData.FailCount, newData.Owner, newData.LockedUntil, newData.LastError, newData.IdemKey, newData.Id)
 	return err
 }
 

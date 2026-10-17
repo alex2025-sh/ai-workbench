@@ -19,8 +19,38 @@ import (
 // Options 是引擎的运行参数。
 type Options struct {
 	Owner        string        // 本进程标识，写入 wf_job.owner
-	Lease        time.Duration // job 租约，默认 2 分钟
+	Lease        time.Duration // job 租约，默认 2 分钟；开始执行时延长到节点超时之后
 	MaxExecCount int           // 单个 run 的节点执行次数上限，默认 500，超出进入人工干预
+	MaxFailCount int           // job 处理失败（加载、提交出错）的次数上限，默认 5，超出后隔离
+	MaxClaims    int           // job 的认领次数上限，默认 30（高于重试上限 20），超出后隔离，防止反复崩溃
+}
+
+// 节点单次执行的超时：skill_call / llm 可在配置中覆盖，上限 MaxActionTimeout。
+const (
+	DefaultActionTimeout = 30 * time.Second
+	DefaultLLMTimeout    = 2 * time.Minute
+	MaxActionTimeout     = 10 * time.Minute
+	leaseMargin          = 30 * time.Second // 超时之后租约再保留的余量，覆盖提交结果的时间
+)
+
+// ExecTimeout 返回节点单次执行的超时。
+func ExecTimeout(cfg any) time.Duration {
+	d := DefaultActionTimeout
+	switch c := cfg.(type) {
+	case *dsl.SkillCallConfig:
+		if c.Timeout != nil && *c.Timeout > 0 {
+			d = c.Timeout.Std()
+		}
+	case *dsl.LLMConfig:
+		d = DefaultLLMTimeout
+		if c.Timeout != nil && *c.Timeout > 0 {
+			d = c.Timeout.Std()
+		}
+	}
+	if d > MaxActionTimeout {
+		d = MaxActionTimeout
+	}
+	return d
 }
 
 // Engine 是引擎对外的 API，同时是唯一修改节点状态的组件（推进器）。
@@ -36,6 +66,8 @@ type Engine struct {
 	actions Invoker
 	clock   Clock
 	opts    Options
+
+	afterClaim func(Job) // 仅测试使用：认领成功后、处理前调用，用于构造交错
 }
 
 // New 创建引擎。
@@ -49,14 +81,46 @@ func New(store *Store, plans PlanSource, execs Executors, actions Invoker, clock
 	if opts.Owner == "" {
 		opts.Owner = "engine"
 	}
+	if opts.MaxFailCount <= 0 {
+		opts.MaxFailCount = 5
+	}
+	if opts.MaxClaims <= 0 {
+		opts.MaxClaims = 30
+	}
 	return &Engine{store: store, plans: plans, execs: execs, actions: actions, clock: clock, opts: opts}
 }
 
 // Store 返回底层存储，供查询使用。
 func (e *Engine) Store() *Store { return e.store }
 
-// errLostLease 表示 job 已被其他 worker 重新认领，本次提交放弃。
+// errLostLease 表示这次认领已经失效（job 被重新认领、已完成或已取消）。
+// 失效的一方只丢弃自己的结果，不修改 job：job 此时属于更新的认领。
 var errLostLease = errors.New("engine: job lease lost")
+
+// holds 在事务内锁住 job 行，确认它仍由这次认领持有。必须在 load（锁 run 行）之后调用，
+// 保持“先 run 后 job”的加锁顺序。
+func (t *tx) holds(job Job) error {
+	ok, err := t.jobs.LockHeld(t.ctx, uint64(job.ID), job.Owner, int64(job.Attempt))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errLostLease
+	}
+	return nil
+}
+
+// finishJob 由持有者把 job 置为终态。
+func (t *tx) finishJob(job Job, status JobStatus, reason string) error {
+	ok, err := t.jobs.Finish(t.ctx, uint64(job.ID), job.Owner, int64(job.Attempt), string(status), reason)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errLostLease
+	}
+	return nil
+}
 
 // ---- 一次推进的事务内状态 ----
 
@@ -336,34 +400,35 @@ func (e *Engine) process(ctx context.Context, job Job) ([]Job, error) {
 	case JobSyncTask:
 		return nil, e.syncTask(ctx, job)
 	default:
-		_, err := e.store.jobs.Finish(ctx, uint64(job.ID), job.Owner, string(JobCancelled), "unsupported job kind "+string(job.Kind))
+		_, err := e.store.jobs.Finish(ctx, uint64(job.ID), job.Owner, int64(job.Attempt), string(JobCancelled), "unsupported job kind "+string(job.Kind))
 		return nil, err
 	}
 }
 
-func (e *Engine) finishStale(t *tx, job Job, reason string) error {
-	_, err := t.jobs.Finish(t.ctx, uint64(job.ID), job.Owner, string(JobCancelled), reason)
-	return err
-}
-
 func (e *Engine) execute(ctx context.Context, job Job) ([]Job, error) {
-	// 第一段：事务内把节点置为 running，记下本次尝试的 attempt，并准备执行上下文。
+	// 第一段：事务内确认认领仍然有效，把节点置为 running，记下本次认领的 attempt，
+	// 按节点超时延长租约，并准备执行上下文。
 	var ec *ExecContext
+	var timeout time.Duration
 	err := e.store.Tx(ctx, func(t *tx) error {
 		s, err := e.load(ctx, t, job.RunID)
 		if err != nil {
 			return err
 		}
+		// 认领之后、进入事务之前可能停顿过：此时 job 也许已被重新认领，节点的 attempt 属于新的认领，不能覆盖。
+		if err := t.holds(job); err != nil {
+			return err
+		}
 		r := s.rows[job.NodeID]
 		if s.run.Status != RunRunning || r == nil || int(r.Iteration) != job.Iteration ||
 			(NodeStatus(r.Status) != NodeReady && NodeStatus(r.Status) != NodeRunning) {
-			return e.finishStale(t, job, "stale")
+			return t.finishJob(job, JobCancelled, "stale")
 		}
 		if s.run.ExecCount >= e.opts.MaxExecCount {
 			if err := s.needsIntervention(job.NodeID, "exceeded max exec count"); err != nil {
 				return err
 			}
-			if err := e.finishStale(t, job, "max exec count"); err != nil {
+			if err := t.finishJob(job, JobCancelled, "max exec count"); err != nil {
 				return err
 			}
 			return s.commit()
@@ -381,6 +446,11 @@ func (e *Engine) execute(ctx context.Context, job Job) ([]Job, error) {
 		if err != nil {
 			return err
 		}
+		// 租约至少覆盖到超时之后：慢动作执行期间不会被别人重新认领，也就不会重复执行。
+		timeout = ExecTimeout(cfg)
+		if _, err := t.jobs.Extend(t.ctx, uint64(job.ID), job.Owner, int64(job.Attempt), s.now.Add(timeout+leaseMargin)); err != nil {
+			return err
+		}
 		var binding = s.def.Plan.Bindings[job.NodeID]
 		ec = &ExecContext{
 			Run: s.run, Def: s.def, Node: n, Config: cfg, Iteration: job.Iteration, Attempt: job.Attempt,
@@ -392,29 +462,42 @@ func (e *Engine) execute(ctx context.Context, job Job) ([]Job, error) {
 		}
 		return s.commit()
 	})
+	if errors.Is(err, errLostLease) {
+		return nil, nil
+	}
 	if err != nil || ec == nil {
 		return nil, err
 	}
 
-	// 第二段：事务外执行节点，不持有任何数据库锁。
+	// 第二段：事务外执行节点，不持有任何数据库锁；超时后取消调用，按可重试的 timeout 错误处理。
 	var res NodeResult
 	if ex, ok := e.execs.Get(ec.Node.Type); ok {
-		res = ex.Execute(ctx, *ec)
+		ectx, cancel := context.WithTimeout(ctx, timeout)
+		res = ex.Execute(ectx, *ec)
+		if res.Err != nil && errors.Is(ectx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+			res.Err = &action.Error{Code: action.CodeTimeout, Err: fmt.Errorf("node %s timed out after %s: %w", ec.Node.ID, timeout, res.Err)}
+			res.Permanent = false
+		}
+		cancel()
 	} else {
 		res = NodeResult{Err: fmt.Errorf("no executor for node type %q", ec.Node.Type), Permanent: true}
 	}
 
-	// 第三段：事务内防护校验后提交结果。
+	// 第三段：事务内确认认领仍然有效，做防护校验后提交结果。
 	var jobs []Job
 	err = e.store.Tx(ctx, func(t *tx) error {
 		s, err := e.load(ctx, t, job.RunID)
 		if err != nil {
 			return err
 		}
+		// 认领已失效：job 属于更新的认领，只丢弃本次结果，不能修改 job 或节点。
+		if err := t.holds(job); err != nil {
+			return err
+		}
 		r := s.rows[job.NodeID]
 		if s.run.Status != RunRunning || r == nil || NodeStatus(r.Status) != NodeRunning ||
 			int(r.Attempt) != job.Attempt || int(r.Iteration) != job.Iteration {
-			return e.finishStale(t, job, "fenced") // 僵尸 worker 或 run 已取消，结果丢弃
+			return t.finishJob(job, JobCancelled, "fenced") // run 已取消或节点已被退回，结果丢弃
 		}
 		if res.Err != nil {
 			if err := e.handleFailure(s, job, res); err != nil {
@@ -423,10 +506,8 @@ func (e *Engine) execute(ctx context.Context, job Job) ([]Job, error) {
 			jobs = s.jobs // 走 error 端口时有新就绪的节点
 			return nil
 		}
-		if ok, err := t.jobs.Finish(t.ctx, uint64(job.ID), job.Owner, string(JobDone), ""); err != nil {
+		if err := t.finishJob(job, JobDone, ""); err != nil {
 			return err
-		} else if !ok {
-			return errLostLease
 		}
 		if res.Wait != nil {
 			if err := s.wait(job.NodeID, res); err != nil {
@@ -473,30 +554,43 @@ func (s *runState) wait(nodeID string, res NodeResult) error {
 	return s.event(nodeID, "node_waiting", "", map[string]any{"until": until})
 }
 
+// Retryable 报告失败是否可以重试：执行器标为 Permanent 的不重试，错误码在 non_retryable_errors 中的不重试。
+func Retryable(p dsl.RetryPolicy, err error, permanent bool) bool {
+	if permanent {
+		return false
+	}
+	code := action.ErrorCode(err)
+	for _, c := range p.NonRetryableErrors {
+		if c != "" && c == code {
+			return false
+		}
+	}
+	return true
+}
+
 func (e *Engine) handleFailure(s *runState, job Job, res NodeResult) error {
 	n := s.node(job.NodeID)
 	policy := RetryPolicyFor(n)
 	msg := res.Err.Error()
-	if !res.Permanent && job.Attempt < policy.MaxAttempts {
+	code := action.ErrorCode(res.Err)
+	if Retryable(policy, res.Err, res.Permanent) && job.Attempt < policy.MaxAttempts {
 		due := s.now.Add(backoff(policy, job.Attempt))
-		if ok, err := s.t.jobs.Release(s.t.ctx, uint64(job.ID), job.Owner, due, msg); err != nil {
+		if ok, err := s.t.jobs.Release(s.t.ctx, uint64(job.ID), job.Owner, int64(job.Attempt), due, msg); err != nil {
 			return err
 		} else if !ok {
 			return errLostLease
 		}
 		s.setNode(job.NodeID, NodeReady, nil)
-		if err := s.event(job.NodeID, "node_retry", "", map[string]any{"attempt": job.Attempt, "error": msg, "next_at": due}); err != nil {
+		if err := s.event(job.NodeID, "node_retry", "", map[string]any{"attempt": job.Attempt, "error": msg, "code": code, "next_at": due}); err != nil {
 			return err
 		}
 		return s.commit()
 	}
-	if ok, err := s.t.jobs.Finish(s.t.ctx, uint64(job.ID), job.Owner, string(JobDone), msg); err != nil {
+	if err := s.t.finishJob(job, JobDone, msg); err != nil {
 		return err
-	} else if !ok {
-		return errLostLease
 	}
+	out, _ := json.Marshal(map[string]string{"error": msg, "code": code})
 	if hasEdge(s, job.NodeID, dsl.PortError) {
-		out, _ := json.Marshal(map[string]string{"error": msg})
 		if err := s.complete(job.NodeID, dsl.PortError, out); err != nil {
 			return err
 		}
@@ -504,10 +598,9 @@ func (e *Engine) handleFailure(s *runState, job Job, res NodeResult) error {
 	}
 	s.setNode(job.NodeID, NodeFailed, func(r *model.WfNodeRun) {
 		r.FinishedAt = sql.NullTime{Time: s.now, Valid: true}
-		out, _ := json.Marshal(map[string]string{"error": msg})
 		r.Output = nullJSON(out)
 	})
-	if err := s.event(job.NodeID, "node_failed", "", map[string]any{"error": msg, "attempt": job.Attempt}); err != nil {
+	if err := s.event(job.NodeID, "node_failed", "", map[string]any{"error": msg, "code": code, "attempt": job.Attempt}); err != nil {
 		return err
 	}
 	if err := s.needsIntervention(job.NodeID, msg); err != nil {
@@ -545,6 +638,7 @@ func RetryPolicyFor(n dsl.Node) dsl.RetryPolicy {
 		if r.MaxAttempts > 0 {
 			p.MaxAttempts = r.MaxAttempts
 		}
+		p.NonRetryableErrors = r.NonRetryableErrors
 	}
 	return p
 }
@@ -573,10 +667,8 @@ func (e *Engine) fire(ctx context.Context, job Job) ([]Job, error) {
 		if err != nil {
 			return err
 		}
-		if ok, err := t.jobs.Finish(t.ctx, uint64(job.ID), job.Owner, string(JobDone), ""); err != nil {
+		if err := t.finishJob(job, JobDone, ""); err != nil {
 			return err
-		} else if !ok {
-			return errLostLease
 		}
 		r := s.rows[job.NodeID]
 		if s.run.Status != RunRunning || r == nil || NodeStatus(r.Status) != NodeWaiting || int(r.Iteration) != job.Iteration {
@@ -617,10 +709,10 @@ func (e *Engine) syncTask(ctx context.Context, job Job) error {
 	_, err := e.actions.InvokeAction(ctx, action.Request{Kind: action.KindSyncTask, Input: job.Payload, IdemKey: job.IdemKey})
 	if err != nil {
 		policy := dsl.RetryPolicy{InitialInterval: dsl.Duration(2 * time.Second), BackoffCoefficient: 2, MaxInterval: dsl.Duration(5 * time.Minute)}
-		_, rerr := e.store.jobs.Release(ctx, uint64(job.ID), job.Owner, e.clock.Now().Add(backoff(policy, job.Attempt)), err.Error())
+		_, rerr := e.store.jobs.Release(ctx, uint64(job.ID), job.Owner, int64(job.Attempt), e.clock.Now().Add(backoff(policy, job.Attempt)), err.Error())
 		return rerr
 	}
-	_, err = e.store.jobs.Finish(ctx, uint64(job.ID), job.Owner, string(JobDone), "")
+	_, err = e.store.jobs.Finish(ctx, uint64(job.ID), job.Owner, int64(job.Attempt), string(JobDone), "")
 	return err
 }
 

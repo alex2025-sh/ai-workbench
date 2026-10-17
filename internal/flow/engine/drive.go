@@ -2,9 +2,15 @@ package engine
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
+	"time"
 
 	"github.com/zeromicro/go-zero/core/logx"
+
+	"github.com/alex2025-sh/ai-workbench/internal/flow/dsl"
+	"github.com/alex2025-sh/ai-workbench/internal/model"
 )
 
 // drive 就地推进：依次认领并执行已到期的 job，以及执行过程中新就绪的 job，直到遇到等待点或结束。
@@ -26,15 +32,75 @@ func (e *Engine) drive(ctx context.Context, jobs []Job) int {
 			continue // 已被别的调用认领或已完成
 		}
 		n++
+		if j.Attempt > e.opts.MaxClaims {
+			// 反复认领却从未完成：多半是处理时进程崩溃（如内存耗尽），继续重试只会反复崩溃。
+			e.quarantine(ctx, j, fmt.Sprintf("claimed %d times without finishing", j.Attempt))
+			continue
+		}
+		if e.afterClaim != nil {
+			e.afterClaim(j)
+		}
 		next, err := e.process(ctx, j)
 		if err != nil {
-			// 提交失败时事务已回滚，job 仍处于认领状态，租约过期后由 tick 重新执行。
 			logx.WithContext(ctx).Errorf("engine: process job %d (%s %s): %v", j.ID, j.Kind, j.NodeID, err)
+			e.failed(ctx, j, err)
 			continue
 		}
 		queue = append(queue, e.due(next)...)
 	}
 	return n
+}
+
+// failed 处理一次失败的处理（加载定义、提交事务出错等，事务已回滚）。
+//   - 调用方的 ctx 已取消（如进程退出）：立即释放 job，不计失败次数，别的进程不必等租约过期；
+//   - 否则退避后重试并计数，连续失败达到 MaxFailCount 时隔离，避免确定性错误无限重试。
+func (e *Engine) failed(ctx context.Context, j Job, cause error) {
+	bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	var err error
+	switch {
+	case ctx.Err() != nil:
+		_, err = e.store.jobs.Release(bg, uint64(j.ID), j.Owner, int64(j.Attempt), e.clock.Now(), "released: "+ctx.Err().Error())
+	case j.FailCount+1 >= e.opts.MaxFailCount:
+		e.quarantine(bg, j, fmt.Sprintf("failed %d times: %v", j.FailCount+1, cause))
+		return
+	default:
+		policy := dsl.RetryPolicy{InitialInterval: dsl.Duration(2 * time.Second), BackoffCoefficient: 2, MaxInterval: dsl.Duration(5 * time.Minute)}
+		_, err = e.store.jobs.Backoff(bg, uint64(j.ID), j.Owner, int64(j.Attempt), e.clock.Now().Add(backoff(policy, j.FailCount+1)), cause.Error())
+	}
+	if err != nil {
+		logx.WithContext(ctx).Errorf("engine: release job %d: %v", j.ID, err)
+	}
+}
+
+// quarantine 隔离一个毒丸 job：job 置为 failed，run 仍在运行时转为 needs_intervention，并记录事件。
+// 不经过 load：定义加载失败、变量损坏这类问题正是隔离的原因。
+func (e *Engine) quarantine(ctx context.Context, j Job, reason string) {
+	err := e.store.Tx(ctx, func(t *tx) error {
+		run, err := t.runs.FindOneForUpdate(t.ctx, uint64(j.RunID))
+		if err != nil && !errors.Is(err, model.ErrNotFound) {
+			return err
+		}
+		if err := t.finishJob(j, JobFailed, "quarantined: "+reason); err != nil {
+			return err
+		}
+		if run != nil && run.Status == string(RunRunning) {
+			if err := t.runs.UpdateState(t.ctx, run.Id, string(RunNeedsIntervention), run.Version+1, run.ExecCount); err != nil {
+				return err
+			}
+		}
+		return t.event(j.RunID, j.NodeID, j.Iteration, "job_quarantined", "", map[string]any{
+			"job_id": j.ID, "kind": j.Kind, "attempt": j.Attempt, "fail_count": j.FailCount, "reason": reason,
+		})
+	})
+	if errors.Is(err, errLostLease) {
+		return // 已被别的认领接手，由对方处理
+	}
+	if err != nil {
+		logx.WithContext(ctx).Errorf("engine: quarantine job %d: %v", j.ID, err)
+		return
+	}
+	logx.WithContext(ctx).Errorf("engine: job %d (run %d %s %s) quarantined: %s", j.ID, j.RunID, j.Kind, j.NodeID, reason)
 }
 
 // due 过滤出已到期的 job；未到期的（定时器、超时、退避中的重试）留给 tick。
