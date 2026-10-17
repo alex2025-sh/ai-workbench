@@ -4,7 +4,7 @@ Oct 16, 2026 · @rex
 
 ## 目标与边界
 
-自研一个 **DSL 解释型、状态显式持久化** 的轻量工作流引擎，只依赖 TiDB 和已有的 xxl-job，替代 Temporal。核心判断：我们的 workflow 是图数据而不是代码，运行状态可以直接存表，因此不需要 Temporal 的确定性回放体系。
+自研一个 **DSL 解释型、状态显式持久化** 的轻量工作流引擎，只依赖 TiDB 或 MySQL 8.0（均为 MySQL 协议）和已有的 xxl-job，替代 Temporal。核心判断：我们的 workflow 是图数据而不是代码，运行状态可以直接存表，因此不需要 Temporal 的确定性回放体系。
 
 **要做的能力**
 
@@ -42,7 +42,7 @@ Oct 16, 2026 · @rex
 
 ## 总体架构
 
-引擎以库的形式运行在业务 Go 进程内，只依赖 TiDB 和 xxl-job；**推进器是唯一修改节点状态的组件**，其他组件都通过它推进图。
+引擎以库的形式运行在业务 Go 进程内，只依赖 TiDB 或 MySQL 和 xxl-job；**推进器是唯一修改节点状态的组件**，其他组件都通过它推进图。
 
 ```mermaid
 flowchart TB
@@ -55,7 +55,7 @@ flowchart TB
     Pool <--> Adv
     Pool --> Exec[节点执行器<br/>InvokeAction 分发]
     Exec --> Ext[外部系统<br/>Skill/MCP · LiteLLM · Lark]
-    Comp --> DB[(TiDB<br/>plan · run · node_run · job · loop_counter · schedule · event)]
+    Comp --> DB[(TiDB / MySQL<br/>plan · run · node_run · job · loop_counter · schedule · event)]
     Adv --> DB
 ```
 
@@ -72,7 +72,7 @@ Worker 池认领 job、在事务外调用节点执行器，把结果交给推进
 
 ## 数据模型
 
-8 张表，全部在 TiDB。定时器不单独建表，统一作为带 `due_at` 的 job；边状态不单独存储，由节点状态和端口推导。
+8 张表，全部在同一个库（TiDB 或 MySQL）。定时器不单独建表，统一作为带 `due_at` 的 job；边状态不单独存储，由节点状态和端口推导。
 
 ```sql
 -- 编译后的执行计划，发布后不可变
@@ -130,6 +130,7 @@ wf_event ( id, run_id, node_id, iteration, type, payload JSON, actor, created_at
 
 - **`wf_run.biz_key` 唯一**：同一个任务不会因为事件重复投递而启动两个 run。
 - **主键与热点**：实际表结构见 `deploy/sql/engine.sql`。为适配 goctl（单列主键、Insert 省略自增列），联合主键改为 `id` 主键 + 联合唯一键，主键用 `AUTO_INCREMENT`，TiDB 上配合 `NONCLUSTERED` 主键与 `SHARD_ROW_ID_BITS` 打散写入；规模上来后再评估改为 `AUTO_RANDOM` 并由应用生成 ID。
+- **TiDB 与 MySQL 的差异**：设计只用两者共有的能力（主键 `SELECT ... FOR UPDATE`、CAS 更新、JSON 列），MySQL 需 8.0 及以上。需要注意三点：TiDB 多节点下自增 `id` 不保证单调，排序和去重一律用 `seq` 或业务唯一键；TiDB 有单事务大小上限，推进事务只写一个 run 的少量行，不受影响；TiDB 专用选项写在 `/*T! */` 注释中，MySQL 会忽略，同一份 DDL 两边都能执行。
 - **`wf_plan` 的版本从属于任务类型**：`plan_id` 为任务类型 key，`version` 即任务类型的发布版本，由发布清单引用；workflow 不单独对用户暴露版本号（见《AI 任务平台设计概要》「版本管理」）。
 - **`wf_event` 只追加、不更新**：审计、画布回放、指标统计都从这里读，与执行状态表解耦。
 
@@ -178,7 +179,7 @@ DSL 是“节点 + 端口 + 连线”的图；编译器在发布时完成全部�
 
 ### 一次节点执行的完整流程
 
-1. **认领**：worker 用 CAS 抢占 job，参考 Camunda 的锁拥有者 + 锁过期时间做法。TiDB 不支持 `SKIP LOCKED`，CAS 方式在 TiDB 上可直接使用。
+1. **认领**：worker 用 CAS 抢占 job，参考 Camunda 的锁拥有者 + 锁过期时间做法。TiDB 不支持 `SKIP LOCKED`，CAS 方式在 TiDB 上可直接使用。MySQL 8.0 虽然支持 SKIP LOCKED，也统一用 CAS，两种库的行为保持一致。
 2. **执行**：事务外调用节点执行器（skill、LLM、发卡片等），不持有任何数据库锁。
 3. **提交**：开启悲观事务，锁 run 行，做防护校验，写结果，传播，插入新 job，全部一次提交。
 4. **派发**：提交成功后，把新就绪的 job 直接交给本进程 worker 池；ticker 只做兜底。

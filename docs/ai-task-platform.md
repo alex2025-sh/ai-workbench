@@ -291,7 +291,7 @@ internal/
 
 ### 接入方式
 
-- **协议**：接口全部写在 proto 中，每个方法用 gateway 的 `bgw.v1.method_options` 声明 HTTP 路径、方法和限流规则。路径约定为 `/ai_workbench/api/v1/<资源>/<动作>`，统一使用 POST。
+- **协议**：接口全部写在 proto 中，每个方法用 gateway 的 `bgw.v1.method_options` 声明 HTTP 路径、方法和限流规则。路径约定为 `/byai_platform/api/v1/<资源>/<动作>`，统一使用 POST。
 - **身份**：调用人身份由 gateway 认证后写入 gRPC metadata，服务端从 metadata 读取；请求消息中不出现 `actor`、`viewer` 这类由前端填写的身份字段。
 - **权限**：接口级权限在 BSP 权限平台按方法配置，由 gateway 执行，平台内不实现权限判断。
 - **Lark 回调同样走 gateway**：gateway 透传原始请求体与请求头，回调作为 gRPC 方法接收，平台不再单独部署 HTTP 服务。
@@ -299,7 +299,7 @@ internal/
 ```protobuf
 rpc SaveTaskTypeDraft(SaveTaskTypeDraftReq) returns (SaveTaskTypeDraftResp) {
   option (bgw.v1.method_options) = {
-    path       : "/ai_workbench/api/v1/task_type/draft/save";
+    path       : "/byai_platform/api/v1/task_type/draft/save";
     http_method: HTTP_METHOD_POST;
     filters    : [{ name: FILTER_BIZ_LIMITER_V2; args: '--rules=[{"rate":20, "ip":true, "path":true}]' }];
   };
