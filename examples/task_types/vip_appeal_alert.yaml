@@ -1,6 +1,8 @@
 # VIP 工单提醒：VIP 用户的风控工单进入待审核后通知 RM；提交 48 小时后仍未审核完成，再提醒一次；
 # 7 天后仍未完成，升级给 VIP 客服组长。
 #
+# 工单在中途审核完成时，扫描发现状态变化（close_when），立即取消 run、任务以 auto_closed 完结，不必等到下一个检查点。
+#
 # 一期没有前端，这份 YAML 由命令行转成 JSON 后调用 SaveTaskTypeDraft 发布，前端上线后提交的是同一种 JSON。
 # 结构定义见 api/schema/task_type.schema.json。
 #
@@ -49,6 +51,7 @@ sources:
     skill: appeal.scan_vip            # 内置 skill：按 (updated_at, id) 增量扫描 appeal 表（读从库）
     input: { batch_size: 200 }
     filter: record.vip_level > 0 && record.appeal_status == "COMMITED"
+    close_when: record.appeal_status != "COMMITED"   # 工单离开待审核：取消提醒，任务自动完结
     mapping:
       appeal_id: record.appeal_id
       appeal_type: record.appeal_type

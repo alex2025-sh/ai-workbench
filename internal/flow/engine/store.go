@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-sql-driver/mysql"
+	"github.com/zeromicro/go-zero/core/logx"
 	"github.com/zeromicro/go-zero/core/stores/sqlx"
 
 	"github.com/alex2025-sh/ai-workbench/internal/flow/compiler"
@@ -54,7 +55,7 @@ type tx struct {
 //
 // 同一个 run 的推进由 run 行锁串行化；不同 run 的事务仍可能在 wf_job 的索引上互相死锁
 // （MySQL 可重复读下的间隙锁），因此遇到死锁或锁等待超时时整体重试：fn 每次都重新加载状态，重试是安全的。
-// 建议连接使用 READ-COMMITTED（DSN 加 transaction_isolation=%27READ-COMMITTED%27），正确性只依赖行锁，不依赖间隙锁。
+// 连接默认使用 READ-COMMITTED（见 bootstrap.ReadCommitted），且 wf_job 只按主键更新，死锁已很少见，这里是兜底。
 func (s *Store) Tx(ctx context.Context, fn func(t *tx) error) error {
 	var err error
 	for attempt := 0; attempt < 5; attempt++ {
@@ -70,6 +71,7 @@ func (s *Store) Tx(ctx context.Context, fn func(t *tx) error) error {
 		if !retryable(err) {
 			return err
 		}
+		logx.WithContext(ctx).Infof("engine: tx retry %d: %v", attempt+1, err)
 		select {
 		case <-ctx.Done():
 			return err

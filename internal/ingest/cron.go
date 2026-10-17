@@ -24,16 +24,21 @@ import (
 // Tasks 是 cron 来源用到的任务中心能力。
 type Tasks interface {
 	Create(ctx context.Context, cmd task.CreateCmd) (*task.Task, bool, error)
+	FindByDedupKey(ctx context.Context, key string) (*task.Task, error) // 不存在时返回 nil, nil
 	SetRun(ctx context.Context, id, runID int64) error
 }
 
-// Runs 启动 workflow。
+// Runs 是来源对 workflow 的操作：新数据启动 run，外部状态变化取消 run。
 type Runs interface {
 	StartRun(ctx context.Context, cmd engine.StartRunCmd) (engine.Run, bool, error)
+	Cancel(ctx context.Context, runID int64, actor, reason string) error
 }
 
-// CronRunner 触发到期的 cron 来源：调用查询 skill 增量扫描 → 过滤 → 映射为 payload → 按 schema 校验
-// → 按去重键创建任务 → 启动 workflow。由 ticker 调用。
+// CronRunner 触发到期的 cron 来源：调用查询 skill 增量扫描，对每条记录：
+//   - close_when 为 true：按去重键找到未完结的任务，取消它的 run（外部状态变化推动流程结束）；
+//   - filter 为 true：映射为 payload → 按 schema 校验 → 按去重键创建任务 → 启动 workflow。
+//
+// 由 ticker 调用。
 type CronRunner struct {
 	Schedules model.WfScheduleModel
 	Plans     engine.PlanSource
@@ -55,6 +60,7 @@ type FireResult struct {
 	Filtered int
 	Invalid  int
 	Created  int
+	Closed   int
 	Err      error
 }
 
@@ -137,9 +143,14 @@ func (r *CronRunner) fire(ctx context.Context, s *model.WfSchedule) fireOutcome 
 		return fail(fmt.Errorf("skill %s output: %w", src.Skill, err))
 	}
 
-	var filter *expr.Program
+	var filter, closeWhen *expr.Program
 	if src.Filter != "" {
 		if filter, err = expr.Compile(src.Filter); err != nil {
+			return fail(err)
+		}
+	}
+	if src.CloseWhen != "" {
+		if closeWhen, err = expr.Compile(src.CloseWhen); err != nil {
 			return fail(err)
 		}
 	}
@@ -151,6 +162,23 @@ func (r *CronRunner) fire(ctx context.Context, s *model.WfSchedule) fireOutcome 
 			continue
 		}
 		env := expr.Env{expr.RootRecord: rec}
+		if closeWhen != nil {
+			hit, err := closeWhen.Run(env)
+			if err != nil {
+				res.Invalid++
+				continue
+			}
+			if b, _ := hit.(bool); b {
+				closed, err := r.close(ctx, def, src, env, s.Name)
+				if err != nil {
+					res.Invalid++
+					logx.WithContext(ctx).Errorf("ingest: %s close: %v", s.Name, err)
+				} else if closed {
+					res.Closed++
+				}
+				continue
+			}
+		}
 		if filter != nil {
 			ok, err := filter.Run(env)
 			if err != nil {
@@ -177,24 +205,46 @@ func (r *CronRunner) fire(ctx context.Context, s *model.WfSchedule) fireOutcome 
 	return res
 }
 
-// ingest 把一条记录映射为 payload，创建任务并启动 workflow。重复数据由任务的去重键拦截；
-// 任务已存在但 run 还没启动（上次启动前进程崩溃）时补启动，run 的 biz_key 保证不会重复。
-func (r *CronRunner) ingest(ctx context.Context, def *engine.Definition, src *spec.Source, env expr.Env) (bool, error) {
+// close 按记录的去重键找到未完结的任务并取消它的 run；任务由引擎同步为 solved（auto_closed）。
+func (r *CronRunner) close(ctx context.Context, def *engine.Definition, src *spec.Source, env expr.Env, schedule string) (bool, error) {
+	payload, body, err := mapRecord(src, env)
+	if err != nil {
+		return false, err
+	}
+	dedup, err := dedupKey(def.Spec, payload, body)
+	if err != nil {
+		return false, err
+	}
+	t, err := r.Tasks.FindByDedupKey(ctx, def.Key+":"+dedup)
+	if err != nil || t == nil || t.Status.IsTerminal() || t.RunID == 0 {
+		return false, err
+	}
+	return true, r.Runs.Cancel(ctx, t.RunID, "source:"+src.ID, "close_when matched in "+schedule)
+}
+
+func mapRecord(src *spec.Source, env expr.Env) (map[string]any, []byte, error) {
 	payload := map[string]any{}
 	for field, e := range src.Mapping {
 		p, err := expr.Compile(e)
 		if err != nil {
-			return false, err
+			return nil, nil, err
 		}
 		v, err := p.Run(env)
 		if err != nil {
-			return false, fmt.Errorf("mapping %s: %w", field, err)
+			return nil, nil, fmt.Errorf("mapping %s: %w", field, err)
 		}
 		if v != nil {
 			payload[field] = v
 		}
 	}
 	body, err := json.Marshal(payload)
+	return payload, body, err
+}
+
+// ingest 把一条记录映射为 payload，创建任务并启动 workflow。重复数据由任务的去重键拦截；
+// 任务已存在但 run 还没启动（上次启动前进程崩溃）时补启动，run 的 biz_key 保证不会重复。
+func (r *CronRunner) ingest(ctx context.Context, def *engine.Definition, src *spec.Source, env expr.Env) (bool, error) {
+	payload, body, err := mapRecord(src, env)
 	if err != nil {
 		return false, err
 	}

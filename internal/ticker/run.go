@@ -8,31 +8,44 @@ import (
 	xxl "github.com/xxl-job/xxl-job-executor-go"
 	"github.com/zeromicro/go-zero/core/logx"
 
+	"github.com/alex2025-sh/ai-workbench/internal/flow/engine"
 	"github.com/alex2025-sh/ai-workbench/internal/ingest"
 )
 
-// Ticker 实现 Handler：触发到期的 cron 来源。
+// Ticker 实现 Handler，是引擎唯一的时钟：
+//  1. 触发到期的 cron 来源（wf_schedule），新数据创建任务并启动 run，run 启动后就地推进；
+//  2. 执行到期的 job：定时器、超时、退避后的重试，以及进程崩溃后租约过期的 job。
 //
-// 到期的 timer / timeout job 与租约过期的 job 由 Worker 的轮询认领（CAS 保证不重复），
-// 因此 Tick 只负责 wf_schedule；巡检告警在运维阶段补上。
+// 平时没有任何轮询：推进只由来源、人工操作、外部状态变化和这里的 tick 触发。
 type Ticker struct {
-	Cron *ingest.CronRunner
+	Cron    *ingest.CronRunner
+	Engine  *engine.Engine
+	Options engine.TickOptions
 }
 
 // Tick 实现 Handler。
 func (t *Ticker) Tick(ctx context.Context, _ Shard) error {
+	var firstErr error
 	for _, r := range t.Cron.FireDue(ctx) {
-		if r.Err != nil {
-			return fmt.Errorf("ticker: %s: %w", r.Schedule, r.Err)
+		if r.Err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("ticker: %s: %w", r.Schedule, r.Err)
 		}
 		if r.Scanned > 0 {
-			logx.WithContext(ctx).Infof("ticker: %s scanned=%d filtered=%d invalid=%d created=%d", r.Schedule, r.Scanned, r.Filtered, r.Invalid, r.Created)
+			logx.WithContext(ctx).Infof("ticker: %s scanned=%d filtered=%d invalid=%d created=%d closed=%d",
+				r.Schedule, r.Scanned, r.Filtered, r.Invalid, r.Created, r.Closed)
 		}
 	}
-	return nil
+	n, err := t.Engine.ProcessDue(ctx, t.Options)
+	if n > 0 {
+		logx.WithContext(ctx).Infof("ticker: processed %d due jobs", n)
+	}
+	if err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("ticker: process due jobs: %w", err)
+	}
+	return firstErr
 }
 
-// RunLocal 用进程内定时器代替 xxl-job，每 interval 触发一次，用于本地开发。
+// RunLocal 用进程内定时器代替 xxl-job 调度中心，每 interval 触发一次 Tick，只用于本地开发。
 func RunLocal(ctx context.Context, h Handler, interval time.Duration) {
 	tk := time.NewTicker(interval)
 	defer tk.Stop()

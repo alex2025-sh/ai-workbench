@@ -32,7 +32,7 @@ api/schema/       task_type.schema.json：任务类型 JSON 的结构契约（�
 cmd/wbctl/        命令行：校验 YAML / JSON、导出 body_json 与执行计划、节点类型目录
 examples/         任务类型示例（vip_appeal_alert.yaml），测试保证它们始终能通过校验
 app/rpc/          go-zero zrpc 服务：对外 gRPC 接口（workbench.proto；生成后含 pb/server/logic/svc/etc）
-app/worker/       引擎执行进程（main + etc/worker.yaml）：Worker 池、ticker（本地定时器或 xxl-job）
+app/worker/       引擎进程（main + etc/worker.yaml）：ticker（本地定时器或 xxl-job），触发 cron 来源与到期 job；无常驻工作池
 deploy/sql/       表结构（goctl model 的输入）
 deploy/mock/      本地 mock：业务方的 appeal 表与样例数据、VIP → RM 关系（不进 goctl）
 internal/model/   goctl 生成的数据访问层
@@ -62,7 +62,8 @@ internal/event/ subscription/ mcp/
 - **单人决策**：每个人工节点只由一个人决策；多人参与就拆成多个人工节点串联。
 - **引擎是流程的事实来源，任务表是投影**：节点事件经 `sync_task` job 异步同步，任务中心只接受更大的 `seq`。
 - **写入入口**：影响流程的操作（选择、推迟、退回）走引擎 Signal；开始处理、认领、调整优先级、转派直接走任务中心。
-- **推进可复现**：外部 IO 在事务外执行；图的推进只在锁 `wf_run` 行的悲观事务内完成；遍历编译期排好序的切片，不遍历 map；不在推进逻辑里读系统时间（用注入的 Clock）。
+- **事件驱动，不轮询**：流程只由事件推进（来源启动 run、人工 Signal、外部状态变化 Cancel、xxl-job tick 唤醒到期 job），事件处理完后就地执行新就绪的节点；`wf_job` 只存将来或待恢复的工作。不引入常驻工作池。
+- **推进可复现**：外部 IO 在事务外执行；图的推进只在锁 `wf_run` 行的悲观事务内完成；遍历编译期排好序的切片，不遍历 map；不在推进逻辑里读系统时间（用注入的 Clock）。`wf_job` 只按主键更新，连接使用 READ-COMMITTED。
 - **至少执行一次**：所有外部动作带幂等键 `run_id:node_id:iteration[:seq]`。
 - **金额不经过 float64**：schema 中金额为 string，解码用 `UseNumber()`，计算用 decimal。
 - **出口统一脱敏**：按 schema 的 `x-pii` 在发往 Lark、LLM、日志时处理。
@@ -87,5 +88,5 @@ make validate  # 用 wbctl 校验 examples/ 下的任务类型
 
 ## 当前进度
 
-- 已完成：任务类型 JSON 契约与编译器；引擎阶段一与阶段二的主体（推进器、Worker 池、重试与防护、timer、human_choice 的等待 / 信号 / 超时、cron 来源、任务状态同步、xxl-job ticker）；VIP 工单提醒在本地端到端跑通。
+- 已完成：任务类型 JSON 契约与编译器；引擎阶段一与阶段二的主体（事件驱动的推进器、重试与防护、timer、human_choice 的等待 / 信号 / 超时、cron 来源与 `close_when`、任务状态同步、xxl-job ticker）；VIP 工单提醒在本地端到端跑通。
 - 未完成：Lark 真实接入与卡片回调、重复提醒与 snooze、受控的环（rework）运行期、共享组件（`key@version`）解析、gRPC 服务实现、变更集与审批。

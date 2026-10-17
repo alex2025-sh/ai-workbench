@@ -47,28 +47,30 @@ Oct 16, 2026 · @rex
 ```mermaid
 flowchart TB
     Cfg[配置中心<br/>发布 DSL] --> Comp[编译器<br/>校验 · 生成 Plan]
-    TaskC[任务中心<br/>启动 · 取消 run] --> API[引擎 API<br/>StartRun · Signal · Cancel · Admin]
+    Src[来源<br/>cron 扫描 · Kafka · API] -->|新数据 StartRun<br/>状态变化 Cancel| API[引擎 API<br/>StartRun · Signal · Cancel · Admin]
+    TaskC[任务中心<br/>取消 run] --> API
     LarkCB[Lark 回调<br/>人工选择信号] --> API
-    XXL[xxl-job<br/>wf-ticker 定时触发] --> Tick[Ticker 处理器<br/>到期 job · 租约 · cron]
-    API --> Adv[[推进器<br/>锁 run · 防护校验 · 传播 · 写 job]]
-    Tick --> Pool[Worker 池<br/>CAS 认领 · 事务外执行]
-    Pool <--> Adv
-    Pool --> Exec[节点执行器<br/>InvokeAction 分发]
+    XXL[xxl-job<br/>wf-ticker 定时触发] --> Tick[Ticker 处理器<br/>cron 来源 · 到期 job]
+    Tick --> Src
+    API --> Drive[驱动循环<br/>CAS 认领 · 事务外执行]
+    Tick --> Drive
+    Drive <--> Adv[[推进器<br/>锁 run · 防护校验 · 传播 · 写 job]]
+    Drive --> Exec[节点执行器<br/>InvokeAction 分发]
     Exec --> Ext[外部系统<br/>Skill/MCP · LiteLLM · Lark]
     Comp --> DB[(TiDB / MySQL<br/>plan · run · node_run · job · loop_counter · schedule · event)]
     Adv --> DB
 ```
 
-Worker 池认领 job、在事务外调用节点执行器，把结果交给推进器提交；推进器提交后把新就绪的 job 派发回 Worker 池。引擎 API 的 Signal 与 Cancel 同样经推进器落库。
+引擎没有常驻的工作池，也不轮询数据库，**只在事件到来时推进**。引擎 API 收到事件后经推进器落库，再由驱动循环在同一个调用里认领新就绪的 job、事务外执行节点、交给推进器提交，如此反复，直到流程停在等待点（人工、定时器、重试退避）或结束。xxl-job 的 tick 是唯一的时钟，唤醒到期的定时器、超时和重试。
 
 | 组件 | 职责 |
 | --- | --- |
 | 编译器 | 发布时校验 DSL，生成不可变的 Plan |
 | 引擎 API | `StartRun`（按 `biz_key` 幂等）、`Signal`、`Cancel`、管理操作 |
 | 推进器 | 锁 run 行；防护校验；写节点结果；边传播与死路径消除；插入新 job；环的区域重置 |
-| Worker 池 | CAS 认领 job，事务外执行节点，提交结果 |
+| 驱动循环 | 事件处理完后就地认领并执行新就绪的 job，直到流程停在等待点或结束 |
 | 节点执行器 | 原生节点本地处理；动作节点统一经 `InvokeAction` 分发到 skill、LLM、Lark、邮件 |
-| Ticker 处理器 | 响应 xxl-job：触发到期 job、回收过期租约、触发 cron 来源、巡检告警 |
+| Ticker 处理器 | 响应 xxl-job：触发到期的 cron 来源；执行到期的定时器、超时、重试与租约过期的 job；巡检告警 |
 
 ## 数据模型
 
@@ -105,7 +107,8 @@ wf_node_run (
 -- 环重置时归档旧轮次，用于审计与画布回放
 wf_node_run_history ( run_id, node_id, iteration, status, port, output, ... )
 
--- 统一的任务表：立即执行、超时、唤醒、定时器都是 job
+-- 统一的任务表：立即执行、超时、唤醒、定时器都是 job。
+-- 立即执行的 job 在产生它的调用里就被执行；留在表里等 tick 的只有将来的工作和需要恢复的工作
 wf_job (
   id BIGINT AUTO_RANDOM PRIMARY KEY,
   run_id, node_id, iteration,
@@ -177,12 +180,32 @@ DSL 是“节点 + 端口 + 连线”的图；编译器在发布时完成全部�
 
 执行分为两段：**事务外执行节点（外部 IO），事务内推进图**。同一个 run 的所有推进通过锁 `wf_run` 行串行化，这是正确性的核心。
 
+### 事件驱动
+
+流程由外部状态推动，引擎只响应四种事件：
+
+| 事件 | 引擎入口 | 来自 |
+| --- | --- | --- |
+| 新数据 | `StartRun`（按 `biz_key` 幂等） | cron 扫描、Kafka、API 推送 |
+| 人工操作 | `Signal` | Lark 卡片回调、前端 |
+| 外部状态变化 | `Cancel` | 来源的 `close_when`、任务中心 |
+| 时间到期 | `ProcessDue` | xxl-job `wf-ticker` |
+
+每个事件提交后，驱动循环在同一个调用里继续执行新就绪的节点（就地推进），直到流程停在等待点或结束。`wf_job` 因此只保存“现在不能做”的工作：定时器、超时、退避后的重试，以及进程在执行中崩溃后留下的租约过期的 job，它们都由 tick 执行。没有事件、也没有到期的 job 时，引擎不产生任何查询。
+
+早期版本用常驻 Worker 池每秒轮询 `wf_job`：空闲时也持续扫表，多个进程的轮询与范围更新在 MySQL 可重复读下互相持有间隙锁，并发测试中出现过死锁。流程本身就是由外部状态推动的，轮询既不必要，也引入了额外的并发面，因此改为事件驱动。
+
+取舍：
+
+- **定时精度等于 tick 周期**（10 到 30 秒）。对小时、天级的提醒足够；需要秒级精度的场景不适合这个引擎。
+- **事件调用要等下游自动节点执行完才返回**。Lark 回调要求 3 秒内响应，`CallbackService` 在信号提交后即可返回，把后续推进放到后台继续；进程此时崩溃，未执行的 job 都在表里，由下一次 tick 接手。
+
 ### 一次节点执行的完整流程
 
-1. **认领**：worker 用 CAS 抢占 job，参考 Camunda 的锁拥有者 + 锁过期时间做法。TiDB 不支持 `SKIP LOCKED`，CAS 方式在 TiDB 上可直接使用。MySQL 8.0 虽然支持 SKIP LOCKED，也统一用 CAS，两种库的行为保持一致。认领成功后重新读取 job 的 `attempt`：执行时用它给节点打上围栏，内存里来自较早轮询的 job 副本可能已经过期。
+1. **认领**：驱动循环用 CAS 抢占 job，参考 Camunda 的锁拥有者 + 锁过期时间做法。TiDB 不支持 `SKIP LOCKED`，CAS 方式在 TiDB 上可直接使用。MySQL 8.0 虽然支持 SKIP LOCKED，也统一用 CAS，两种库的行为保持一致。认领成功后重新读取 job 的 `attempt`：执行时用它给节点打上围栏，调用方手里的 job 副本（例如 tick 批量查出的到期 job）可能已经过期。
 2. **执行**：事务外调用节点执行器（skill、LLM、发卡片等），不持有任何数据库锁。
 3. **提交**：开启悲观事务，锁 run 行，做防护校验，写结果，传播，插入新 job，全部一次提交。
-4. **派发**：提交成功后，把新就绪的 job 直接交给本进程 worker 池；ticker 只做兜底。
+4. **继续**：提交返回本次插入的 job。已到期的（新就绪节点、`sync_task`）在同一个调用里回到第 1 步立即执行；未到期的（定时器、超时、重试）留在表里，等 tick 唤醒。
 
 ```sql
 -- 1. 认领（影响行数为 0 = 被别人抢走）
@@ -200,7 +223,7 @@ node := tx.Get("wf_node_run", runID, nodeID)
 
 // 防护校验：节点仍在执行、轮次和尝试次数与认领时一致
 if node.Status != Running || node.Iteration != job.Iteration || node.Attempt != job.Attempt {
-    tx.Rollback()                                      // 僵尸 worker 或已被退回，结果丢弃
+    tx.Rollback()                                      // 租约已被别人接手，或已被退回，结果丢弃
     return
 }
 
@@ -226,7 +249,7 @@ tx.Commit()
 
 ### 为什么需要防护校验
 
-Camunda 记录过一个典型问题：执行时间超过锁时长的 job 会被另一个执行器重新认领，前一个执行器完成后再写回，就会产生冲突甚至并行执行。我们用 `attempt` 和 `iteration` 做围栏：重新认领时 `attempt` 加 1，旧 worker 提交时发现不一致，结果直接丢弃。外部副作用依靠幂等键兜底（见“失败处理、幂等与恢复”）。
+Camunda 记录过一个典型问题：执行时间超过锁时长的 job 会被另一个执行器重新认领，前一个执行器完成后再写回，就会产生冲突甚至并行执行。我们用 `attempt` 和 `iteration` 做围栏：重新认领时 `attempt` 加 1，原执行者提交时发现不一致，结果直接丢弃。外部副作用依靠幂等键兜底（见“失败处理、幂等与恢复”）。
 
 ## 人工节点、定时器与 xxl-job 时钟
 
@@ -264,9 +287,11 @@ Camunda 记录过一个典型问题：执行时间超过锁时长的 job 会被�
 只注册一个调度任务 `wf-ticker`，每 10 到 30 秒触发一次：
 
 1. 扫描 `wf_schedule`，对到期的 cron 来源先用乐观锁推进 `next_fire_at`（防止多实例重复触发），推进成功的实例再执行扫描并保存游标。
-2. 巡检：长时间 `waiting` 或 `needs_intervention` 的 run 告警。
+   记录满足 `close_when` 时取消对应任务的 run，满足 `filter` 时创建任务并启动 run；两者都是事件，run 随即就地推进。
+2. 执行到期的 job：按 `due_at` 分批查出到期的 `timer` / `timeout` / `wake` / 重试 job 与租约过期的 job，并行认领、执行，每个 job 执行后就地推进到下一个等待点。认领条件本身包含“未被认领或租约已过期”，多实例同时 tick 时 CAS 保证同一个 job 只被一个实例拿到。
+3. 巡检：长时间 `waiting` 或 `needs_intervention` 的 run 告警。
 
-到期的 `timeout` / `wake` / `timer` job 和租约过期的 job 不需要 ticker 单独处理：Worker 每秒轮询一次到期 job，认领条件本身就包含“未被认领或租约已过期”，CAS 保证同一个 job 只被一个 worker 拿到。
+这是引擎唯一的时钟，进程内没有其他定时器或轮询。
 
 要求：ticker 幂等，重复触发无副作用，漏触发由下一次补上。实例多了之后使用 xxl-job 的分片广播，按 `run_id` 取模分担扫描。
 
@@ -323,7 +348,7 @@ Camunda 记录过一个典型问题：执行时间超过锁时长的 job 会被�
 ### 状态同步
 
 1. 推进器在推进事务内插入一个 `kind = sync_task` 的 job，携带 `task_id`、目标状态、当前处理人和 `seq`（取 `wf_run.version`）。它与节点状态的变更同事务提交，二者要么都发生，要么都不发生。
-2. worker 执行该 job，调用任务中心 `UpdateStatus(task_id, status, assignee, seq)`。任务中心只接受比当前 `seq` 更新的写入，重复或乱序到达的请求直接忽略。
+2. 该 job 在推进它的同一个调用里立即执行（失败时退避，由 tick 重试），调用任务中心 `UpdateStatus(task_id, status, assignee, seq)`。任务中心只接受比当前 `seq` 更新的写入，重复或乱序到达的请求直接忽略。
 3. 调用失败按重试策略重试，任务状态通常在秒级内与引擎一致。
 
 xxl-job 只通知一台机器，解决的是 ticker 不重复触发；这里防的是**部分失败**（节点状态写入后进程崩溃、任务状态没来得及更新），由带重试的 `sync_task` job 补齐。任务中心将来独立部署、独立数据库也不受影响。
@@ -410,7 +435,7 @@ xxl-job 只通知一台机器，解决的是 ticker 不重复触发；这里防�
 | --- | --- | --- |
 | run 启动 | `wf_run.biz_key` | 事件重复投递导致重复启动 |
 | job 插入 | `run_id:node_id:iteration:kind` | 传播重复执行导致重复调度 |
-| 外部动作 | `run_id:node_id:iteration[:序号]`，随请求传给下游 | worker 在外部调用后、提交前崩溃导致的重复发送 |
+| 外部动作 | `run_id:node_id:iteration[:序号]`，随请求传给下游 | 进程在外部调用后、提交前崩溃导致的重复发送 |
 | 信号 | 节点状态条件更新 | 重复点击、点击与超时并发 |
 
 事务内入队参考 River：节点完成、传播结果、新 job 插入在同一事务提交，不存在“状态已更新但 job 没插入”的中间态，也不需要额外的 outbox。
@@ -419,12 +444,12 @@ xxl-job 只通知一台机器，解决的是 ticker 不重复触发；这里防�
 
 | 故障 | 恢复方式 |
 | --- | --- |
-| worker 执行中崩溃 | 租约过期后 ticker 回收，job 重新认领，`attempt + 1` |
+| 进程在执行中崩溃 | 已认领的 job 租约过期后由下一次 tick 重新认领，`attempt + 1`；已提交、尚未执行的 job 本来就在表里，tick 照常执行 |
 | 提交事务失败 | 事务回滚，job 仍为认领状态，租约过期后重试 |
-| 不同 run 的事务在 `wf_job` 索引上死锁 | 推进事务整体重试（最多 5 次，每次重新加载状态）；MySQL 建议使用 READ-COMMITTED，正确性只依赖 run 行锁 |
-| 进程发版重启 | 状态全部在库中，重启后由 ticker 与 worker 继续 |
+| 不同 run 的事务在 `wf_job` 索引上死锁 | 预防：`wf_job` 只按主键更新（撤销 job 时先查出 id 再逐条更新），连接默认使用 READ-COMMITTED，避免范围更新的间隙锁；兜底：推进事务遇到死锁或锁等待超时整体重试（最多 5 次，每次重新加载状态），正确性只依赖 run 行锁 |
+| 进程发版重启 | 状态全部在库中，没有内存队列，重启后由 tick 继续 |
 | xxl-job 漏触发 | 下一次 tick 补上，延迟一个周期 |
-| 数据库短暂不可用 | worker 认领失败指数退避（参考 Camunda 的认领退避） |
+| 数据库短暂不可用 | 事件入口返回错误，由调用方重试（来源在下次扫描时重放、Lark 回调重试）；tick 在下一个周期补上 |
 
 ## 可观测、运维与测试
 
@@ -451,8 +476,8 @@ xxl-job 只通知一台机器，解决的是 ticker 不重复触发；这里防�
 | 编译器单测 | 环检测、端口校验、支配关系与单入口判定、变量引用可达性 |
 | 传播单测 | 表驱动：分支、汇合 all/any、跳过向下传播、嵌套分支 |
 | 时间相关 | 注入可控时钟，快进验证 48h 超时、重复提醒、snooze |
-| 并发 | 两个分支同时到达 `merge`；点击与超时同时发生；同一 job 被两个 worker 认领 |
-| 故障注入 | 在认领后、外部调用后、提交前、提交后分别杀掉 worker，验证无丢失、无重复推进 |
+| 并发 | 两个分支同时到达 `merge`；点击与超时同时发生；同一 job 被两个进程认领；多个进程同时接收事件并 tick |
+| 故障注入 | 在认领后、外部调用后、提交前、提交后分别杀掉进程，验证无丢失、无重复推进 |
 | 退回 | 区域重置后旧轮次的 job 全部作废；达到上限后走 `on_exhausted` |
 
 ## 扩展性
@@ -476,7 +501,7 @@ xxl-job 只通知一台机器，解决的是 ticker 不重复触发；这里防�
 | 子流程、动态扇出 | 新增一个原语：启动子 run，完成时回调父节点 | 复用合规复核流程；对一组 VIP 逐个跟进 |
 | 调度与限流 | 小：`wf_job` 加优先级字段，按动作类型配置并发与速率 | P0 任务优先；Lark API 调用频率限制 |
 | 在途实例迁移 | 小：兼容性检查 + 管理 API | 修复流程缺陷后让在途 run 切到新版本 |
-| 规模 | 不改模型 | 按 `run_id` 分片 worker 与 ticker |
+| 规模 | 不改模型 | 按 `run_id` 分片 tick |
 | 执行后端 | 不改 DSL 与业务 | 通过执行器接口切换到 Temporal |
 
 ### 不擅长的场景
@@ -488,10 +513,10 @@ xxl-job 只通知一台机器，解决的是 ticker 不重复触发；这里防�
 
 先把并发正确性做扎实，再加能力；每一阶段都以 VIP 工单提醒作为验收用例。
 
-当前进度：阶段一已完成；阶段二除 Lark 真实接入（目前为 mock）、重复提醒与 snooze 外已完成，VIP 工单提醒在本地 MySQL 上端到端跑通（`internal/bootstrap` 的端到端测试）。
+当前进度：阶段一已完成；阶段二除 Lark 真实接入（目前为 mock）、重复提醒与 snooze 外已完成，执行模型为事件驱动（无常驻工作池），来源支持 `close_when`；VIP 工单提醒在本地 MySQL 上端到端跑通（`internal/bootstrap` 的端到端测试）。
 
 1. **阶段一：核心执行**。数据模型（含 `iteration` 字段，恒为 0）；编译器（拓扑排序、端口与配置校验）；认领、执行、提交、传播；`condition`、`merge`、动作节点；并发与故障注入测试。验收：手写 DSL 跑通无人工节点的流程。
-2. **阶段二：等待与时钟**。`human_choice`（超时可选、重复提醒、snooze）、`timer`；xxl-job ticker；租约回收；`wf_schedule` cron 来源；Lark 回调接入信号 API；任务状态同步（sync\_task）；节点级分配、模板与编译期继承。验收：VIP 工单提醒端到端上线。
+2. **阶段二：等待与时钟**。`human_choice`（超时可选、重复提醒、snooze）、`timer`；xxl-job ticker；租约回收；`wf_schedule` cron 来源与 `close_when`；Lark 回调接入信号 API；任务状态同步（sync\_task）；节点级分配、模板与编译期继承。验收：VIP 工单提醒端到端上线。
 3. **阶段三：运维与可视化**。管理 API 与人工干预；运行态画布着色；试运行；指标与告警；数据保留。
 4. **阶段四：受控的环**。`rework` 边的编译期校验（支配关系、单入口、嵌套）；区域重置；防死循环上限。
 

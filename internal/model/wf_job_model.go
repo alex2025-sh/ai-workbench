@@ -91,24 +91,39 @@ func (m *customWfJobModel) Release(ctx context.Context, id uint64, owner string,
 	return affected(m.conn.ExecCtx(ctx, query, dueAt, truncate(lastError, 1024), id, owner))
 }
 
+// CancelPending 与 CancelRun 先用普通读取找出 id，再逐条按主键更新：
+// 不在 run_id 索引上做范围更新，避免可重复读下的间隙锁让不同 run 的事务互相死锁。
+
 func (m *customWfJobModel) CancelPending(ctx context.Context, runID uint64, nodeID string, iteration int64, kinds []string) error {
 	if len(kinds) == 0 {
 		return nil
 	}
-	query := fmt.Sprintf("update %s set `status` = 'cancelled' where `run_id` = ? and `node_id` = ? and `iteration` = ? and `status` = 'pending' and `kind` in (%s)",
+	query := fmt.Sprintf("select `id` from %s where `run_id` = ? and `node_id` = ? and `iteration` = ? and `status` = 'pending' and `kind` in (%s)",
 		m.table, strings.TrimSuffix(strings.Repeat("?,", len(kinds)), ","))
 	args := []any{runID, nodeID, iteration}
 	for _, k := range kinds {
 		args = append(args, k)
 	}
-	_, err := m.conn.ExecCtx(ctx, query, args...)
-	return err
+	return m.cancelIDs(ctx, query, args...)
 }
 
 func (m *customWfJobModel) CancelRun(ctx context.Context, runID uint64) error {
-	query := fmt.Sprintf("update %s set `status` = 'cancelled' where `run_id` = ? and `status` = 'pending' and `kind` <> 'sync_task'", m.table)
-	_, err := m.conn.ExecCtx(ctx, query, runID)
-	return err
+	query := fmt.Sprintf("select `id` from %s where `run_id` = ? and `status` = 'pending' and `kind` <> 'sync_task'", m.table)
+	return m.cancelIDs(ctx, query, runID)
+}
+
+func (m *customWfJobModel) cancelIDs(ctx context.Context, query string, args ...any) error {
+	var ids []uint64
+	if err := m.conn.QueryRowsCtx(ctx, &ids, query, args...); err != nil {
+		return err
+	}
+	update := fmt.Sprintf("update %s set `status` = 'cancelled' where `id` = ? and `status` = 'pending'", m.table)
+	for _, id := range ids {
+		if _, err := m.conn.ExecCtx(ctx, update, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func truncate(s string, n int) string {

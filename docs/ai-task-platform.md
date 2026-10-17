@@ -210,7 +210,7 @@ view:
 | 任务 | 4. 任务中心 Task Service | 任务的唯一事实来源 | 状态机与转移表；乐观锁；Task Event 审计；SLA 计算；源工单状态变化时自动关闭任务 |
 | 任务 | 5. 分配服务 Assignment Service | 决定处理人 | 策略链（解析器 → 过滤器 → 选择 → 兜底）；RM-VIP 关系；负载统计；认领 CAS；转派留痕；职责分离校验 |
 | 流程 | 6. 流程引擎 Workflow Engine | 按 DSL 驱动任务前进 | 发布期编译器（校验、拓扑分析、生成 Plan）；轻量引擎的推进器（死路径消除、信号、受控的环、任务状态同步），详见《轻量工作流引擎设计》；节点执行器注册表 |
-| 流程 | 7. 动作运行时 Action Runtime | 执行所有外部 IO | 引擎 Worker 池中的通用 `InvokeAction` 动作，分发到：skill 调用（MCP / Skillhub）、LLM（Eino → LiteLLM）、Lark、邮件、emit\_event |
+| 流程 | 7. 动作运行时 Action Runtime | 执行所有外部 IO | 引擎推进时调用的通用 `InvokeAction` 动作，分发到：skill 调用（MCP / Skillhub）、LLM（Eino → LiteLLM）、Lark、邮件、emit\_event |
 | 触达 | 8. 视图渲染器 View Renderer | 模板 + 任务 → 各渠道内容 | 渠道无关视图 DSL；Lark 卡片 / Web / 邮件渲染器；按 `x-pii` 脱敏、按 `x-format` 格式化 |
 | 触达 | 9. Lark 网关 Lark Gateway | 发送、回调、卡片更新 | 回调验签；open\_id → 内部用户；按任务表鉴权；调用 RunService.Signal；`task_id → message_id` 映射，状态变化时更新原卡片；降噪合并 |
 | 控制面 | 10. 配置中心 Config Registry | 所有配置的版本与发布 | 任务类型（含自有组件）与共享组件；草稿 → 变更集 → 公司审批平台 → 原子发布；发布清单；dry-run 试运行 |
@@ -255,7 +255,7 @@ flowchart TB
 app/
   rpc/                 # 对外 gRPC 接口（经公司 gateway 暴露给前端与外部系统，含 Lark 回调）
     workbench.proto
-  worker/              # 引擎 Worker 池、推进器、xxl-job ticker 处理器
+  worker/              # 引擎进程：cron 来源与 xxl-job ticker（事件驱动，无常驻工作池）
 deploy/sql/            # 表结构，goctl model 的输入
 internal/
   model/               # goctl model 生成的数据访问层
@@ -407,13 +407,14 @@ vip_ticket_alert v6
 
 | 来源 | 模式 | 在平台内配置的内容 | 前端的试运行 |
 | --- | --- | --- | --- |
-| cron | 平台主动扫描 | 查询 skill 与参数、cron 表达式与时区、字段映射、去重键 | 立即试跑一次扫描，展示会产出多少条与样例 |
+| cron | 平台主动扫描 | 查询 skill 与参数、cron 表达式与时区、过滤条件、关闭条件、字段映射、去重键 | 立即试跑一次扫描，展示会产出多少条与样例 |
 | Kafka | 控制反转：生产方按平台定义的 topic 与标准事件信封生产 | 事件类型名、过滤条件、字段映射、去重键 | 贴一条样例消息，展示映射结果 |
 | API | 外部系统调用 `IngestService.PushEvent`，请求体同样是标准事件信封 | 事件类型名、过滤条件、字段映射、去重键 | 生成调用示例，贴样例请求展示映射结果 |
 
 - Kafka 采用控制反转：topic 与消息格式由平台定义，生产方按约定生产，配置变更不涉及新增或修改 topic。确有需要接入外部 topic 时再单独开发。
 - Kafka 与 API 两类来源由生产方在信封中标明事件类型，平台按事件类型路由到对应的任务类型。
 - cron 来源发布后落到 `wf_schedule`，由 xxl-job ticker 触发。
+- 关闭条件（`close_when`）让外部状态变化直接推动流程：记录满足条件时，按去重键找到未完结的任务，取消它的 run，任务以 `auto_closed` 完结。例如工单离开待审核，提醒立即停止，不必等到下一个定时检查点。
 - 多个来源可以对应同一个任务类型，共用去重键。
 
 ## 外部系统集成边界

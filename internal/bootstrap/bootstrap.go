@@ -3,6 +3,7 @@ package bootstrap
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/zeromicro/go-zero/core/stores/sqlx"
@@ -27,6 +28,20 @@ type Config struct {
 	Lease         time.Duration `json:",default=2m"`
 }
 
+// ReadCommitted 在 DSN 上加上 READ-COMMITTED 隔离级别（已指定时不改）。
+// 引擎的正确性只依赖 run 行锁，不需要可重复读的间隙锁；去掉间隙锁可以避免不同 run 的事务互相死锁。
+// TiDB 本身没有间隙锁，同样适用。
+func ReadCommitted(dsn string) string {
+	if strings.Contains(dsn, "transaction_isolation") || strings.Contains(dsn, "tx_isolation") {
+		return dsn
+	}
+	sep := "?"
+	if strings.Contains(dsn, "?") {
+		sep = "&"
+	}
+	return dsn + sep + "transaction_isolation=%27READ-COMMITTED%27"
+}
+
 // Services 是组装后的组件。
 type Services struct {
 	Conn    sqlx.SqlConn
@@ -46,7 +61,7 @@ func Build(c Config, clock engine.Clock) (*Services, error) {
 		clock = engine.SystemClock{}
 	}
 	sqlx.DisableStmtLog() // 只保留慢查询与错误日志
-	conn := sqlx.NewMysql(c.DataSource)
+	conn := sqlx.NewMysql(ReadCommitted(c.DataSource))
 	s := &Services{Conn: conn, Store: engine.NewStore(conn), Plans: engine.NewPlans(conn), Tasks: task.NewStore(conn), Lark: lark.NewMock()}
 
 	var relations assign.RelationSource = &assign.StaticRelations{}
@@ -81,6 +96,6 @@ func Build(c Config, clock engine.Clock) (*Services, error) {
 	}
 	s.Engine = engine.New(s.Store, s.Plans, nodes.Default(), s.Actions, clock, engine.Options{Owner: owner, Lease: c.Lease})
 	s.Cron = ingest.NewCronRunner(conn, s.Plans, s.Tasks, s.Engine, s.Actions, clock)
-	s.Ticker = &ticker.Ticker{Cron: s.Cron}
+	s.Ticker = &ticker.Ticker{Cron: s.Cron, Engine: s.Engine}
 	return s, nil
 }

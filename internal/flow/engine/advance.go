@@ -25,14 +25,17 @@ type Options struct {
 
 // Engine 是引擎对外的 API，同时是唯一修改节点状态的组件（推进器）。
 // 每次推进都在一个事务内完成：锁 run 行 → 防护校验 → 写结果 → 边传播与死路径消除 → 插入新 job → 判断结束 → 写事件。
+//
+// 引擎是事件驱动的，没有常驻的轮询者：StartRun（来源产生新数据）、Signal（人工操作）、Cancel（外部状态变化）
+// 与 ProcessDue（xxl-job 的 tick，唤醒到期的定时器、超时与重试）是仅有的入口。每个入口提交后就地往下执行
+// 新就绪的节点，直到遇到等待点或结束（见 drive.go）。
 type Engine struct {
-	store    *Store
-	plans    PlanSource
-	execs    Executors
-	actions  Invoker
-	clock    Clock
-	opts     Options
-	dispatch func(jobs []Job)
+	store   *Store
+	plans   PlanSource
+	execs   Executors
+	actions Invoker
+	clock   Clock
+	opts    Options
 }
 
 // New 创建引擎。
@@ -49,27 +52,8 @@ func New(store *Store, plans PlanSource, execs Executors, actions Invoker, clock
 	return &Engine{store: store, plans: plans, execs: execs, actions: actions, clock: clock, opts: opts}
 }
 
-// SetDispatcher 设置提交后立即派发新 job 的回调（由 Worker 设置）；未设置时等待轮询。
-func (e *Engine) SetDispatcher(fn func(jobs []Job)) { e.dispatch = fn }
-
-// Store 返回底层存储，供 Worker 与查询使用。
+// Store 返回底层存储，供查询使用。
 func (e *Engine) Store() *Store { return e.store }
-
-func (e *Engine) afterCommit(jobs []Job) {
-	if e.dispatch == nil || len(jobs) == 0 {
-		return
-	}
-	now := e.clock.Now()
-	var due []Job
-	for _, j := range jobs {
-		if !j.DueAt.After(now) {
-			due = append(due, j)
-		}
-	}
-	if len(due) > 0 {
-		e.dispatch(due)
-	}
-}
 
 // errLostLease 表示 job 已被其他 worker 重新认领，本次提交放弃。
 var errLostLease = errors.New("engine: job lease lost")
@@ -332,7 +316,7 @@ func (e *Engine) StartRun(ctx context.Context, cmd StartRunCmd) (Run, bool, erro
 		}
 		return Run{}, false, err
 	}
-	e.afterCommit(jobs)
+	e.drive(ctx, jobs)
 	return started, true, nil
 }
 
@@ -342,18 +326,18 @@ func isDuplicate(err error) bool {
 
 // ---- 执行 job ----
 
-// Process 处理一个已认领的 job。Worker 认领成功后调用。
-func (e *Engine) Process(ctx context.Context, job Job) error {
+// process 处理一个已认领的 job，返回处理过程中新插入的 job。
+func (e *Engine) process(ctx context.Context, job Job) ([]Job, error) {
 	switch job.Kind {
 	case JobExecute:
 		return e.execute(ctx, job)
 	case JobTimer, JobTimeout:
 		return e.fire(ctx, job)
 	case JobSyncTask:
-		return e.syncTask(ctx, job)
+		return nil, e.syncTask(ctx, job)
 	default:
 		_, err := e.store.jobs.Finish(ctx, uint64(job.ID), job.Owner, string(JobCancelled), "unsupported job kind "+string(job.Kind))
-		return err
+		return nil, err
 	}
 }
 
@@ -362,7 +346,7 @@ func (e *Engine) finishStale(t *tx, job Job, reason string) error {
 	return err
 }
 
-func (e *Engine) execute(ctx context.Context, job Job) error {
+func (e *Engine) execute(ctx context.Context, job Job) ([]Job, error) {
 	// 第一段：事务内把节点置为 running，记下本次尝试的 attempt，并准备执行上下文。
 	var ec *ExecContext
 	err := e.store.Tx(ctx, func(t *tx) error {
@@ -409,7 +393,7 @@ func (e *Engine) execute(ctx context.Context, job Job) error {
 		return s.commit()
 	})
 	if err != nil || ec == nil {
-		return err
+		return nil, err
 	}
 
 	// 第二段：事务外执行节点，不持有任何数据库锁。
@@ -461,12 +445,9 @@ func (e *Engine) execute(ctx context.Context, job Job) error {
 		return nil
 	})
 	if errors.Is(err, errLostLease) {
-		return nil
+		return nil, nil
 	}
-	if err == nil {
-		e.afterCommit(jobs)
-	}
-	return err
+	return jobs, err
 }
 
 // wait 让节点进入等待并插入对应的定时 job。
@@ -585,7 +566,7 @@ func backoff(p dsl.RetryPolicy, attempt int) time.Duration {
 
 // ---- 定时 job ----
 
-func (e *Engine) fire(ctx context.Context, job Job) error {
+func (e *Engine) fire(ctx context.Context, job Job) ([]Job, error) {
 	var jobs []Job
 	err := e.store.Tx(ctx, func(t *tx) error {
 		s, err := e.load(ctx, t, job.RunID)
@@ -618,12 +599,9 @@ func (e *Engine) fire(ctx context.Context, job Job) error {
 		return nil
 	})
 	if errors.Is(err, errLostLease) {
-		return nil
+		return nil, nil
 	}
-	if err == nil {
-		e.afterCommit(jobs)
-	}
-	return err
+	return jobs, err
 }
 
 func nullOr(s sql.NullString) string {
@@ -712,14 +690,15 @@ func (e *Engine) Signal(ctx context.Context, cmd SignalCmd) (SignalResult, error
 		return nil
 	})
 	if err == nil {
-		e.afterCommit(jobs)
+		e.drive(ctx, jobs)
 	}
 	return result, err
 }
 
 // Cancel 取消 run：撤销尚未执行的 job，任务置为 solved（auto_closed）。已结束的 run 不受影响。
 func (e *Engine) Cancel(ctx context.Context, runID int64, actor, reason string) error {
-	return e.store.Tx(ctx, func(t *tx) error {
+	var jobs []Job
+	err := e.store.Tx(ctx, func(t *tx) error {
 		s, err := e.load(ctx, t, runID)
 		if err != nil {
 			return err
@@ -735,8 +714,16 @@ func (e *Engine) Cancel(ctx context.Context, runID int64, actor, reason string) 
 		if err := s.event("", "run_cancelled", actor, map[string]any{"reason": reason}); err != nil {
 			return err
 		}
-		return s.commit()
+		if err := s.commit(); err != nil {
+			return err
+		}
+		jobs = s.jobs
+		return nil
 	})
+	if err == nil {
+		e.drive(ctx, jobs) // 执行任务同步
+	}
+	return err
 }
 
 // GetRun 返回 run 及其节点状态。

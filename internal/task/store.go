@@ -84,6 +84,19 @@ func (s *Store) Create(ctx context.Context, cmd CreateCmd) (*Task, bool, error) 
 	return created, true, nil
 }
 
+// FindByDedupKey 按去重键查找任务，不存在时返回 nil, nil。
+func (s *Store) FindByDedupKey(ctx context.Context, key string) (*Task, error) {
+	row, err := s.tasks.FindOneByDedupKey(ctx, key)
+	if errors.Is(err, model.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	t := fromRow(row)
+	return &t, nil
+}
+
 // SetRun 记录驱动任务的 run。
 func (s *Store) SetRun(ctx context.Context, id, runID int64) error {
 	return s.tasks.SetRun(ctx, uint64(id), uint64(runID))

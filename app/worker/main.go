@@ -1,4 +1,5 @@
-// Command worker 是引擎执行进程：Worker 池执行 job，ticker（本地定时器或 xxl-job）触发 cron 来源。
+// Command worker 是引擎进程：注册 xxl-job 执行器，由 wf-ticker 的每次 tick 触发 cron 来源、唤醒到期的定时器与超时。
+// 进程内没有轮询；人工操作与外部状态变化经 gRPC 接口（RunService.Signal / CancelRun）进入，同样就地推进。
 //
 //	go run ./app/worker -f app/worker/etc/worker.yaml
 package main
@@ -22,14 +23,11 @@ import (
 type Config struct {
 	bootstrap.Config
 	Log    logx.LogConf `json:",optional"`
-	Worker struct {
-		Concurrency  int           `json:",default=8"`
-		PollInterval time.Duration `json:",default=1s"`
-	} `json:",optional"`
 	Ticker struct {
-		Mode     string              `json:",default=local,options=local|xxljob"`
-		Interval time.Duration       `json:",default=15s"` // local 模式的触发间隔
-		XxlJob   ticker.XxlJobConfig `json:",optional"`
+		Mode        string              `json:",default=local,options=local|xxljob"`
+		Interval    time.Duration       `json:",default=15s"` // local 模式的触发间隔
+		Parallelism int                 `json:",default=4"`   // 一次 tick 内并行执行的到期 job 数
+		XxlJob      ticker.XxlJobConfig `json:",optional"`
 	} `json:",optional"`
 }
 
@@ -48,8 +46,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	w := engine.NewWorker(svc.Engine, engine.WorkerOptions{Concurrency: c.Worker.Concurrency, PollInterval: c.Worker.PollInterval})
-	go w.Run(ctx)
+	svc.Ticker.Options = engine.TickOptions{Parallelism: c.Ticker.Parallelism}
 
 	switch c.Ticker.Mode {
 	case "xxljob":

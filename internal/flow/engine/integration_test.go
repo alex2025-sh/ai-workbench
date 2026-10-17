@@ -52,10 +52,17 @@ func newEnv(t *testing.T) *env {
 	return e
 }
 
-// engine 创建一个引擎实例；多个实例共享同一个库，模拟多个 worker 进程。
-func (e *env) engine(owner string) (*engine.Engine, *engine.Worker) {
-	en := engine.New(engine.NewStore(e.conn), e.plans, e.execs, e.rt, e.clock, engine.Options{Owner: owner, Lease: time.Minute})
-	return en, engine.NewWorker(en, engine.WorkerOptions{Concurrency: 4})
+// engine 创建一个引擎实例；多个实例共享同一个库，模拟多个进程。
+func (e *env) engine(owner string) *engine.Engine {
+	return engine.New(engine.NewStore(e.conn), e.plans, e.execs, e.rt, e.clock, engine.Options{Owner: owner, Lease: time.Minute})
+}
+
+// tick 模拟一次 xxl-job 的 wf-ticker：执行全部到期的 job。
+func (e *env) tick(en *engine.Engine) {
+	e.t.Helper()
+	if _, err := en.ProcessDue(e.ctx, engine.TickOptions{}); err != nil {
+		e.t.Fatal(err)
+	}
 }
 
 func (e *env) publish(workflow string) string {
@@ -81,12 +88,18 @@ workflow:
 
 func (e *env) start(en *engine.Engine, biz string, n int) engine.Run {
 	e.t.Helper()
-	payload, _ := json.Marshal(map[string]any{"uid": "u1", "n": n})
-	run, _, err := en.StartRun(e.ctx, engine.StartRunCmd{PlanKey: "flow", PlanVersion: 1, BizKey: biz, Vars: engine.Vars{Payload: payload}})
+	run, err := e.startRun(en, biz, n)
 	if err != nil {
 		e.t.Fatal(err)
 	}
 	return run
+}
+
+// startRun 启动 run；StartRun 会就地推进到第一个等待点。可以在其他 goroutine 中调用。
+func (e *env) startRun(en *engine.Engine, biz string, n int) (engine.Run, error) {
+	payload, _ := json.Marshal(map[string]any{"uid": "u1", "n": n})
+	run, _, err := en.StartRun(e.ctx, engine.StartRunCmd{PlanKey: "flow", PlanVersion: 1, BizKey: biz, Vars: engine.Vars{Payload: payload}})
+	return run, err
 }
 
 func nodeStatus(t *testing.T, en *engine.Engine, runID int64) (engine.RunStatus, map[string]engine.NodeRun) {
@@ -128,13 +141,13 @@ func TestLinearAndIdempotentStart(t *testing.T) {
 	e := newEnv(t)
 	e.publish(linear)
 	e.skills.Builtin["test.step"] = echo
-	en, w := e.engine("w1")
+	en := e.engine("w1")
 	run := e.start(en, "biz-1", 42)
 	again := e.start(en, "biz-1", 42)
 	if again.ID != run.ID {
 		t.Fatalf("same biz key must return the same run: %d vs %d", run.ID, again.ID)
 	}
-	w.Drain(e.ctx)
+	// 事件驱动：StartRun 自己把自动节点跑到结束，不需要 tick。
 	status, nodes := nodeStatus(t, en, run.ID)
 	if status != engine.RunSucceeded || nodes["big"].Status != engine.NodeSucceeded || nodes["small"].Status != engine.NodeSkipped {
 		t.Fatalf("status=%s nodes=%+v", status, nodes)
@@ -151,17 +164,16 @@ func TestRetryThenSucceed(t *testing.T) {
 		}
 		return echo(ctx, in)
 	}
-	en, w := e.engine("w1")
+	en := e.engine("w1")
 	run := e.start(en, "biz-retry", 1)
-	w.Drain(e.ctx)
 	if _, nodes := nodeStatus(t, en, run.ID); nodes["s"].Status != engine.NodeReady {
 		t.Fatalf("after first failure s = %s", nodes["s"].Status)
 	}
 	// 退避：2s、4s。
 	e.clock.Advance(2 * time.Second)
-	w.Drain(e.ctx)
+	e.tick(en)
 	e.clock.Advance(4 * time.Second)
-	w.Drain(e.ctx)
+	e.tick(en)
 	status, nodes := nodeStatus(t, en, run.ID)
 	if status != engine.RunSucceeded || calls.Load() != 3 || nodes["s"].Attempt != 3 {
 		t.Fatalf("status=%s calls=%d attempt=%d", status, calls.Load(), nodes["s"].Attempt)
@@ -180,9 +192,8 @@ func TestFailureNeedsInterventionOrErrorPort(t *testing.T) {
     - { id: e2, from: s, port: next, to: ok }
 `)
 	e.skills.Builtin["test.broken"] = func(context.Context, json.RawMessage) (any, error) { return nil, errors.New("boom") }
-	en, w := e.engine("w1")
+	en := e.engine("w1")
 	run := e.start(en, "biz-fail", 1)
-	w.Drain(e.ctx)
 	status, nodes := nodeStatus(t, en, run.ID)
 	if status != engine.RunNeedsIntervention || nodes["s"].Status != engine.NodeFailed {
 		t.Fatalf("status=%s s=%s", status, nodes["s"].Status)
@@ -202,11 +213,10 @@ func TestErrorPort(t *testing.T) {
     - { id: e2, from: s, port: next, to: ok }
     - { id: e3, from: s, port: error, to: fallback }
 `)
-	en, w := e.engine("w1")
+	en := e.engine("w1")
 	run := e.start(en, "biz-err", 1)
-	w.Drain(e.ctx)
 	e.clock.Advance(time.Second)
-	w.Drain(e.ctx)
+	e.tick(en)
 	status, nodes := nodeStatus(t, en, run.ID)
 	if status != engine.RunSucceeded || nodes["fallback"].Status != engine.NodeSucceeded || nodes["ok"].Status != engine.NodeSkipped {
 		t.Fatalf("status=%s nodes=%+v", status, nodes)
@@ -228,9 +238,8 @@ func TestHumanChoiceTimeout(t *testing.T) {
     - { id: e2, from: ask, port: ok, to: done }
     - { id: e3, from: ask, port: timeout, to: late }
 `)
-	en, w := e.engine("w1")
+	en := e.engine("w1")
 	run := e.start(en, "biz-timeout", 1)
-	w.Drain(e.ctx)
 	if _, nodes := nodeStatus(t, en, run.ID); nodes["ask"].Status != engine.NodeWaiting {
 		t.Fatalf("ask = %s", nodes["ask"].Status)
 	}
@@ -239,12 +248,12 @@ func TestHumanChoiceTimeout(t *testing.T) {
 		t.Fatalf("card = %+v", sent)
 	}
 	e.clock.Advance(47 * time.Hour)
-	w.Drain(e.ctx)
+	e.tick(en)
 	if status, _ := nodeStatus(t, en, run.ID); status != engine.RunRunning {
 		t.Fatalf("must still wait: %s", status)
 	}
 	e.clock.Advance(time.Hour)
-	w.Drain(e.ctx)
+	e.tick(en)
 	status, nodes := nodeStatus(t, en, run.ID)
 	if status != engine.RunSucceeded || nodes["late"].Status != engine.NodeSucceeded {
 		t.Fatalf("status=%s nodes=%+v", status, nodes)
@@ -267,21 +276,20 @@ func TestCancel(t *testing.T) {
     - { id: e1, from: start, port: next, to: wait }
     - { id: e2, from: wait, port: next, to: done }
 `)
-	en, w := e.engine("w1")
+	en := e.engine("w1")
 	run := e.start(en, "biz-cancel", 1)
-	w.Drain(e.ctx)
 	if err := en.Cancel(e.ctx, run.ID, "ops", "test"); err != nil {
 		t.Fatal(err)
 	}
 	e.clock.Advance(2 * time.Hour)
-	w.Drain(e.ctx)
+	e.tick(en)
 	status, nodes := nodeStatus(t, en, run.ID)
 	if status != engine.RunCancelled || nodes["done"].Status != engine.NodePending {
 		t.Fatalf("status=%s done=%s", status, nodes["done"].Status)
 	}
 }
 
-// TestZombieWorkerIsFenced：worker A 执行超过租约，job 被 worker B 重新认领并完成；
+// TestZombieWorkerIsFenced：进程 A 执行超过租约，job 被进程 B 的 tick 重新认领并完成；
 // A 之后提交的结果必须被丢弃，下游只被调度一次。
 func TestZombieWorkerIsFenced(t *testing.T) {
 	e := newEnv(t)
@@ -290,26 +298,31 @@ func TestZombieWorkerIsFenced(t *testing.T) {
 	var calls atomic.Int32
 	e.skills.Builtin["test.step"] = func(ctx context.Context, in json.RawMessage) (any, error) {
 		if calls.Add(1) == 1 {
-			<-release // 第一次调用（worker A）卡住
+			<-release // 第一次调用（进程 A，StartRun 的就地推进）卡住
 		}
 		return echo(ctx, in)
 	}
-	enA, wA := e.engine("A")
-	enB, wB := e.engine("B")
-	run := e.start(enA, "biz-zombie", 99)
+	enA := e.engine("A")
+	enB := e.engine("B")
 
-	done := make(chan struct{})
-	go func() { wA.Drain(e.ctx); close(done) }()
+	done := make(chan error, 1)
+	go func() { _, err := e.startRun(enA, "biz-zombie", 99); done <- err }()
 	for calls.Load() == 0 {
 		time.Sleep(10 * time.Millisecond)
 	}
+	var run engine.Run
+	if err := e.conn.QueryRowCtx(e.ctx, &run.ID, "select id from wf_run where biz_key = 'biz-zombie'"); err != nil {
+		t.Fatal(err)
+	}
 	e.clock.Advance(2 * time.Minute) // A 的租约过期
-	wB.Drain(e.ctx)                  // B 重新认领并完成整个 run
+	e.tick(enB)                      // B 的 tick 重新认领并完成整个 run
 	if status, _ := nodeStatus(t, enB, run.ID); status != engine.RunSucceeded {
 		t.Fatalf("B should finish the run: %s", status)
 	}
 	close(release)
-	<-done
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
 
 	status, nodes := nodeStatus(t, enA, run.ID)
 	if status != engine.RunSucceeded || nodes["s"].Attempt != 2 || nodes["big"].Status != engine.NodeSucceeded {
@@ -324,7 +337,7 @@ func TestZombieWorkerIsFenced(t *testing.T) {
 	}
 }
 
-// TestConcurrentWorkers：多个 worker 进程同时推进大量 run，每个节点恰好执行一次。
+// TestConcurrentWorkers：多个进程同时接收事件、就地推进大量 run，同时另有 tick 在跑，每个节点恰好执行一次。
 func TestConcurrentWorkers(t *testing.T) {
 	e := newEnv(t)
 	e.publish(`
@@ -348,20 +361,49 @@ func TestConcurrentWorkers(t *testing.T) {
 	e.execs = counting
 
 	const runs = 30
-	enA, _ := e.engine("A")
-	var ids []int64
-	for i := 0; i < runs; i++ {
-		ids = append(ids, e.start(enA, fmt.Sprintf("biz-c-%d", i), i).ID)
-	}
+	enA := e.engine("A")
+	ids := make([]int64, runs)
+	errs := make(chan error, runs)
 	var wg sync.WaitGroup
-	for _, owner := range []string{"A", "B", "C"} {
-		_, w := e.engine(owner)
+	for p, owner := range []string{"A", "B", "C"} {
+		en := e.engine(owner)
 		wg.Add(1)
-		go func() { defer wg.Done(); w.Drain(e.ctx) }()
+		go func(p int) {
+			defer wg.Done()
+			for i := p; i < runs; i += 3 {
+				run, err := e.startRun(en, fmt.Sprintf("biz-c-%d", i), i)
+				if err != nil {
+					errs <- err
+					return
+				}
+				ids[i] = run.ID
+			}
+		}(p)
 	}
+	ticker := e.engine("ticker")
+	stop, ticked := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(ticked)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				if _, err := ticker.ProcessDue(e.ctx, engine.TickOptions{}); err != nil {
+					errs <- err
+					return
+				}
+			}
+		}
+	}()
 	wg.Wait()
-	_, w := e.engine("final")
-	w.Drain(e.ctx)
+	close(stop)
+	<-ticked
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+	e.tick(e.engine("final"))
 
 	for _, id := range ids {
 		if status, _ := nodeStatus(t, enA, id); status != engine.RunSucceeded {

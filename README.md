@@ -38,7 +38,7 @@ go run ./cmd/wbctl run <run_id>
 | `cmd/wbctl` | 校验与导出任务类型的命令行工具 |
 | `examples` | 任务类型示例 |
 | `app/rpc` | 对外 gRPC 接口（zrpc），经公司 gateway 转为 HTTP：配置、变更集、运行、任务、回调 |
-| `app/worker` | 引擎执行进程：Worker 池、推进器、xxl-job ticker |
+| `app/worker` | 引擎进程：cron 来源与 xxl-job ticker（事件驱动，无常驻工作池） |
 | `deploy/sql` | 表结构，goctl model 的输入 |
 | `deploy/mock` | 本地 mock：业务方的 appeal 表与样例数据、VIP → RM 关系 |
 | `internal/` | 领域模块：任务、分配、流程引擎、动作、视图、配置中心、Lark 等 |

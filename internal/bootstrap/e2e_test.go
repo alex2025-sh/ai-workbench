@@ -27,7 +27,6 @@ type harness struct {
 	ctx   context.Context
 	clock *engine.FakeClock
 	svc   *Services
-	w     *engine.Worker
 	biz   string
 }
 
@@ -42,9 +41,7 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := &harness{t: t, ctx: context.Background(), clock: clock, svc: svc, biz: biz}
-	h.w = engine.NewWorker(svc.Engine, engine.WorkerOptions{Concurrency: 4})
-	return h
+	return &harness{t: t, ctx: context.Background(), clock: clock, svc: svc, biz: biz}
 }
 
 func (h *harness) publish(path string) {
@@ -66,14 +63,14 @@ func (h *harness) publish(path string) {
 	}
 }
 
-// tick 把时钟拨到 d 之后，触发到期的来源，并处理完所有到期 job。
+// tick 把时钟拨到 d 之后，执行一次 wf-ticker：触发到期的来源，执行到期的定时器、超时与重试。
+// 引擎没有后台轮询，两次 tick 之间流程只由事件（启动、人工操作、取消）推进。
 func (h *harness) tick(d time.Duration) {
 	h.t.Helper()
 	h.clock.Advance(d)
 	if err := h.svc.Ticker.Tick(h.ctx, struct{ Index, Total int }{0, 1}); err != nil {
 		h.t.Fatal(err)
 	}
-	h.w.Drain(h.ctx)
 }
 
 func (h *harness) task(appealID string) *task.Task {
@@ -119,7 +116,8 @@ func (h *harness) cards(appealID string) []string {
 }
 
 // TestVIPAppealAlert 按 deploy/mock/appeal.sql 的样例数据跑通 examples/task_types/vip_appeal_alert.yaml：
-// 扫描 → 建任务 → 通知 RM → 48 小时提醒 → 7 天升级 → 组长处理；时间用可快进的时钟推进。
+// 扫描 → 建任务 → 通知 RM → 48 小时提醒 → 7 天升级 → 组长处理，以及工单中途审核完成时自动关闭；
+// 时间用可快进的时钟推进。
 func TestVIPAppealAlert(t *testing.T) {
 	h := newHarness(t)
 	h.publish("examples/task_types/vip_appeal_alert.yaml")
@@ -198,7 +196,7 @@ func TestVIPAppealAlert(t *testing.T) {
 	if res.Accepted {
 		t.Fatal("second click must be rejected")
 	}
-	h.w.Drain(h.ctx)
+	// 人工操作是事件：Signal 返回时流程已经推进到结束，不需要等 tick。
 	if v := h.run("A1003"); v.Run.Status != engine.RunSucceeded {
 		t.Fatalf("A1003 run = %s", v.Run.Status)
 	}
@@ -212,17 +210,27 @@ func TestVIPAppealAlert(t *testing.T) {
 		t.Fatalf("A1001 cards after 48h = %v", c)
 	}
 
-	// A1001 在 7 天前审核通过：7 天检查时直接结束，不再升级。
-	testdb.Exec(t, h.biz, "UPDATE appeal SET appeal_status = 'PASS' WHERE appeal_id = 'A1001'")
-	h.tick(6 * 24 * time.Hour)
-	if v := h.run("A1001"); v.Run.Status != engine.RunSucceeded {
+	// A1001 在等待 7 天期间审核通过：下一次扫描命中 close_when，取消 run，任务以 auto_closed 完结，
+	// 7 天定时器随之撤销，不再检查或升级。
+	testdb.Exec(t, h.biz, "UPDATE appeal SET appeal_status = 'PASS', updated_at = NOW() - INTERVAL 2 SECOND WHERE appeal_id = 'A1001'")
+	h.tick(time.Minute)
+	if v := h.run("A1001"); v.Run.Status != engine.RunCancelled {
 		t.Fatalf("A1001 run = %s", v.Run.Status)
 	}
+	if tk := h.task("A1001"); tk.Status != task.TaskStatusSolved || tk.Resolution != "auto_closed" {
+		t.Fatalf("A1001 task = %+v", tk)
+	}
+	var pending int
+	if err := h.svc.Conn.QueryRowCtx(h.ctx, &pending, "select count(*) from wf_job where run_id = ? and status = 'pending'", h.task("A1001").RunID); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 0 {
+		t.Fatalf("A1001 still has %d pending jobs", pending)
+	}
+
+	h.tick(6 * 24 * time.Hour)
 	if c := h.cards("A1001"); len(c) != 2 {
 		t.Fatalf("A1001 must not escalate: %v", c)
-	}
-	if tk := h.task("A1001"); tk.Status != task.TaskStatusSolved || tk.Resolution != "reviewed" {
-		t.Fatalf("A1001 task = %+v", tk)
 	}
 
 	// A1002 到 7 天时仍待审核：升级给组长。
