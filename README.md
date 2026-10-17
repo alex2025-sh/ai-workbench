@@ -3,7 +3,7 @@
 企业内部 AI 任务平台。数据输入与处理流程解耦：任何来源的数据先归一成事件，再按配置生成任务、分配处理人、驱动 workflow，并通过 Lark 触达处理人。
 
 - 设计：[AI 任务平台设计概要](docs/ai-task-platform.md) · [轻量工作流引擎设计](docs/workflow-engine.md)
-- 技术栈：Go 1.24 · [go-zero](https://github.com/zeromicro/go-zero)（zrpc / gRPC）· TiDB · xxl-job · Lark
+- 技术栈：Go 1.24 · [go-zero](https://github.com/zeromicro/go-zero)（zrpc / gRPC）· TiDB / MySQL 8.0 · xxl-job · Lark
 
 ## 快速开始
 

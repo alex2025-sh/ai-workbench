@@ -22,7 +22,7 @@
 - 数据访问层由 `goctl model` 从 `deploy/sql/*.sql` 生成到 `internal/model`。
   - `*_gen.go` 每次生成都会覆盖，**不要手工修改**；自定义查询写在对应的 `*_model.go`。
   - 改表结构或接口时先改 `.sql` / `.proto`，再 `make gen`。
-- 存储为 TiDB（MySQL 协议），外部时钟为 xxl-job，平台只依赖这两者，不引入 Temporal、Redis 等额外服务。
+- 存储为 TiDB 或 MySQL 8.0（MySQL 协议，只用两者共有的能力；自增 id 不保证单调，排序用 `seq`），外部时钟为 xxl-job，平台只依赖这两者，不引入 Temporal、Redis 等额外服务。
 - goctl 的 DDL 约束：单列主键（联合主键改为 `id` + 联合唯一键）、主键 `AUTO_INCREMENT`；TiDB 专用选项写在 `/*T! ... */` 注释中。
 
 ## 目录
