@@ -130,6 +130,7 @@ wf_event ( id, run_id, node_id, iteration, type, payload JSON, actor, created_at
 
 - **`wf_run.biz_key` 唯一**：同一个任务不会因为事件重复投递而启动两个 run。
 - **主键与热点**：实际表结构见 `deploy/sql/engine.sql`。为适配 goctl（单列主键、Insert 省略自增列），联合主键改为 `id` 主键 + 联合唯一键，主键用 `AUTO_INCREMENT`，TiDB 上配合 `NONCLUSTERED` 主键与 `SHARD_ROW_ID_BITS` 打散写入；规模上来后再评估改为 `AUTO_RANDOM` 并由应用生成 ID。
+- **`wf_plan` 的版本从属于任务类型**：`plan_id` 为任务类型 key，`version` 即任务类型的发布版本，由发布清单引用；workflow 不单独对用户暴露版本号（见《AI 任务平台设计概要》「版本管理」）。
 - **`wf_event` 只追加、不更新**：审计、画布回放、指标统计都从这里读，与执行状态表解耦。
 
 ## DSL 与编译器

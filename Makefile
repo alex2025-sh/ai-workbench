@@ -1,23 +1,27 @@
 GOCTL ?= goctl
 STYLE ?= go_zero
 
-.PHONY: all gen gen-rpc gen-api gen-model tidy build vet test fmt check
+.PHONY: all gen gen-bgw gen-rpc gen-model tidy build vet test fmt check
+
+MODULE := github.com/alex2025-sh/ai-workbench
 
 all: check
 
 ## 代码生成
-# 需要本地安装 goctl、protoc、protoc-gen-go、protoc-gen-go-grpc：
+# 需要 protoc（含 google/protobuf 标准 proto）、protoc-gen-go、protoc-gen-go-grpc 与 goctl：
 #   go install github.com/zeromicro/go-zero/tools/goctl@latest
-#   goctl env check --install --verbose --force
-gen: gen-rpc gen-api gen-model tidy
+#   go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+#   go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+gen: gen-bgw gen-rpc gen-model tidy
 
-# 对外业务接口：根据 app/rpc/workbench.proto 生成 zrpc 服务（多 service，需 -m）
+# gateway 注解的本地占位定义（third_party/bgw）。接入正式环境时替换为公司 bgw 仓库中的定义。
+gen-bgw:
+	protoc -I third_party --go_out=. --go_opt=module=$(MODULE) third_party/bgw/v1/options.proto
+
+# 对外接口：根据 app/rpc/workbench.proto 生成 zrpc 服务（多 service，需 -m）
 gen-rpc:
-	cd app/rpc && $(GOCTL) rpc protoc workbench.proto --go_out=. --go-grpc_out=. --zrpc_out=. -m --style $(STYLE)
-
-# 第三方 HTTP 回调：根据 app/callback/callback.api 生成（仅 Lark 卡片回调）
-gen-api:
-	cd app/callback && $(GOCTL) api go --api callback.api --dir . --style $(STYLE)
+	cd app/rpc && $(GOCTL) rpc protoc workbench.proto -I . -I ../../third_party \
+		--go_out=. --go-grpc_out=. --zrpc_out=. -m --style $(STYLE)
 
 # 根据 deploy/sql/*.sql 生成 internal/model 下的 *_model.go 与 *_model_gen.go
 gen-model:

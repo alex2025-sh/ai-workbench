@@ -29,6 +29,9 @@ Oct 15, 2026 · @rex
 | Skill / 动作 Action | Activity 节点背后的可执行能力 | 分三类：查询（只读）、推理（LLM）、动作（有副作用）；输入输出 schema 契约 |
 | 展示模板 View Template | 任务在各渠道的展示方式，与渠道无关 | header、fields、actions（按钮绑定状态机动作）、可选的 AI 摘要；渲染到 Lark 卡片 / Web 工作台 / 邮件 |
 | 分配策略 Assignment Policy | 决定任务交给谁 | 候选人解析器 → 过滤器 → 选择策略 → 兜底；支持用户组、认领、管理员分配、轮询、按关系（RM-VIP） |
+| 共享组件 Component | 被多个任务类型复用、独立版本的配置 | 共享卡片模板、分配策略、跨部门协议、提示词模板；以「组件@版本」固定引用；带 namespace |
+| 变更集 Change Set | 审批与发布的单位 | 一个或多个草稿；在公司审批平台审批；通过后原子发布 |
+| 发布清单 Release Manifest | 任务类型某个版本的完整依赖闭包，相当于锁文件 | 自有组件的内容哈希 + 共享组件的固定版本；任务实例与 run 只认清单 |
 
 ### 任务状态
 
@@ -107,11 +110,16 @@ flowchart LR
 
 ```yaml
 task_type: vip_ticket_alert
-version: 2
-schema_ref: vip_ticket_alert@2        # payload JSON Schema
-workflow: vip_ticket_reminder@3        # 图模型 DSL
-view: vip_ticket_card@2                # 展示模板
-assignment:
+version: 6                             # 发布后生成发布清单
+namespace: cs_vip
+schema: { ... }                        # 自有：payload JSON Schema
+sources: [ ... ]                       # 自有：cron / Kafka / API 来源
+workflow: { nodes: [ ... ], edges: [ ... ] }   # 自有：在画布中编辑
+views:
+  rm_card: { ... }                     # 自有
+  compliance_card: compliance_card@1   # 共享组件，固定版本
+view: rm_card                          # 默认展示模板
+assignment:                            # 自有；也可引用共享策略，如 vip_rm_policy@4
   resolvers:
     - { type: relation, relation: vip_primary_rm }
     - { type: relation, relation: vip_backup_rm }
@@ -204,7 +212,7 @@ view:
 | 流程 | 7. 动作运行时 Action Runtime | 执行所有外部 IO | 引擎 Worker 池中的通用 `InvokeAction` 动作，分发到：skill 调用（MCP / Skillhub）、LLM（Eino → LiteLLM）、Lark、邮件、emit\_event |
 | 触达 | 8. 视图渲染器 View Renderer | 模板 + 任务 → 各渠道内容 | 渠道无关视图 DSL；Lark 卡片 / Web / 邮件渲染器；按 `x-pii` 脱敏、按 `x-format` 格式化 |
 | 触达 | 9. Lark 网关 Lark Gateway | 发送、回调、卡片更新 | 回调验签；open\_id → 内部用户；按任务表鉴权；调用 RunService.Signal；`task_id → message_id` 映射，状态变化时更新原卡片；降噪合并 |
-| 控制面 | 10. 配置中心 Config Registry | 所有配置的版本与发布 | 事件类型、触发器、订阅、任务类型、workflow、模板、分配策略；草稿 → 审批 → 发布；dry-run 试运行 |
+| 控制面 | 10. 配置中心 Config Registry | 所有配置的版本与发布 | 任务类型（含自有组件）与共享组件；草稿 → 变更集 → 公司审批平台 → 原子发布；发布清单；dry-run 试运行 |
 | 控制面 | 11. AI 设计助手 + 平台 MCP | 对话生成配置 | Openclaw / Eino agent 调用平台 MCP（list\_skills、get\_skill\_schema、list\_node\_types、validate、dry\_run、save\_draft）；校验 — 修复循环 |
 | 横切 | 12. 公共库与可观测 | 各模块共用的能力 | JSON Schema 校验与 `x-` 扩展处理；expr 表达式；执行状态表 → 画布着色；指标（通知到联系时长、跟进率）；审计日志 |
 
@@ -231,7 +239,7 @@ flowchart TB
         Action --> AssignSvc[分配服务<br/>策略链 · 认领]
         Action --> Render[视图渲染器<br/>按模板 · 脱敏]
         Render --> Lark[Lark 网关<br/>发送 · 回调 · 更新卡片]
-        Lark -. RM 点击按钮 → 按任务表鉴权 → Signal .-> Engine
+        Lark -. RM 点击按钮 → 按任务表鉴权 → RunService.Signal .-> Engine
     end
     RT --- Infra[(TiDB · Kafka · xxl-job · LiteLLM · Skillhub / MCP · Lark 开放平台)]
 ```
@@ -240,18 +248,16 @@ flowchart TB
 
 ### Go 工程内部分包
 
-仓库采用 go-zero 工程约定：对外业务接口为 gRPC，由 `goctl rpc` 从 `app/rpc/workbench.proto` 生成 zrpc 服务；HTTP 只用于第三方回调（Lark），由 `goctl api` 从 `.api` 生成；数据访问层由 `goctl model` 从 `deploy/sql/*.sql` 生成；领域逻辑放在仓库根目录的 `internal/` 下，供各服务共用。
+仓库采用 go-zero 工程约定：对外接口全部是 gRPC，由 `goctl rpc` 从 `app/rpc/workbench.proto` 生成 zrpc 服务；数据访问层由 `goctl model` 从 `deploy/sql/*.sql` 生成；领域逻辑放在 `internal/` 下。
 
 ```text
 app/
-  rpc/                 # 对外 gRPC 接口：RunService / TaskService / PlanService（goctl rpc 生成）
+  rpc/                 # 对外 gRPC 接口（经公司 gateway 暴露给前端与外部系统，含 Lark 回调）
     workbench.proto
-  callback/            # HTTP 回调：仅 Lark 卡片交互（goctl api 生成）
-    callback.api
   worker/              # 引擎 Worker 池、推进器、xxl-job ticker 处理器
 deploy/sql/            # 表结构，goctl model 的输入
 internal/
-  model/               # goctl model 生成的 *_gen.go 与可扩展的 *model.go
+  model/               # goctl model 生成的数据访问层
   ingest/              # 接入适配器、事件信封
   event/               # 事件类型注册、校验、去重
   subscription/        # 订阅匹配与映射
@@ -264,9 +270,12 @@ internal/
     nodes/             # 节点执行器注册表
   action/              # InvokeAction 分发：skill、llm、lark、email、emit_event
   view/                # 视图模板、受众变体、AI 摘要、渲染器
-  lark/                # 发送、回调验签、身份映射、卡片更新
+  lark/                # 发送、回调验签、卡片更新
   ticker/              # xxl-job 调度入口
-  registry/            # 配置版本、审批、发布、dry-run
+  registry/            # 草稿、变更集、发布清单、dry-run
+  approval/            # 公司审批平台适配
+  directory/           # BSP 人员与组织适配
+  skillhub/            # Skillhub 后端 API 适配
   mcp/                 # 平台 MCP 工具
   pkg/
     schema/            # JSON Schema 校验、x- 扩展（脱敏、格式化）
@@ -275,6 +284,171 @@ internal/
 ```
 
 依赖方向保持单向：`flow` 不直接依赖 `task`、`assign`、`lark`，只通过 `action` 的动作执行器调用它们，这样引擎核心不会因业务模块变化而改动。
+
+## 前后端交互
+
+前端与所有外部调用方统一经公司 gateway 访问平台的 gRPC 接口：gateway 负责 HTTP 与 gRPC 的协议转换、认证和限流，平台只暴露 gRPC。
+
+### 接入方式
+
+- **协议**：接口全部写在 proto 中，每个方法用 gateway 的 `bgw.v1.method_options` 声明 HTTP 路径、方法和限流规则。路径约定为 `/ai_workbench/api/v1/<资源>/<动作>`，统一使用 POST。
+- **身份**：调用人身份由 gateway 认证后写入 gRPC metadata，服务端从 metadata 读取；请求消息中不出现 `actor`、`viewer` 这类由前端填写的身份字段。
+- **权限**：接口级权限在 BSP 权限平台按方法配置，由 gateway 执行，平台内不实现权限判断。
+- **Lark 回调同样走 gateway**：gateway 透传原始请求体与请求头，回调作为 gRPC 方法接收，平台不再单独部署 HTTP 服务。
+
+```protobuf
+rpc SaveTaskTypeDraft(SaveTaskTypeDraftReq) returns (SaveTaskTypeDraftResp) {
+  option (bgw.v1.method_options) = {
+    path       : "/ai_workbench/api/v1/task_type/draft/save";
+    http_method: HTTP_METHOD_POST;
+    filters    : [{ name: FILTER_BIZ_LIMITER_V2; args: '--rules=[{"rate":20, "ip":true, "path":true}]' }];
+  };
+}
+```
+
+### 页面与操作
+
+| 页面 | 用户动作 | 对应服务 |
+| --- | --- | --- |
+| 任务类型列表 | 按 namespace 筛选、新建、查看版本历史 | TaskTypeService |
+| 任务类型编辑 | 编辑字段 schema、默认优先级与 SLA、来源、workflow、自有卡片模板，校验与试运行 | TaskTypeService |
+| Workflow 画布 | 拖入节点、配置节点、连线、实时校验 | TaskTypeService（workflow 是任务类型草稿的一部分）、CatalogService |
+| 节点配置面板 | 选择节点类型、按配置 schema 生成的表单填写、选择 skill 与共享组件 | CatalogService、ComponentService |
+| 卡片模板编辑 | 编辑字段与样式、受众变体、AI 摘要，用样例数据预览 | TaskTypeService（自有）或 ComponentService（共享） |
+| 组件库 | 管理共享卡片模板、分配策略、跨部门协议、提示词模板，查看引用方 | ComponentService |
+| 变更与发布 | 把草稿加入变更集、一键升级依赖方、提交审批、查看版本差异 | ChangeSetService |
+| 运行监控 | 按任务查 run、运行态画布、事件时间线、人工干预 | RunService |
+| 我的任务 | 列表、详情、认领、开始处理、调整优先级、转派 | TaskService |
+
+人员、用户组选择器由前端直接调用 BSP（已经通过 gateway 开放），平台只保存用户与组的 ID。
+
+## 配置生命周期
+
+任务类型与共享组件共用同一套生命周期：草稿可反复修改，发布后不可变；审批与发布的单位是变更集。
+
+```mermaid
+stateDiagram-v2
+    [*] --> 草稿
+    草稿 --> 变更集: 加入（打包、编译校验）
+    变更集 --> 审批中: 提交（公司审批平台）
+    审批中 --> 已发布: 通过（原子发布、生成清单）
+    审批中 --> 草稿: 驳回 / 撤回（草稿解锁，继续编辑）
+    已发布 --> 已下线: 下线（不再创建新任务）
+```
+
+- **草稿**：每个任务类型、每个共享组件同时最多一份草稿。「编辑」已发布的配置时，系统自动基于最新发布版本创建草稿。保存带 `revision`，两人同时编辑时后保存者收到冲突错误，不会互相覆盖。
+- **变更集**：把一个或多个草稿打包。加入时对整个依赖闭包编译校验，存在问题则不允许提交。共享组件升级时，可以一键把依赖方的升级草稿加入同一个变更集。
+- **审批中**：变更集提交后在公司审批平台创建审批实例，所含草稿锁定不可编辑。驳回或撤回后草稿解锁。
+- **已发布**：审批通过后，变更集中的所有版本在一个事务内发布，生成发布清单；不会出现任务类型已发布、它引用的共享模板还是草稿的情况。
+- **已下线**：下线的任务类型不再创建新任务，在途任务继续跑完；仍被引用的共享组件版本不能下线。
+
+## 版本管理
+
+**任务类型是发布单元**：只服务于它的 workflow 与卡片模板随它一起发版，用户只看到一个版本号；被多个任务类型复用的组件独立发版，引用时固定版本；发布时生成不可变的发布清单，运行时只认清单。
+
+版本之间是一张依赖图，而不是平铺的「任务类型 | workflow 版本 | 模板版本」：卡片模板挂在 workflow 的各个人工节点上，一个 workflow 可能引用多个模板，模板也可能被多个任务类型共享。
+
+### 自有组件与共享组件
+
+| | 自有组件 | 共享组件 |
+| --- | --- | --- |
+| 包括 | 任务类型的 payload schema、来源与订阅、workflow、只服务于它的卡片模板 | 共享卡片模板、分配策略、跨部门协议、提示词模板 |
+| 编辑方式 | 在任务类型的同一个草稿里编辑 | 在组件库中单独编辑 |
+| 版本 | 没有独立版本号，只记内容哈希，随任务类型版本发布 | 独立版本号 |
+| 引用方式 | 直接内嵌（相当于 Camunda 的 `deployment` 绑定） | `组件@版本` 固定引用（相当于 `versionTag` 绑定） |
+
+自有组件可以通过「另存为共享组件」提升到组件库，当前任务类型的草稿随之改为引用 `@1`。
+
+### 发布清单
+
+任务类型发布时，系统解析整个依赖闭包，写成一份不可变的清单（相当于锁文件）：
+
+```text
+vip_ticket_alert v6
+  schema        sha256:ab12…
+  workflow      （自有）sha256:cd34…   → wf_plan(vip_ticket_alert, 6)
+  views         rm_card（自有）、compliance_card@1（共享）
+  assignment    vip_rm_policy@4（共享）
+  agreements    cs_to_compliance@2（共享）
+```
+
+- 任务实例绑定 `type_version`，run 绑定对应的清单；在途实例不受新版本影响。
+- 编译后的 workflow 计划按 `(任务类型, 任务类型版本)` 存入 `wf_plan`，不再单独对用户暴露 workflow 版本号。
+- 不提供「跟随最新版本」的绑定，避免改一个模板就悄悄影响线上所有流程。
+
+### workflow 变了，任务类型要不要升版本
+
+- **自有 workflow**：它就是任务类型的一部分，改 workflow 就是改任务类型草稿，发布后直接是任务类型的下一个版本。
+- **共享组件变了**：引用方需要升版本。系统列出所有引用旧版本的任务类型，一键为它们生成升级草稿，与组件新版本放进同一个变更集，一次审批、一起发布。
+
+### 取舍
+
+| 目标 | 做法 |
+| --- | --- |
+| 正确性 | 发布后不可变；实例固定版本；在途实例不受影响；共享依赖固定版本；发布前对整个依赖闭包编译校验 |
+| 便捷性 | 用户只面对一个版本号；自有组件不单独管版本；共享组件升级时自动生成依赖方的升级草稿；编辑时自动基于最新发布版本建草稿 |
+
+这一模型参考 Camunda 的[资源绑定类型](https://docs.camunda.io/docs/components/best-practices/modeling/choosing-the-resource-binding-type/)：自包含的资源用 `deployment` 绑定，共享依赖用版本标签固定，`latest` 只适合开发与紧急修复。
+
+## 任务来源配置
+
+三类来源都在任务类型页面的「来源」中配置，属于任务类型的自有组件；系统自动生成对应的事件类型与订阅，用户不直接管理这两层。
+
+| 来源 | 模式 | 在平台内配置的内容 | 前端的试运行 |
+| --- | --- | --- | --- |
+| cron | 平台主动扫描 | 查询 skill 与参数、cron 表达式与时区、字段映射、去重键 | 立即试跑一次扫描，展示会产出多少条与样例 |
+| Kafka | 控制反转：生产方按平台定义的 topic 与标准事件信封生产 | 事件类型名、过滤条件、字段映射、去重键 | 贴一条样例消息，展示映射结果 |
+| API | 外部系统调用 `IngestService.PushEvent`，请求体同样是标准事件信封 | 事件类型名、过滤条件、字段映射、去重键 | 生成调用示例，贴样例请求展示映射结果 |
+
+- Kafka 采用控制反转：topic 与消息格式由平台定义，生产方按约定生产，配置变更不涉及新增或修改 topic。确有需要接入外部 topic 时再单独开发。
+- Kafka 与 API 两类来源由生产方在信封中标明事件类型，平台按事件类型路由到对应的任务类型。
+- cron 来源发布后落到 `wf_schedule`，由 xxl-job ticker 触发。
+- 多个来源可以对应同一个任务类型，共用去重键。
+
+## 外部系统集成边界
+
+平台只实现任务、流程与配置版本本身；人员组织、权限、审批、skill 这些通用能力都使用公司已有的系统。
+
+| 系统 | 用途 | 调用方式 | 平台保存什么 |
+| --- | --- | --- | --- |
+| BSP | 人员、用户组、组织查询 | 前端选择器直接调用（已通过 gateway 开放）；后端在分配处理人、映射 Lark open\_id 时经 `internal/directory` 适配层查询，带短期缓存 | 只保存用户 ID 与组 ID |
+| BSP 权限平台 | 接口级权限 | 在 BSP 按 gRPC 方法配置，由 gateway 执行 | 无 |
+| 公司审批平台 | 配置发布审批 | 提交变更集时创建审批实例；审批结束后经 gateway 回调 `ChangeSetService.OnApprovalResult` | 变更集状态、审批实例 ID |
+| Skillhub | 查询、推理、动作类 skill | 后端 API；前端的 skill 列表与 schema 由 `CatalogService` 转发，节点执行由动作运行时调用 | 节点配置中的 skill 名与参数 |
+| Lark | 卡片触达与交互 | 发送与更新卡片由 Lark 网关调用；卡片回调经 gateway 透传原始请求体与请求头，由 `CallbackService.LarkCardCallback` 验签 | `task_id → message_id` 映射 |
+
+### 审批的职责划分
+
+| 公司审批平台 | 平台 |
+| --- | --- |
+| 审批流转、审批人规则、待办与通知 | 配置版本状态机与发布动作 |
+| 起草人不能审批自己的变更 | 提交时创建审批实例并记录实例 ID |
+| 审批单中放平台的版本差异链接 | 提供变更集的差异对比页面与接口 |
+| 审批结束后回调 | 校验回调，通过则原子发布，驳回则退回草稿 |
+
+审批结果只是触发发布的信号；发布前平台重新编译变更集中的全部草稿，确认审批期间没有被改动。
+
+## 接口清单
+
+所有接口定义在 `app/rpc/workbench.proto`，由 `goctl rpc protoc` 生成 zrpc 服务。业务 JSON 字段一律用 `bytes` 承载，避免 `google.protobuf.Struct` 把金额变成 double。
+
+| 服务 | 职责 | 方法 |
+| --- | --- | --- |
+| TaskTypeService | 任务类型及其自有组件（schema、来源、workflow、自有模板） | CreateTaskType、ListTaskTypes、GetTaskType、GetTaskTypeDraft、SaveTaskTypeDraft、DiscardTaskTypeDraft、ValidateTaskTypeDraft、DryRunTaskTypeDraft、GenerateSamplePayload、PreviewView、TrialSource、ListTaskTypeVersions |
+| ComponentService | 共享组件：卡片模板、分配策略、跨部门协议、提示词模板 | CreateComponent、ListComponents、GetComponent、GetComponentDraft、SaveComponentDraft、DiscardComponentDraft、ValidateComponentDraft、ListComponentVersions、ListDependents |
+| ChangeSetService | 变更集、审批与发布 | CreateChangeSet、AddDependentUpgrades、GetChangeSet、ListChangeSets、DiffChangeSet、SubmitChangeSet、WithdrawChangeSet、OnApprovalResult、RetireVersion |
+| CatalogService | 画布与配置表单的数据源 | ListNodeTypes（含配置 schema、UI 提示、端口规则）、ListSkills、GetSkillSchema（转发 Skillhub） |
+| IngestService | API 来源 | PushEvent |
+| RunService | 工作流运行 | StartRun、Signal、CancelRun、GetRun、ListRuns、GetRunEvents、RetryNode、SkipNode |
+| TaskService | 任务处理 | GetTask、ListMyTasks、GetTaskEvents、ClaimTask、StartProcessing、UpdatePriority、Reassign |
+| CallbackService | 第三方回调 | LarkCardCallback |
+
+### 暂不考虑
+
+- **数据级权限**：所有配置带 `namespace` 字段，v1 只用于分组与筛选，不做权限校验；后续再扩展为按 namespace 的数据级权限。
+- **动态 Kafka topic**：生产方按平台定义的 topic 生产，需要接入外部 topic 时再开发。
+- **「跟随最新版本」的绑定**：只提供固定版本引用。
+- **在途实例迁移**：新版本只影响新任务，在途 run 按原清单跑完。
 
 ## 关键设计原则
 
@@ -306,3 +480,9 @@ v1 用通用抽象跑通 VIP 工单提醒和周期报表两个场景；DSL 稳�
 - **Skill schema**：Skillhub 中的 skill 已有机器可读的输入输出 schema，可以直接支撑 AI 生成定时任务和 workflow。
 - **工作流引擎**：不使用 Temporal，自研轻量引擎，只依赖 TiDB 与 xxl-job，详见《轻量工作流引擎设计》。引擎是流程的事实来源，任务状态是其投影，经 `sync_task` job 异步同步、最终一致。每个人工节点只由一个人决策，多人参与时拆成多个节点串联。
 - **任务来源**：任务类型配置时需指定一个或多个来源（事件推送、cron 扫描、API），多个来源共用幂等键。cron 来源可由 AI 结合 skill、大数据 MCP、业务 DB MCP 生成；优先使用已认证的查询 skill，AI 编写的查询经审核后沉淀为新的 skill。
+- **前后端交互**：前端经公司 gateway 调用 gRPC，接口用 `bgw.v1.method_options` 声明 HTTP 路径与限流；gateway 透传原始请求体与请求头，Lark 回调也走 gRPC，平台不部署 HTTP 服务。
+- **版本管理**：任务类型为发布单元 + 自有/共享组件 + 发布清单；不提供「跟随最新版本」的绑定。
+- **审批**：使用公司已有的审批平台，平台只保留版本状态与发布动作。
+- **人员、组织与权限**：使用 BSP；前端选择器直接调用 BSP，接口级权限在 BSP 权限平台配置。配置带 `namespace` 字段，数据级权限暂不考虑。
+- **Skillhub**：只有后端 API，前端的 skill 列表与 schema 由平台转发。
+- **Kafka 来源**：控制反转，生产方按平台定义的 topic 与消息格式生产。
