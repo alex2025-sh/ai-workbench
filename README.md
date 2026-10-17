@@ -25,7 +25,6 @@ make check   # vet + test + build
 | `app/worker` | 引擎执行进程：Worker 池、推进器、xxl-job ticker |
 | `deploy/sql` | 表结构，goctl model 的输入 |
 | `internal/` | 领域模块：任务、分配、流程引擎、动作、视图、配置中心、Lark 等 |
-| `third_party/bgw` | gateway 注解的本地占位定义，接入时替换为公司版本 |
 | `docs/` | 设计文档 |
 
 开发约定见 [CLAUDE.md](CLAUDE.md)。

@@ -1,9 +1,7 @@
 GOCTL ?= goctl
 STYLE ?= go_zero
 
-.PHONY: all gen gen-bgw gen-rpc gen-model tidy build vet test fmt check
-
-MODULE := github.com/alex2025-sh/ai-workbench
+.PHONY: all gen gen-rpc gen-model tidy build vet test fmt check
 
 all: check
 
@@ -12,15 +10,11 @@ all: check
 #   go install github.com/zeromicro/go-zero/tools/goctl@latest
 #   go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
 #   go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-gen: gen-bgw gen-rpc gen-model tidy
-
-# gateway 注解的本地占位定义（third_party/bgw）。接入正式环境时替换为公司 bgw 仓库中的定义。
-gen-bgw:
-	protoc -I third_party --go_out=. --go_opt=module=$(MODULE) third_party/bgw/v1/options.proto
+gen: gen-rpc gen-model tidy
 
 # 对外接口：根据 app/rpc/workbench.proto 生成 zrpc 服务（多 service，需 -m）
 gen-rpc:
-	cd app/rpc && $(GOCTL) rpc protoc workbench.proto -I . -I ../../third_party \
+	cd app/rpc && $(GOCTL) rpc protoc workbench.proto -I . \
 		--go_out=. --go-grpc_out=. --zrpc_out=. -m --style $(STYLE)
 
 # 根据 deploy/sql/*.sql 生成 internal/model 下的 *_model.go 与 *_model_gen.go

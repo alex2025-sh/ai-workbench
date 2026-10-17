@@ -13,8 +13,7 @@
 
 - Go 1.24，工具库为 [go-zero](https://github.com/zeromicro/go-zero)。
 - **对外接口只有 gRPC**：协议写在 `app/rpc/workbench.proto`（TaskTypeService、ComponentService、ChangeSetService、CatalogService、IngestService、RunService、TaskService、CallbackService），由 `goctl rpc protoc -m` 生成 zrpc 服务。
-  - 前端经公司 gateway（bgw）访问：每个方法用 `option (bgw.v1.method_options)` 声明 `path` 与 `http_method`，路径约定 `/byai_platform/api/v1/<资源>/<动作>`，一律 POST；写接口与外部入口加限流 filter。
-  - `third_party/bgw/v1/options.proto` 是本地占位，接入时替换为公司定义，import 路径与 option 名保持不变。
+  - 前端经公司 gateway 访问，路径约定 `/byai_platform/api/v1/<资源>/<动作>`，一律 POST。一期不引入 gateway 注解，路径写在每个方法的行尾注释里；接入 gateway 时再改为 `option (bgw.v1.method_options)`。
   - 调用者身份由 gateway 写入 gRPC metadata，请求消息里不放 actor / viewer 字段。
   - 业务 JSON 字段用 `bytes`（UTF-8 JSON）承载，不用 `google.protobuf.Struct`，避免数字变 double 丢精度。
   - proto 的 `TaskStatus` 比存储值偏移 2（首值必须为 0），转换统一用 `internal/task` 的 `StatusToProto` / `StatusFromProto`。
@@ -41,7 +40,6 @@ internal/lark/    Lark 发送、回调验签、卡片更新
 internal/ticker/  xxl-job 调度入口（wf-ticker）
 internal/registry/ 配置中心：草稿、变更集、审批、发布清单（表结构见 deploy/sql/config.sql）
 internal/approval/ directory/ skillhub/  外部系统客户端：公司审批平台、BSP、Skillhub
-third_party/bgw/  gateway 注解的占位定义
 internal/event/ ingest/ subscription/ mcp/ pkg/
 ```
 
@@ -67,7 +65,7 @@ internal/event/ ingest/ subscription/ mcp/ pkg/
 ## 常用命令
 
 ```bash
-make gen     # 生成 bgw 占位、rpc 与 model，然后 go mod tidy
+make gen     # 生成 rpc 与 model，然后 go mod tidy
 make check   # go vet + go test + go build
 ```
 
