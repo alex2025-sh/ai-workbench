@@ -35,6 +35,7 @@ type Task struct {
 type SyncStatusCmd struct {
 	TaskID      int64
 	Status      TaskStatus
+	Reassign    bool // true：流程明确（重新）分配了处理人，用 AssigneeID / Group 覆盖；false：只同步状态，保留任务中心的处理人
 	AssigneeID  string
 	Group       string // 待认领的组；AssigneeID 非空时忽略
 	CurrentNode string
@@ -66,6 +67,6 @@ type Service interface {
 	// Reassign 转派：只改变处理人，状态不变，原因必填。
 	Reassign(ctx context.Context, id int64, assignee, actor, reason string) (*Task, error)
 
-	// AutoClose 源工单离开 Maker Review Case 时调用：任务置为 solved(auto_closed)，并取消对应 run。
+	// AutoClose 关闭尚未启动 run 的任务：置为 solved(auto_closed)。已有 run 的任务由引擎取消 run 后同步。
 	AutoClose(ctx context.Context, id int64, reason string) error
 }

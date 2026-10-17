@@ -64,7 +64,7 @@ stateDiagram-v2
 | 2 | `TaskStatusSnoozed` | 主动推迟，到期由 cron 回迁 pending |
 | 3 | `TaskStatusSolved` | 已完结；`>= 3` 即终态 |
 
-分配服务直接命中处理人（如按 RM-VIP 关系）时，任务创建即为 `pending`，跳过 `unassigned`。RM 可以在 Lark 卡片上一步处理，从 `pending` 直接进入 `solved`。转派只改变 assignee，状态不变。源工单离开 Maker Review Case 状态时，系统把未完结的任务直接置为 `solved`。
+分配服务直接命中处理人（如按 RM-VIP 关系）时，任务创建即为 `pending`，跳过 `unassigned`。RM 可以在 Lark 卡片上一步处理，从 `pending` 直接进入 `solved`。转派只改变 assignee，状态不变。源工单离开待处理状态时（来源的 `close_when`），系统把未完结的任务置为 `solved`（auto_closed）。任务被认领、转派后，处理人以任务中心为准，引擎只在流程再次明确分配时更新它。
 
 新增状态取 `-1` 而不是 `4`：已有的 0 到 3 不用重新编号，Morning Brief 的存量数据和 `>= TaskStatusSolved` 的终态判断都不受影响。需要确认 Morning Brief 侧没有“status 非负”之类的假设。`waiting` 归入 `processing`；`cancelled` 合并进 `solved`，由结果码区分。
 
@@ -415,6 +415,8 @@ vip_ticket_alert v6
 - Kafka 与 API 两类来源由生产方在信封中标明事件类型，平台按事件类型路由到对应的任务类型。
 - cron 来源发布后落到 `wf_schedule`，由 xxl-job ticker 触发。
 - 关闭条件（`close_when`）让外部状态变化直接推动流程：记录满足条件时，按去重键找到未完结的任务，取消它的 run，任务以 `auto_closed` 完结。例如工单离开待审核，提醒立即停止，不必等到下一个定时检查点。
+- 去重键要能区分同一件事的不同轮次：VIP 工单用“工单号 + 提交时间”，驳回后重新提交会重新提醒。
+- cron 扫描遇到暂时性失败（如数据库抖动）时不推进游标，下次重扫；单条坏数据跳过并计数。
 - 多个来源可以对应同一个任务类型，共用去重键。
 
 ## 外部系统集成边界

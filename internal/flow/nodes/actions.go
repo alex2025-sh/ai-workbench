@@ -249,7 +249,8 @@ func (larkCard) Execute(ctx context.Context, ec engine.ExecContext) engine.NodeR
 	}
 }
 
-// humanChoice 确定处理人 → 发送带按钮的卡片 → 进入等待；选择经 Engine.Signal 提交，超时走 timeout 端口。
+// humanChoice 确定处理人 → 渲染带按钮的卡片 → 进入等待；选择经 Engine.Signal 提交，超时走 timeout 端口。
+// 卡片作为 effect 返回：引擎先提交 waiting，再发送卡片，处理人点击时节点一定已在等待。
 type humanChoice struct{}
 
 func (humanChoice) Type() dsl.NodeType { return dsl.NodeHumanChoice }
@@ -274,19 +275,18 @@ func (humanChoice) Execute(ctx context.Context, ec engine.ExecContext) engine.No
 	if err != nil {
 		return engine.NodeResult{Err: err}
 	}
-	var sent action.LarkCardOutput
-	if err := invoke(ctx, ec, action.KindLarkCard, nil, action.LarkCardInput{To: who, Card: card}, ":card", &sent); err != nil {
-		return engine.NodeResult{Err: err}
-	}
 	wait := &engine.WaitSpec{}
 	if cfg.Timeout != nil {
-		at := ec.Now.Add(cfg.Timeout.Std())
+		at := ec.Now.Add(cfg.Timeout.Std()) // 从进入等待算起，与卡片何时送达无关
 		wait.TimeoutAt = &at
 	}
 	return engine.NodeResult{
 		Wait:       wait,
-		Output:     output(map[string]any{"assignee": who.Assignee, "group": who.Group, "message_id": sent.MessageID}),
+		Output:     output(map[string]any{"assignee": who.Assignee, "group": who.Group}),
 		Assignment: assignment(who),
+		Effects: []engine.Effect{{
+			Kind: action.KindLarkCard, Input: output(action.LarkCardInput{To: who, Card: card}), Key: ":card", WhileWaiting: true,
+		}},
 	}
 }
 

@@ -18,6 +18,9 @@ import (
 // ErrNotImplemented 表示该能力会在任务中心的 RPC 阶段实现。
 var ErrNotImplemented = errors.New("task: not implemented yet")
 
+// ErrHasRun 表示任务已有 run，应由引擎取消 run 来结束任务。
+var ErrHasRun = errors.New("task: task is driven by a run; cancel the run instead")
+
 // CreateCmd 创建任务。DedupKey 相同的任务只会创建一次。
 type CreateCmd struct {
 	TaskType    string
@@ -97,6 +100,30 @@ func (s *Store) FindByDedupKey(ctx context.Context, key string) (*Task, error) {
 	return &t, nil
 }
 
+// AutoClose 关闭尚未启动 run 的任务（启动前失败，之后来源发现源工单已经离开待处理状态）：
+// 置为 solved(auto_closed)。已有 run 的任务应由引擎取消 run 后同步，这里不处理，返回 ErrHasRun。
+func (s *Store) AutoClose(ctx context.Context, id int64, reason string) error {
+	return s.conn.TransactCtx(ctx, func(ctx context.Context, session sqlx.Session) error {
+		tm := s.tasks.WithSession(session)
+		cur, err := tm.FindOneForUpdate(ctx, uint64(id))
+		if err != nil {
+			return err
+		}
+		from := TaskStatus(cur.Status)
+		if from.IsTerminal() {
+			return nil
+		}
+		if cur.RunId != 0 {
+			return ErrHasRun
+		}
+		if err := tm.CloseUnstarted(ctx, cur.Id, int64(TaskStatusSolved), string(ResolutionAutoClosed)); err != nil {
+			return err
+		}
+		return s.event(ctx, s.events.WithSession(session), cur.Id, "status_changed", &from, TaskStatusSolved, "source", reason,
+			map[string]any{"resolution": ResolutionAutoClosed})
+	})
+}
+
 // SetRun 记录驱动任务的 run。
 func (s *Store) SetRun(ctx context.Context, id, runID int64) error {
 	return s.tasks.SetRun(ctx, uint64(id), uint64(runID))
@@ -113,7 +140,9 @@ func (s *Store) Get(ctx context.Context, id int64) (*Task, error) {
 }
 
 // SyncStatus 实现 Service：只接受更大的 seq；任务已终结时忽略。
-// 处理人未变时不把 processing 退回 pending（处理人已点过「开始处理」）。
+//
+// 处理人的归属：只有流程明确分配处理人时（Reassign）才覆盖；否则保留任务中心当前的处理人，
+// 认领、转派的结果不会被引擎里的旧快照覆盖。处理人未变时不把 processing 退回 pending（处理人已点过「开始处理」）。
 func (s *Store) SyncStatus(ctx context.Context, cmd SyncStatusCmd) (bool, error) {
 	applied := false
 	err := s.conn.TransactCtx(ctx, func(ctx context.Context, session sqlx.Session) error {
@@ -126,26 +155,29 @@ func (s *Store) SyncStatus(ctx context.Context, cmd SyncStatusCmd) (bool, error)
 		if cur.Seq >= cmd.Seq || from.IsTerminal() {
 			return nil
 		}
+		assignee, group := cur.AssigneeId, cur.AssigneeGroup
+		if cmd.Reassign {
+			assignee, group = cmd.AssigneeID, ""
+			if assignee == "" {
+				group = cmd.Group
+			}
+		}
 		to := cmd.Status
-		if to == TaskStatusPending && from == TaskStatusProcessing && cmd.AssigneeID == cur.AssigneeId {
+		if to == TaskStatusPending && from == TaskStatusProcessing && assignee == cur.AssigneeId {
 			to = TaskStatusProcessing
 		}
 		var snooze sql.NullTime
 		if cmd.SnoozeUntil != nil {
 			snooze = sql.NullTime{Time: *cmd.SnoozeUntil, Valid: true}
 		}
-		group := ""
-		if cmd.AssigneeID == "" {
-			group = cmd.Group
-		}
-		ok, err := tm.ApplySync(ctx, cur.Id, int64(to), cmd.AssigneeID, group, cmd.CurrentNode, string(cmd.Resolution), snooze, cmd.Seq)
+		ok, err := tm.ApplySync(ctx, cur.Id, int64(to), assignee, group, cmd.CurrentNode, string(cmd.Resolution), snooze, cmd.Seq)
 		if err != nil || !ok {
 			return err
 		}
 		applied = true
-		detail := map[string]any{"seq": cmd.Seq, "assignee": cmd.AssigneeID, "group": group, "node": cmd.CurrentNode, "resolution": cmd.Resolution}
+		detail := map[string]any{"seq": cmd.Seq, "assignee": assignee, "group": group, "node": cmd.CurrentNode, "resolution": cmd.Resolution}
 		typ := "status_changed"
-		if from == to {
+		if from == to && assignee != cur.AssigneeId {
 			typ = "reassigned"
 		}
 		return s.event(ctx, s.events.WithSession(session), cur.Id, typ, &from, to, "engine", "", detail)
@@ -178,7 +210,6 @@ func (s *Store) UpdatePriority(context.Context, int64, TaskPriority, string, str
 func (s *Store) Reassign(context.Context, int64, string, string, string) (*Task, error) {
 	return nil, ErrNotImplemented
 }
-func (s *Store) AutoClose(context.Context, int64, string) error { return ErrNotImplemented }
 
 func fromRow(r *model.Task) Task {
 	t := Task{
@@ -216,6 +247,7 @@ func ParsePriority(s string) TaskPriority {
 type syncPayload struct {
 	TaskID      int64      `json:"task_id"`
 	Status      string     `json:"status"`
+	Reassign    bool       `json:"reassign"`
 	Assignee    string     `json:"assignee"`
 	Group       string     `json:"group"`
 	CurrentNode string     `json:"current_node"`
@@ -243,7 +275,7 @@ func (a SyncAction) Invoke(ctx context.Context, req action.Request) (action.Resu
 		return action.Result{}, fmt.Errorf("task: unknown sync status %q", p.Status)
 	}
 	applied, err := a.Tasks.SyncStatus(ctx, SyncStatusCmd{
-		TaskID: p.TaskID, Status: status, AssigneeID: p.Assignee, Group: p.Group, CurrentNode: p.CurrentNode,
+		TaskID: p.TaskID, Status: status, Reassign: p.Reassign, AssigneeID: p.Assignee, Group: p.Group, CurrentNode: p.CurrentNode,
 		Resolution: Resolution(p.Resolution), SnoozeUntil: p.SnoozeUntil, Seq: p.Seq,
 	})
 	if err != nil {

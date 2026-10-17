@@ -13,42 +13,118 @@ import (
 	"github.com/alex2025-sh/ai-workbench/internal/model"
 )
 
-// drive 就地推进：依次认领并执行已到期的 job，以及执行过程中新就绪的 job，直到遇到等待点或结束。
+// drive 就地推进：认领并执行已到期的 job，以及执行过程中新就绪的 job，直到遇到等待点、结束或用完预算。
 //
-// 这里没有队列和执行池：触发推进的那次调用（StartRun、Signal、Cancel 或一次 tick）自己把后续的自动节点跑完。
-// 每个 job 仍然先落库、再认领、再执行，所以进程在中途崩溃时，剩下的 job 会在租约过期后由下一次 tick 接着执行。
+// 这里没有常驻队列：触发推进的那次调用（StartRun、Signal、Cancel 或一次 tick）自己把后续的自动节点跑完。
+// 并行就绪的节点（分支）并发执行，同时最多 DriveParallelism 个；一次最多执行 DriveBudget 个 job，
+// 剩下的留在表里由 tick 接着执行。每个 job 仍然先落库、再认领、再执行，进程中途崩溃时由 tick 接手。
 func (e *Engine) drive(ctx context.Context, jobs []Job) int {
-	queue := e.due(jobs)
-	n := 0
-	for len(queue) > 0 && ctx.Err() == nil {
-		j := queue[0]
-		queue = queue[1:]
-		ok, err := e.store.claim(ctx, &j, e.opts.Owner, e.clock.Now(), e.opts.Lease)
-		if err != nil {
-			logx.WithContext(ctx).Errorf("engine: claim job %d: %v", j.ID, err)
-			continue
-		}
-		if !ok {
-			continue // 已被别的调用认领或已完成
+	var (
+		mu sync.Mutex
+		wg sync.WaitGroup
+		n  int
+	)
+	sem := make(chan struct{}, e.opts.DriveParallelism)
+	var spawn func(j Job)
+	spawn = func(j Job) {
+		mu.Lock()
+		if n >= e.opts.DriveBudget {
+			mu.Unlock()
+			return // 超出预算：job 留在表里，由 tick 执行
 		}
 		n++
-		if j.Attempt > e.opts.MaxClaims {
-			// 反复认领却从未完成：多半是处理时进程崩溃（如内存耗尽），继续重试只会反复崩溃。
-			e.quarantine(ctx, j, fmt.Sprintf("claimed %d times without finishing", j.Attempt))
-			continue
-		}
-		if e.afterClaim != nil {
-			e.afterClaim(j)
-		}
-		next, err := e.process(ctx, j)
-		if err != nil {
-			logx.WithContext(ctx).Errorf("engine: process job %d (%s %s): %v", j.ID, j.Kind, j.NodeID, err)
-			e.failed(ctx, j, err)
-			continue
-		}
-		queue = append(queue, e.due(next)...)
+		mu.Unlock()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			next, ok := e.step(ctx, j)
+			<-sem
+			if !ok {
+				mu.Lock()
+				n-- // 没认领到，不占预算
+				mu.Unlock()
+			}
+			for _, nj := range e.due(next) {
+				spawn(nj)
+			}
+		}()
 	}
+	for _, j := range e.due(jobs) {
+		if ctx.Err() != nil {
+			break
+		}
+		spawn(j)
+	}
+	wg.Wait()
 	return n
+}
+
+// step 认领并处理一个 job，返回处理中新插入的 job；没认领到时 ok 为 false。
+func (e *Engine) step(ctx context.Context, j Job) (next []Job, ok bool) {
+	if ctx.Err() != nil {
+		return nil, false
+	}
+	claimed, err := e.store.claim(ctx, &j, e.opts.Owner, e.clock.Now(), e.opts.Lease)
+	if err != nil {
+		logx.WithContext(ctx).Errorf("engine: claim job %d: %v", j.ID, err)
+		return nil, false
+	}
+	if !claimed {
+		return nil, false // 已被别的调用认领或已完成
+	}
+	if j.Attempt > e.opts.MaxClaims {
+		// 反复认领却从未完成：多半是处理时进程崩溃（如内存耗尽），继续重试只会反复崩溃。
+		e.quarantine(ctx, j, fmt.Sprintf("claimed %d times without finishing", j.Attempt))
+		return nil, true
+	}
+	if e.afterClaim != nil {
+		e.afterClaim(j)
+	}
+	next, err = e.process(ctx, j)
+	if err != nil {
+		logx.WithContext(ctx).Errorf("engine: process job %d (%s %s): %v", j.ID, j.Kind, j.NodeID, err)
+		e.failed(ctx, j, err)
+		return nil, true
+	}
+	return next, true
+}
+
+// driveLater 在后台推进：脱离调用方的 ctx（请求返回后仍继续），保留其中的日志与追踪信息。
+// 同时进行的后台推进有上限，满了就不起，job 留给 tick；进程退出时 Close 等待或取消它们。
+func (e *Engine) driveLater(ctx context.Context, jobs []Job) {
+	jobs = e.due(jobs)
+	if len(jobs) == 0 {
+		return
+	}
+	select {
+	case e.bgSem <- struct{}{}:
+	default:
+		logx.WithContext(ctx).Infof("engine: background drive limit reached, %d jobs left for the ticker", len(jobs))
+		return
+	}
+	bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.opts.BackgroundTimeout)
+	stop := context.AfterFunc(e.bgCtx, cancel)
+	e.bgWG.Add(1)
+	go func() {
+		defer func() { stop(); cancel(); <-e.bgSem; e.bgWG.Done() }()
+		e.drive(bctx, jobs)
+	}()
+}
+
+// Close 等待后台推进结束；ctx 到期后取消它们（已认领的 job 立即释放，由 tick 接手）。之后不应再调用引擎。
+func (e *Engine) Close(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() { e.bgWG.Wait(); close(done) }()
+	select {
+	case <-done:
+		e.bgStop()
+		return nil
+	case <-ctx.Done():
+		e.bgStop()
+		<-done
+		return ctx.Err()
+	}
 }
 
 // failed 处理一次失败的处理（加载定义、提交事务出错等，事务已回滚）。

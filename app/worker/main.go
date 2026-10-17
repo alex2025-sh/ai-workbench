@@ -56,4 +56,10 @@ func main() {
 		logx.Infof("worker: local ticker every %s", c.Ticker.Interval)
 		ticker.RunLocal(ctx, svc.Ticker, c.Ticker.Interval)
 	}
+	// 退出前等待后台推进结束；超时则取消，已认领的 job 立即释放，由其他实例的 tick 接手。
+	sctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := svc.Engine.Close(sctx); err != nil {
+		logx.Errorf("worker: engine close: %v", err)
+	}
 }

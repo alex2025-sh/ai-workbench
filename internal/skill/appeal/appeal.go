@@ -49,9 +49,13 @@ type Record struct {
 }
 
 type scanInput struct {
-	BatchSize int    `json:"batch_size"`
-	Cursor    string `json:"cursor"`
+	BatchSize  int    `json:"batch_size"`
+	LagSeconds *int   `json:"lag_seconds"` // 安全延迟，默认 60
+	Cursor     string `json:"cursor"`
 }
+
+// DefaultLagSeconds 是扫描的默认安全延迟。
+const DefaultLagSeconds = 60
 
 // ScanOutput 是增量扫描的结果。
 type ScanOutput struct {
@@ -59,8 +63,11 @@ type ScanOutput struct {
 	NextCursor string   `json:"next_cursor"`
 }
 
-// scan 按 (updated_at, id) 增量扫描。只扫描已经过去的整秒（updated_at < NOW()），
-// 避免同一秒内稍后更新、id 更小的行被游标跳过。游标格式为 "<unix 秒>:<id>"。
+// scan 按 (updated_at, id) 增量扫描，游标格式为 "<unix 秒>:<id>"。
+//
+// 只扫描 lag_seconds 之前的行（updated_at < NOW() - lag）：updated_at 取的是语句执行时间，
+// 长事务里的行提交得晚，从库也有复制延迟，游标若紧贴当前时间，这些行可见时游标已经越过它们，会被永久漏掉。
+// 延迟窗口覆盖这类情况；超过窗口的延迟仍可能漏，接入 binlog 或 Kafka 后可彻底解决。
 func scan(ctx context.Context, conn sqlx.SqlConn, raw json.RawMessage) (any, error) {
 	var in scanInput
 	if err := json.Unmarshal(raw, &in); err != nil {
@@ -69,16 +76,20 @@ func scan(ctx context.Context, conn sqlx.SqlConn, raw json.RawMessage) (any, err
 	if in.BatchSize <= 0 || in.BatchSize > 1000 {
 		in.BatchSize = 200
 	}
+	lag := DefaultLagSeconds
+	if in.LagSeconds != nil && *in.LagSeconds >= 0 {
+		lag = *in.LagSeconds
+	}
 	ts, id, err := parseCursor(in.Cursor)
 	if err != nil {
 		return nil, err
 	}
 	const q = "select `id`, `appeal_type`, `appeal_id`, `appeal_status`, `uid`, `biz_code`, `order_amount`, `case_group`, `reviewer`, " +
 		"`commit_time`, `vip_label_type`, `vip_level`, unix_timestamp(`updated_at`) as `updated_ts` from `appeal` " +
-		"where (`updated_at` > from_unixtime(?) or (`updated_at` = from_unixtime(?) and `id` > ?)) and `updated_at` < now() " +
+		"where (`updated_at` > from_unixtime(?) or (`updated_at` = from_unixtime(?) and `id` > ?)) and `updated_at` < now() - interval ? second " +
 		"order by `updated_at`, `id` limit ?"
 	var rows []Record
-	if err := conn.QueryRowsCtx(ctx, &rows, q, ts, ts, id, in.BatchSize); err != nil {
+	if err := conn.QueryRowsCtx(ctx, &rows, q, ts, ts, id, lag, in.BatchSize); err != nil {
 		return nil, fmt.Errorf("%s: %w", ScanVIP, err)
 	}
 	out := ScanOutput{Items: rows, NextCursor: in.Cursor}

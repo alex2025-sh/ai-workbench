@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/alex2025-sh/ai-workbench/internal/flow/engine"
-	"github.com/alex2025-sh/ai-workbench/internal/model"
 	"github.com/alex2025-sh/ai-workbench/internal/pkg/testdb"
 	"github.com/alex2025-sh/ai-workbench/internal/registry"
 	"github.com/alex2025-sh/ai-workbench/internal/spec"
@@ -33,8 +32,8 @@ type harness struct {
 func newHarness(t *testing.T) *harness {
 	platform := testdb.New(t, "deploy/sql/*.sql")
 	biz := testdb.New(t, "deploy/mock/appeal.sql")
-	// 扫描只读取已经过去的整秒，把样例数据的更新时间往前拨一点。
-	testdb.Exec(t, biz, "UPDATE appeal SET updated_at = updated_at - INTERVAL 10 SECOND")
+	// 扫描只读取 60 秒（lag_seconds）之前更新的行，把样例数据的更新时间往前拨。
+	testdb.Exec(t, biz, "UPDATE appeal SET updated_at = updated_at - INTERVAL 5 MINUTE")
 
 	clock := engine.NewFakeClock(time.Now())
 	svc, err := Build(Config{DataSource: platform, BizDataSource: biz, RelationsFile: repoFile(t, "deploy/mock/vip_rm.yaml"), Owner: "test", Lease: time.Minute}, clock)
@@ -73,17 +72,32 @@ func (h *harness) tick(d time.Duration) {
 	}
 }
 
-func (h *harness) task(appealID string) *task.Task {
+// tasks 返回工单的全部任务，按创建顺序。去重键是「工单号:提交时间」，重新提交的工单会有新任务。
+func (h *harness) tasks(appealID string) []*task.Task {
 	h.t.Helper()
-	row, err := model.NewTaskModel(h.svc.Conn).FindOneByDedupKey(h.ctx, "vip_appeal_alert:"+appealID)
-	if err != nil {
-		h.t.Fatalf("task for %s: %v", appealID, err)
-	}
-	tk, err := h.svc.Tasks.Get(h.ctx, int64(row.Id))
-	if err != nil {
+	var ids []int64
+	if err := h.svc.Conn.QueryRowsCtx(h.ctx, &ids, "select id from task where task_type = 'vip_appeal_alert' and subject_id like ? order by id", appealID+":%"); err != nil {
 		h.t.Fatal(err)
 	}
-	return tk
+	var out []*task.Task
+	for _, id := range ids {
+		tk, err := h.svc.Tasks.Get(h.ctx, id)
+		if err != nil {
+			h.t.Fatal(err)
+		}
+		out = append(out, tk)
+	}
+	return out
+}
+
+// task 返回工单最新的任务。
+func (h *harness) task(appealID string) *task.Task {
+	h.t.Helper()
+	ts := h.tasks(appealID)
+	if len(ts) == 0 {
+		h.t.Fatalf("no task for %s", appealID)
+	}
+	return ts[len(ts)-1]
 }
 
 func (h *harness) run(appealID string) *engine.RunView {
@@ -127,7 +141,7 @@ func TestVIPAppealAlert(t *testing.T) {
 
 	// 只有 VIP 且待审核的 A1001 / A1002 / A1003 建任务；A1004 已通过，A1005 非 VIP，A1006 未提交。
 	for _, id := range []string{"A1004", "A1005", "A1006"} {
-		if _, err := model.NewTaskModel(h.svc.Conn).FindOneByDedupKey(h.ctx, "vip_appeal_alert:"+id); err == nil {
+		if ts := h.tasks(id); len(ts) != 0 {
 			t.Errorf("%s should be filtered", id)
 		}
 	}
@@ -200,7 +214,8 @@ func TestVIPAppealAlert(t *testing.T) {
 	if v := h.run("A1003"); v.Run.Status != engine.RunSucceeded {
 		t.Fatalf("A1003 run = %s", v.Run.Status)
 	}
-	if tk := h.task("A1003"); tk.Status != task.TaskStatusSolved || tk.Resolution != "escalated" {
+	// 做决定的组长成为任务的处理人：组任务没人认领，也能记下是谁处理的。
+	if tk := h.task("A1003"); tk.Status != task.TaskStatusSolved || tk.Resolution != "escalated" || tk.AssigneeID != "lead@example.com" || tk.AssigneeGroup != "" {
 		t.Fatalf("A1003 task = %+v", tk)
 	}
 
@@ -212,12 +227,13 @@ func TestVIPAppealAlert(t *testing.T) {
 
 	// A1001 在等待 7 天期间审核通过：下一次扫描命中 close_when，取消 run，任务以 auto_closed 完结，
 	// 7 天定时器随之撤销，不再检查或升级。
-	testdb.Exec(t, h.biz, "UPDATE appeal SET appeal_status = 'PASS', updated_at = NOW() - INTERVAL 2 SECOND WHERE appeal_id = 'A1001'")
+	testdb.Exec(t, h.biz, "UPDATE appeal SET appeal_status = 'PASS', updated_at = NOW() - INTERVAL 3 MINUTE WHERE appeal_id = 'A1001'")
 	h.tick(time.Minute)
 	if v := h.run("A1001"); v.Run.Status != engine.RunCancelled {
 		t.Fatalf("A1001 run = %s", v.Run.Status)
 	}
-	if tk := h.task("A1001"); tk.Status != task.TaskStatusSolved || tk.Resolution != "auto_closed" {
+	// 自动关闭不改处理人：任务仍记在原 RM 名下。
+	if tk := h.task("A1001"); tk.Status != task.TaskStatusSolved || tk.Resolution != "auto_closed" || tk.AssigneeID != "rm.alice@example.com" {
 		t.Fatalf("A1001 task = %+v", tk)
 	}
 	var pending int
@@ -239,5 +255,19 @@ func TestVIPAppealAlert(t *testing.T) {
 	}
 	if n := h.node("A1002", "escalate"); n.Status != engine.NodeWaiting {
 		t.Fatalf("A1002 escalate = %s", n.Status)
+	}
+
+	// A1001 被驳回后重新提交：提交时间变了，是一次新的审核，建新任务并重新通知 RM；旧任务保持自动关闭。
+	testdb.Exec(t, h.biz, "UPDATE appeal SET appeal_status = 'COMMITED', commit_time = ?, updated_at = NOW() - INTERVAL 2 MINUTE WHERE appeal_id = 'A1001'", h.clock.Now().Unix())
+	h.tick(time.Minute)
+	ts := h.tasks("A1001")
+	if len(ts) != 2 || ts[0].Resolution != "auto_closed" || ts[1].Status != task.TaskStatusPending || ts[1].AssigneeID != "rm.alice@example.com" {
+		t.Fatalf("A1001 tasks after resubmission = %d", len(ts))
+	}
+	if c := h.cards("A1001"); len(c) != 3 || !strings.Contains(c[2], "待审核") {
+		t.Fatalf("A1001 cards after resubmission = %v", c)
+	}
+	if n := h.node("A1001", "wait_48h"); n.Status != engine.NodeWaiting {
+		t.Fatalf("resubmitted A1001 wait_48h = %s", n.Status)
 	}
 }

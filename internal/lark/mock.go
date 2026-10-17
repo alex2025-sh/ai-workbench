@@ -26,6 +26,9 @@ type Mock struct {
 	mu   sync.Mutex
 	sent []SentCard
 	keys map[string]string
+
+	// BeforeSend 在发送前调用，返回错误时本次发送失败（测试用：注入故障、观察发送时的流程状态）。
+	BeforeSend func(ctx context.Context, req action.Request) error
 }
 
 // NewMock 创建 Mock。
@@ -39,6 +42,11 @@ func (m *Mock) Invoke(ctx context.Context, req action.Request) (action.Result, e
 	var in action.LarkCardInput
 	if err := json.Unmarshal(req.Input, &in); err != nil {
 		return action.Result{}, fmt.Errorf("lark: input: %w", err)
+	}
+	if m.BeforeSend != nil {
+		if err := m.BeforeSend(ctx, req); err != nil {
+			return action.Result{}, err
+		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
