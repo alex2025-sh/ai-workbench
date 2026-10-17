@@ -12,13 +12,16 @@
 ## 技术栈与约定
 
 - Go 1.24，工具库为 [go-zero](https://github.com/zeromicro/go-zero)。
-- **对外业务接口使用 gRPC**：协议写在 `app/rpc/workbench.proto`（RunService、TaskService、PlanService），由 `goctl rpc protoc` 生成 zrpc 服务。
+- **对外接口只有 gRPC**：协议写在 `app/rpc/workbench.proto`（TaskTypeService、ComponentService、ChangeSetService、CatalogService、IngestService、RunService、TaskService、CallbackService），由 `goctl rpc protoc -m` 生成 zrpc 服务。
+  - 前端经公司 gateway（bgw）访问：每个方法用 `option (bgw.v1.method_options)` 声明 `path` 与 `http_method`，路径约定 `/ai_workbench/api/v1/<资源>/<动作>`，一律 POST；写接口与外部入口加限流 filter。
+  - `third_party/bgw/v1/options.proto` 是本地占位，接入时替换为公司定义，import 路径与 option 名保持不变。
+  - 调用者身份由 gateway 写入 gRPC metadata，请求消息里不放 actor / viewer 字段。
   - 业务 JSON 字段用 `bytes`（UTF-8 JSON）承载，不用 `google.protobuf.Struct`，避免数字变 double 丢精度。
   - proto 的 `TaskStatus` 比存储值偏移 2（首值必须为 0），转换统一用 `internal/task` 的 `StatusToProto` / `StatusFromProto`。
-- **HTTP 只用于第三方回调**：`app/callback/callback.api` 只有 Lark 卡片回调（Lark 以 HTTP 推送），由 `goctl api` 生成。
+- **没有 HTTP 服务**：Lark 卡片回调与审批平台回调由 gateway 原样透传 raw body 与 headers，落到 gRPC 方法（`CallbackService.LarkCardCallback`、`ChangeSetService.OnApprovalResult`），在服务内验签。
 - 数据访问层由 `goctl model` 从 `deploy/sql/*.sql` 生成到 `internal/model`。
   - `*_gen.go` 每次生成都会覆盖，**不要手工修改**；自定义查询写在对应的 `*_model.go`。
-  - 改表结构或接口时先改 `.sql` / `.proto` / `.api`，再 `make gen`。
+  - 改表结构或接口时先改 `.sql` / `.proto`，再 `make gen`。
 - 存储为 TiDB（MySQL 协议），外部时钟为 xxl-job，平台只依赖这两者，不引入 Temporal、Redis 等额外服务。
 - goctl 的 DDL 约束：单列主键（联合主键改为 `id` + 联合唯一键）、主键 `AUTO_INCREMENT`；TiDB 专用选项写在 `/*T! ... */` 注释中。
 
@@ -26,7 +29,6 @@
 
 ```text
 app/rpc/          go-zero zrpc 服务：对外 gRPC 接口（workbench.proto；生成后含 pb/server/logic/svc/etc）
-app/callback/     go-zero HTTP 服务：仅 Lark 卡片回调（callback.api）
 app/worker/       引擎执行进程：Worker 池、推进器、xxl-job ticker
 deploy/sql/       表结构（goctl model 的输入）
 internal/model/   goctl 生成的数据访问层
@@ -37,7 +39,10 @@ internal/action/  InvokeAction：所有外部 IO 的统一出口
 internal/view/    展示模板、受众变体、AI 摘要、渲染器
 internal/lark/    Lark 发送、回调验签、卡片更新
 internal/ticker/  xxl-job 调度入口（wf-ticker）
-internal/event/ ingest/ subscription/ registry/ mcp/ pkg/
+internal/registry/ 配置中心：草稿、变更集、审批、发布清单（表结构见 deploy/sql/config.sql）
+internal/approval/ directory/ skillhub/  外部系统客户端：公司审批平台、BSP、Skillhub
+third_party/bgw/  gateway 注解的占位定义
+internal/event/ ingest/ subscription/ mcp/ pkg/
 ```
 
 依赖方向单向：`internal/flow` 不得直接 import `task`、`assign`、`lark`，只能通过 `internal/action` 调用。
@@ -54,14 +59,18 @@ internal/event/ ingest/ subscription/ registry/ mcp/ pkg/
 - **金额不经过 float64**：schema 中金额为 string，解码用 `UseNumber()`，计算用 decimal。
 - **出口统一脱敏**：按 schema 的 `x-pii` 在发往 Lark、LLM、日志时处理。
 - **AI 用在设计时**：AI 生成的配置必须通过同一编译器校验，只能存草稿；发布需审批与试运行。
+- **版本模型**：任务类型是发布单元，schema、来源、workflow、专属模板内嵌其中；共享组件（view / assignment / agreement / prompt）独立版本化，以 `key@version` 固定引用，没有“跟随最新”。运行时只按发布清单（`cfg_manifest_item`）取配置。
+- **审批在外部**：使用公司审批平台；变更集状态机在平台内，提交时快照草稿，审批通过后重新编译再原子发布，回调必须幂等。
+- **外部系统**：人员与组织、接口级权限来自 BSP（前端经 gateway 直连 BSP 选人）；skill 来自 Skillhub 后端 API；Kafka 来源由生产方遵循平台的 topic 与消息格式，平台不支持动态 topic。
+- **namespace**：配置与变更集带 `namespace` 字段；按 namespace 的数据级权限暂不实现。
 
 ## 常用命令
 
 ```bash
-make gen     # goctl 生成 rpc、callback api 与 model，然后 go mod tidy
+make gen     # 生成 bgw 占位、rpc 与 model，然后 go mod tidy
 make check   # go vet + go test + go build
 ```
 
 ## 当前进度
 
-骨架阶段：领域类型与接口已定义，`.proto`、`.api` 与 `.sql` 已就绪，生成代码尚未提交。下一步是引擎阶段一（见 `docs/workflow-engine.md`「分阶段实现」）。
+骨架阶段：领域类型与接口已定义，`.proto` 与 `.sql` 已就绪，生成代码尚未提交。下一步是引擎阶段一（见 `docs/workflow-engine.md`「分阶段实现」）。

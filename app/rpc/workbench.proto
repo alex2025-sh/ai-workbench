@@ -1,23 +1,604 @@
 syntax = "proto3";
 
-// AI Workbench 对外 gRPC 接口：工作流运行、任务中心、配置发布。
-// 设计见 docs/ai-task-platform.md 与 docs/workflow-engine.md。
+// AI Workbench 对外 gRPC 接口。前端与外部系统经公司 gateway 访问，gateway 负责 HTTP 与 gRPC 的转换、
+// 认证与限流。设计见 docs/ai-task-platform.md「前后端交互」「接口清单」。
 //
 // 约定：
-//   * 业务 JSON（trigger、payload、form、dsl、report）一律用 bytes 承载 UTF-8 JSON，
-//     不用 google.protobuf.Struct——Struct 的数字是 double，金额等字段会丢精度。
+//   * 每个方法用 bgw.v1.method_options 声明 HTTP 路径，路径为 /ai_workbench/api/v1/<资源>/<动作>，统一 POST。
+//   * 调用人身份由 gateway 写入 gRPC metadata，请求消息中不包含 actor / viewer 等身份字段。
+//   * 接口级权限在 BSP 权限平台按方法配置。
+//   * 业务 JSON（payload、body、dsl、report）用 bytes 承载 UTF-8 JSON，不用 google.protobuf.Struct，
+//     避免数字变成 double 导致金额丢精度。
 //   * 时间统一为 Unix 毫秒（int64），0 表示未设置。
-//   * 状态、优先级取值对齐 Morning Brief（见 TaskStatus、TaskPriority）。
 package workbench.v1;
+
+import "bgw/v1/options.proto";
 
 option go_package = "./pb";
 
-// ---------------------------------------------------------------------------
-// 枚举
-// ---------------------------------------------------------------------------
+
+// 任务类型及其自有组件（schema、来源、workflow、自有卡片模板）
+service TaskTypeService {
+  // 新建任务类型并创建草稿
+  rpc CreateTaskType(CreateTaskTypeReq) returns (CreateTaskTypeResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/task_type/create";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":20, "ip":true, "path":true}, {"rate":100, "path":true}]'
+        }
+      ];
+    };
+  }
+
+  // 任务类型列表，按 namespace 筛选
+  rpc ListTaskTypes(ListTaskTypesReq) returns (ListTaskTypesResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/task_type/list";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+
+  // 获取已发布版本及其发布清单
+  rpc GetTaskType(GetTaskTypeReq) returns (GetTaskTypeResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/task_type/get";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+
+  // 获取草稿；没有时基于最新发布版本创建
+  rpc GetTaskTypeDraft(TaskTypeKeyReq) returns (GetTaskTypeDraftResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/task_type/draft/get";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+
+  // 保存草稿（revision 乐观锁）
+  rpc SaveTaskTypeDraft(SaveTaskTypeDraftReq) returns (SaveTaskTypeDraftResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/task_type/draft/save";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":20, "ip":true, "path":true}, {"rate":100, "path":true}]'
+        }
+      ];
+    };
+  }
+
+  // 丢弃草稿
+  rpc DiscardTaskTypeDraft(DiscardDraftReq) returns (Empty) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/task_type/draft/discard";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":20, "ip":true, "path":true}, {"rate":100, "path":true}]'
+        }
+      ];
+    };
+  }
+
+  // 对草稿及其依赖闭包完整编译校验
+  rpc ValidateTaskTypeDraft(TaskTypeKeyReq) returns (ValidateResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/task_type/draft/validate";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+
+  // 试运行：动作节点只记录不执行，虚拟时钟
+  rpc DryRunTaskTypeDraft(DryRunTaskTypeDraftReq) returns (DryRunResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/task_type/draft/dry_run";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":20, "ip":true, "path":true}, {"rate":100, "path":true}]'
+        }
+      ];
+    };
+  }
+
+  // 按 schema 生成或从历史任务取样例 payload
+  rpc GenerateSamplePayload(GenerateSamplePayloadReq) returns (GenerateSamplePayloadResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/task_type/sample_payload";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+
+  // 用样例数据预览卡片模板
+  rpc PreviewView(PreviewViewReq) returns (PreviewViewResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/task_type/view/preview";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+
+  // 试跑来源：cron 立即扫描一次，Kafka / API 用样例消息
+  rpc TrialSource(TrialSourceReq) returns (TrialSourceResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/task_type/source/trial";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":20, "ip":true, "path":true}, {"rate":100, "path":true}]'
+        }
+      ];
+    };
+  }
+
+  // 版本历史
+  rpc ListTaskTypeVersions(TaskTypeKeyReq) returns (ListVersionsResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/task_type/versions";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+}
+
+// 共享组件：卡片模板、分配策略、跨部门协议、提示词模板
+service ComponentService {
+  // 新建共享组件并创建草稿
+  rpc CreateComponent(CreateComponentReq) returns (CreateComponentResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/component/create";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":20, "ip":true, "path":true}, {"rate":100, "path":true}]'
+        }
+      ];
+    };
+  }
+
+  // 组件库列表
+  rpc ListComponents(ListComponentsReq) returns (ListComponentsResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/component/list";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+
+  // 获取已发布版本
+  rpc GetComponent(GetComponentReq) returns (GetComponentResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/component/get";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+
+  // 获取草稿；没有时基于最新发布版本创建
+  rpc GetComponentDraft(ComponentRefReq) returns (GetComponentDraftResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/component/draft/get";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+
+  // 保存草稿（revision 乐观锁）
+  rpc SaveComponentDraft(SaveComponentDraftReq) returns (SaveComponentDraftResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/component/draft/save";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":20, "ip":true, "path":true}, {"rate":100, "path":true}]'
+        }
+      ];
+    };
+  }
+
+  // 丢弃草稿
+  rpc DiscardComponentDraft(DiscardComponentDraftReq) returns (Empty) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/component/draft/discard";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":20, "ip":true, "path":true}, {"rate":100, "path":true}]'
+        }
+      ];
+    };
+  }
+
+  // 校验草稿，并检查对引用方的影响
+  rpc ValidateComponentDraft(ComponentRefReq) returns (ValidateResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/component/draft/validate";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+
+  // 版本历史
+  rpc ListComponentVersions(ComponentRefReq) returns (ListVersionsResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/component/versions";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+
+  // 查看哪些任务类型版本引用了该组件
+  rpc ListDependents(ListDependentsReq) returns (ListDependentsResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/component/dependents";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+}
+
+// 变更集：审批与发布的单位；审批由公司审批平台完成
+service ChangeSetService {
+  // 把草稿打包为变更集，并对依赖闭包编译校验
+  rpc CreateChangeSet(CreateChangeSetReq) returns (ChangeSet) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/change_set/create";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":20, "ip":true, "path":true}, {"rate":100, "path":true}]'
+        }
+      ];
+    };
+  }
+
+  // 为共享组件的引用方一键生成升级草稿并加入变更集
+  rpc AddDependentUpgrades(AddDependentUpgradesReq) returns (ChangeSet) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/change_set/add_dependents";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":20, "ip":true, "path":true}, {"rate":100, "path":true}]'
+        }
+      ];
+    };
+  }
+
+  // 变更集详情
+  rpc GetChangeSet(ChangeSetIdReq) returns (ChangeSet) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/change_set/get";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+
+  // 变更集列表
+  rpc ListChangeSets(ListChangeSetsReq) returns (ListChangeSetsResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/change_set/list";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+
+  // 变更集内各项与其基础版本的差异（审批单链接到此）
+  rpc DiffChangeSet(ChangeSetIdReq) returns (DiffChangeSetResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/change_set/diff";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+
+  // 提交审批：快照草稿、锁定、在公司审批平台创建审批实例
+  rpc SubmitChangeSet(ChangeSetIdReq) returns (SubmitChangeSetResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/change_set/submit";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":20, "ip":true, "path":true}, {"rate":100, "path":true}]'
+        }
+      ];
+    };
+  }
+
+  // 撤回审批，草稿解锁
+  rpc WithdrawChangeSet(ChangeSetIdReq) returns (ChangeSet) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/change_set/withdraw";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":20, "ip":true, "path":true}, {"rate":100, "path":true}]'
+        }
+      ];
+    };
+  }
+
+  // 公司审批平台回调：通过则原子发布，驳回则退回草稿
+  rpc OnApprovalResult(OnApprovalResultReq) returns (OnApprovalResultResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/change_set/approval_callback";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":200, "path":true}]'
+        }
+      ];
+    };
+  }
+
+  // 下线某个版本；仍被引用的共享组件版本不能下线
+  rpc RetireVersion(RetireVersionReq) returns (Empty) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/config/version/retire";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":20, "ip":true, "path":true}, {"rate":100, "path":true}]'
+        }
+      ];
+    };
+  }
+}
+
+// 画布与配置表单的数据源
+service CatalogService {
+  // 节点类型目录：配置 schema、UI 提示、端口规则
+  rpc ListNodeTypes(Empty) returns (ListNodeTypesResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/catalog/node_types";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+
+  // skill 列表（转发 Skillhub）
+  rpc ListSkills(ListSkillsReq) returns (ListSkillsResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/catalog/skills";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+
+  // skill 的输入输出 schema（转发 Skillhub）
+  rpc GetSkillSchema(GetSkillSchemaReq) returns (GetSkillSchemaResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/catalog/skill/schema";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+}
+
+// API 来源：外部系统推送标准事件信封
+service IngestService {
+  // 推送事件（按 dedup_key 幂等）
+  rpc PushEvent(PushEventReq) returns (PushEventResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/ingest/event/push";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":200, "path":true}]'
+        }
+      ];
+    };
+  }
+}
+
+// 工作流运行
+service RunService {
+  // 启动运行（按 biz_key 幂等）
+  rpc StartRun(StartRunReq) returns (StartRunResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/run/start";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":20, "ip":true, "path":true}, {"rate":100, "path":true}]'
+        }
+      ];
+    };
+  }
+
+  // 向等待中的人工节点发送选择（按任务表鉴权）
+  rpc Signal(SignalReq) returns (SignalResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/run/signal";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":20, "ip":true, "path":true}, {"rate":100, "path":true}]'
+        }
+      ];
+    };
+  }
+
+  // 取消运行
+  rpc CancelRun(CancelRunReq) returns (Empty) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/run/cancel";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":20, "ip":true, "path":true}, {"rate":100, "path":true}]'
+        }
+      ];
+    };
+  }
+
+  // 运行状态，供运行态画布着色
+  rpc GetRun(RunIdReq) returns (RunView) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/run/get";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+
+  // 按任务、biz_key、状态查运行
+  rpc ListRuns(ListRunsReq) returns (ListRunsResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/run/list";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+
+  // 运行事件时间线
+  rpc GetRunEvents(GetRunEventsReq) returns (GetRunEventsResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/run/events";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+
+  // 人工干预：重试节点
+  rpc RetryNode(AdminNodeReq) returns (Empty) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/run/node/retry";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":20, "ip":true, "path":true}, {"rate":100, "path":true}]'
+        }
+      ];
+    };
+  }
+
+  // 人工干预：以指定端口跳过节点
+  rpc SkipNode(AdminNodeReq) returns (Empty) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/run/node/skip";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":20, "ip":true, "path":true}, {"rate":100, "path":true}]'
+        }
+      ];
+    };
+  }
+}
+
+// 任务处理
+service TaskService {
+  // 任务详情（按调用人脱敏）
+  rpc GetTask(TaskIdReq) returns (TaskView) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/task/get";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+
+  // 我的任务，按优先级、截止时间排序
+  rpc ListMyTasks(ListMyTasksReq) returns (ListMyTasksResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/task/my/list";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+
+  // 任务事件时间线
+  rpc GetTaskEvents(GetTaskEventsReq) returns (GetTaskEventsResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/task/events";
+      http_method: HTTP_METHOD_POST;
+    };
+  }
+
+  // 认领组任务（unassigned -> pending，CAS）
+  rpc ClaimTask(TaskIdReq) returns (TaskView) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/task/claim";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":20, "ip":true, "path":true}, {"rate":100, "path":true}]'
+        }
+      ];
+    };
+  }
+
+  // 开始处理（pending -> processing，不影响流程）
+  rpc StartProcessing(TaskIdReq) returns (TaskView) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/task/start";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":20, "ip":true, "path":true}, {"rate":100, "path":true}]'
+        }
+      ];
+    };
+  }
+
+  // 调整优先级（原因必填，写 Task Event）
+  rpc UpdatePriority(UpdatePriorityReq) returns (TaskView) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/task/priority/update";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":20, "ip":true, "path":true}, {"rate":100, "path":true}]'
+        }
+      ];
+    };
+  }
+
+  // 转派（只改变处理人，状态不变）
+  rpc Reassign(ReassignReq) returns (TaskView) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/task/reassign";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":20, "ip":true, "path":true}, {"rate":100, "path":true}]'
+        }
+      ];
+    };
+  }
+}
+
+// 第三方回调（gateway 透传原始请求体与请求头）
+service CallbackService {
+  // Lark 卡片交互：验签 -> open_id 映射 -> 按任务表鉴权 -> Signal
+  rpc LarkCardCallback(LarkCardCallbackReq) returns (LarkCardCallbackResp) {
+    option (bgw.v1.method_options) = {
+      path       : "/ai_workbench/api/v1/callback/lark/card";
+      http_method: HTTP_METHOD_POST;
+      filters    : [
+        {
+          name: FILTER_BIZ_LIMITER_V2;
+          args: '--rules=[{"rate":200, "path":true}]'
+        }
+      ];
+    };
+  }
+}
+
+// ===========================================================================
+// 公共
+// ===========================================================================
+
+message Empty {}
 
 // 任务状态。proto3 枚举首值必须为 0，因此用 TASK_STATUS_UNSPECIFIED 占位；
-// 线上存储与 Go 代码使用 internal/task.TaskStatus（-1/0/1/2/3），由转换层映射。
+// 存储与 Go 代码使用 internal/task.TaskStatus（-1/0/1/2/3），转换统一用 StatusToProto / StatusFromProto。
 enum TaskStatus {
   TASK_STATUS_UNSPECIFIED = 0;
   TASK_STATUS_UNASSIGNED = 1;  // 存储值 -1
@@ -27,7 +608,7 @@ enum TaskStatus {
   TASK_STATUS_SOLVED = 5;      // 存储值 3，终态
 }
 
-// 任务优先级，数值越小越紧急。
+// 任务优先级，数值越小越紧急；与存储值一致。
 enum TaskPriority {
   TASK_PRIORITY_P0 = 0;  // 立即
   TASK_PRIORITY_P1 = 1;  // 今日
@@ -35,51 +616,460 @@ enum TaskPriority {
   TASK_PRIORITY_P3 = 3;  // 维护
 }
 
-// ---------------------------------------------------------------------------
-// 工作流运行（引擎 API）
-// ---------------------------------------------------------------------------
-
-message StartRunReq {
-  string plan_id = 1;
-  string biz_key = 2;     // 业务幂等键，如 task:<task_id>
-  bytes trigger_json = 3; // 触发数据
-  bool dry_run = 4;
+// 配置对象类型：任务类型是发布单元，其余为可共享的组件。
+enum ConfigKind {
+  CONFIG_KIND_UNSPECIFIED = 0;
+  CONFIG_KIND_TASK_TYPE = 1;
+  CONFIG_KIND_VIEW = 2;        // 共享卡片模板
+  CONFIG_KIND_ASSIGNMENT = 3;  // 共享分配策略
+  CONFIG_KIND_AGREEMENT = 4;   // 跨部门协议
+  CONFIG_KIND_PROMPT = 5;      // 提示词模板（如 AI 摘要）
 }
 
+message ConfigRef {
+  ConfigKind kind = 1;
+  string key = 2;
+}
+
+message PageReq {
+  string cursor = 1;
+  int32 page_size = 2;
+}
+
+// 编译 / 校验问题，供画布高亮与 AI 校验—修复循环使用。
+message Issue {
+  string code = 1;      // cycle / unknown_port / bad_reference / inherit_conflict ...
+  string severity = 2;  // error / warning
+  string path = 3;      // 出问题的位置，如 workflow.nodes.ask_rm.config.timeout
+  string node_id = 4;
+  string edge_id = 5;
+  string message = 6;
+}
+
+message Draft {
+  int32 base_version = 1;          // 0 = 全新
+  int64 revision = 2;              // 乐观锁
+  bytes body_json = 3;
+  int64 locked_by_change_set = 4;  // 非 0 = 审批中，不可编辑
+  string updated_by = 5;
+  int64 updated_at = 6;
+}
+
+message VersionInfo {
+  int32 version = 1;
+  string content_hash = 2;
+  string state = 3;  // published / retired
+  int64 change_set_id = 4;
+  string published_by = 5;
+  string approved_by = 6;
+  int64 published_at = 7;
+}
+
+// 发布清单中的一项：自有组件只有内容哈希，共享组件带固定版本。
+message ManifestItem {
+  string item_kind = 1;  // schema / source / workflow / view / assignment / agreement / prompt
+  string item_key = 2;
+  ConfigRef ref = 3;     // 共享组件；自有组件为空
+  int32 ref_version = 4;
+  string content_hash = 5;
+}
+
+// ===========================================================================
+// TaskTypeService：任务类型及其自有组件
+// ===========================================================================
+
+message TaskTypeSummary {
+  string key = 1;
+  string name = 2;
+  string namespace = 3;
+  int32 latest_version = 4;  // 0 = 尚未发布
+  bool has_draft = 5;
+  string status = 6;         // active / retired
+  int64 updated_at = 7;
+}
+
+message CreateTaskTypeReq {
+  string key = 1;
+  string name = 2;
+  string namespace = 3;
+  string description = 4;
+}
+message CreateTaskTypeResp {
+  string key = 1;
+  Draft draft = 2;
+}
+
+message ListTaskTypesReq {
+  string namespace = 1;
+  string keyword = 2;
+  PageReq page = 3;
+}
+message ListTaskTypesResp {
+  repeated TaskTypeSummary items = 1;
+  string next_cursor = 2;
+}
+
+message GetTaskTypeReq {
+  string key = 1;
+  int32 version = 2;  // 0 = 最新已发布版本
+}
+message GetTaskTypeResp {
+  TaskTypeSummary summary = 1;
+  VersionInfo version = 2;
+  bytes body_json = 3;
+  repeated ManifestItem manifest = 4;
+}
+
+message TaskTypeKeyReq {
+  string key = 1;
+}
+
+message GetTaskTypeDraftResp {
+  Draft draft = 1;  // 没有草稿时自动基于最新发布版本创建
+}
+
+message SaveTaskTypeDraftReq {
+  string key = 1;
+  int64 revision = 2;  // 必须等于当前 revision，否则返回冲突
+  bytes body_json = 3;
+}
+message SaveTaskTypeDraftResp {
+  int64 revision = 1;
+  repeated Issue issues = 2;  // 保存时的快速校验结果，不阻止保存
+}
+
+message DiscardDraftReq {
+  string key = 1;
+  int64 revision = 2;
+}
+
+message ValidateResp {
+  bool ok = 1;
+  repeated Issue issues = 2;
+}
+
+message DryRunTaskTypeDraftReq {
+  string key = 1;
+  repeated bytes sample_json = 2;   // 历史事件样本或手工构造的 payload
+  map<string, string> choices = 3;  // 人工节点预设选择：node_id -> option
+}
+message DryRunResp {
+  bytes report_json = 1;  // 路径、处理人、渲染后的卡片、模拟发送清单、超时与升级时间点
+  repeated Issue issues = 2;
+}
+
+message GenerateSamplePayloadReq {
+  string key = 1;
+  bool from_draft = 2;    // true = 按草稿 schema 生成；false = 按最新发布版本
+  bool from_history = 3;  // true = 取一条历史任务并脱敏，否则按 schema 构造
+}
+message GenerateSamplePayloadResp {
+  bytes payload_json = 1;
+}
+
+message PreviewViewReq {
+  string task_type_key = 1;  // 用该任务类型（草稿）的 schema 做脱敏与格式化
+  oneof view {
+    string owned_view_key = 2;  // 任务类型草稿中的自有模板
+    ConfigRef shared_view = 3;  // 共享模板（取其草稿，未有草稿则取最新版本）
+    bytes inline_view_json = 4; // 编辑中尚未保存的模板
+  }
+  string channel = 5;       // lark / web / email
+  bytes payload_json = 6;
+  string audience_dept = 7; // 用于选择受众变体与脱敏级别
+}
+message PreviewViewResp {
+  bytes rendered_json = 1;
+  repeated Issue issues = 2;
+}
+
+message TrialSourceReq {
+  string key = 1;
+  string source_key = 2;   // 草稿中的来源
+  bytes sample_json = 3;   // Kafka / API 来源：样例消息；cron 来源留空，立即试跑一次扫描
+}
+message TrialSourceResp {
+  int32 event_count = 1;
+  repeated bytes sample_task_json = 2;  // 映射后的任务样例
+  repeated Issue issues = 3;
+}
+
+message ListVersionsResp {
+  repeated VersionInfo items = 1;
+}
+
+// ===========================================================================
+// ComponentService：共享组件
+// ===========================================================================
+
+message ComponentSummary {
+  ConfigRef ref = 1;
+  string name = 2;
+  string namespace = 3;
+  int32 latest_version = 4;
+  bool has_draft = 5;
+  string status = 6;
+  int64 updated_at = 7;
+}
+
+message CreateComponentReq {
+  ConfigRef ref = 1;
+  string name = 2;
+  string namespace = 3;
+  string description = 4;
+}
+message CreateComponentResp {
+  ComponentSummary summary = 1;
+  Draft draft = 2;
+}
+
+message ListComponentsReq {
+  ConfigKind kind = 1;
+  string namespace = 2;
+  string keyword = 3;
+  PageReq page = 4;
+}
+message ListComponentsResp {
+  repeated ComponentSummary items = 1;
+  string next_cursor = 2;
+}
+
+message GetComponentReq {
+  ConfigRef ref = 1;
+  int32 version = 2;  // 0 = 最新已发布版本
+}
+message GetComponentResp {
+  ComponentSummary summary = 1;
+  VersionInfo version = 2;
+  bytes body_json = 3;
+}
+
+message ComponentRefReq {
+  ConfigRef ref = 1;
+}
+
+message GetComponentDraftResp {
+  Draft draft = 1;
+}
+
+message SaveComponentDraftReq {
+  ConfigRef ref = 1;
+  int64 revision = 2;
+  bytes body_json = 3;
+}
+message SaveComponentDraftResp {
+  int64 revision = 1;
+  repeated Issue issues = 2;
+}
+
+message DiscardComponentDraftReq {
+  ConfigRef ref = 1;
+  int64 revision = 2;
+}
+
+message ListDependentsReq {
+  ConfigRef ref = 1;
+  int32 version = 2;  // 0 = 所有版本
+}
+message Dependent {
+  string task_type_key = 1;
+  int32 task_type_version = 2;
+  int32 ref_version = 3;   // 引用的组件版本
+  bool is_latest = 4;      // 是否为该任务类型的最新发布版本
+}
+message ListDependentsResp {
+  repeated Dependent items = 1;
+}
+
+// ===========================================================================
+// ChangeSetService：变更集、审批与发布
+// ===========================================================================
+
+message ChangeSetItem {
+  ConfigRef ref = 1;
+  int64 draft_revision = 2;
+  int32 base_version = 3;
+  int32 target_version = 4;
+  string reason = 5;  // edit / dependent_upgrade
+}
+
+message ChangeSet {
+  int64 id = 1;
+  string namespace = 2;
+  string title = 3;
+  string state = 4;  // open / submitted / published / rejected / withdrawn
+  repeated ChangeSetItem items = 5;
+  string approval_instance_id = 6;
+  string approval_url = 7;
+  string created_by = 8;
+  string decided_by = 9;
+  string decision_comment = 10;
+  repeated Issue issues = 11;  // 对依赖闭包的编译校验结果；存在 error 时不允许提交
+  int64 created_at = 12;
+  int64 updated_at = 13;
+}
+
+message CreateChangeSetReq {
+  string namespace = 1;
+  string title = 2;
+  repeated ConfigRef items = 3;  // 要加入的草稿
+}
+
+message AddDependentUpgradesReq {
+  int64 change_set_id = 1;
+  ConfigRef component = 2;  // 变更集中的共享组件；为其所有引用方的最新版本生成升级草稿并加入
+}
+
+message ChangeSetIdReq {
+  int64 id = 1;
+}
+
+message ListChangeSetsReq {
+  string namespace = 1;
+  string state = 2;
+  bool created_by_me = 3;
+  PageReq page = 4;
+}
+message ListChangeSetsResp {
+  repeated ChangeSet items = 1;
+  string next_cursor = 2;
+}
+
+message ItemDiff {
+  ConfigRef ref = 1;
+  int32 base_version = 2;
+  bytes base_json = 3;
+  bytes target_json = 4;
+}
+message DiffChangeSetResp {
+  repeated ItemDiff items = 1;
+}
+
+message SubmitChangeSetResp {
+  string approval_instance_id = 1;
+  string approval_url = 2;
+}
+
+// 公司审批平台的回调。gateway 透传原始请求体与请求头，平台按审批平台约定验签后解析。
+message OnApprovalResultReq {
+  bytes raw_body = 1;
+  map<string, string> headers = 2;
+}
+message OnApprovalResultResp {
+  bool accepted = 1;
+}
+
+message RetireVersionReq {
+  ConfigRef ref = 1;
+  int32 version = 2;
+  string reason = 3;
+}
+
+// ===========================================================================
+// CatalogService：画布与配置表单的数据源
+// ===========================================================================
+
+message NodeType {
+  string type = 1;            // trigger / condition / merge / timer / human_choice / skill_call / llm / ...
+  string category = 2;        // native / action
+  string display_name = 3;
+  string description = 4;
+  string icon = 5;
+  bytes config_schema_json = 6;  // 节点配置的 JSON Schema，前端据此生成表单
+  bytes ui_schema_json = 7;      // 表单布局提示：分组、控件、下拉数据源
+  string port_rule = 8;          // fixed / from_options / from_branches
+  repeated string fixed_ports = 9;
+}
+message ListNodeTypesResp {
+  repeated NodeType items = 1;
+}
+
+message ListSkillsReq {
+  string keyword = 1;
+  string category = 2;  // query / reasoning / action
+  PageReq page = 3;
+}
+message Skill {
+  string name = 1;
+  string display_name = 2;
+  string description = 3;
+  string category = 4;
+  bool side_effect = 5;
+  string latest_version = 6;
+}
+message ListSkillsResp {
+  repeated Skill items = 1;
+  string next_cursor = 2;
+}
+
+message GetSkillSchemaReq {
+  string name = 1;
+  string version = 2;  // 空 = 最新
+}
+message GetSkillSchemaResp {
+  bytes input_schema_json = 1;
+  bytes output_schema_json = 2;
+}
+
+// ===========================================================================
+// IngestService：API 来源
+// ===========================================================================
+
+// 标准事件信封；Kafka 来源的消息体与此一致。调用方身份由 gateway 写入 metadata。
+message PushEventReq {
+  string event_type = 1;
+  string subject_type = 2;
+  string subject_id = 3;
+  int64 occurred_at = 4;
+  bytes payload_json = 5;
+  string dedup_key = 6;
+}
+message PushEventResp {
+  bool accepted = 1;
+  bool duplicate = 2;
+}
+
+// ===========================================================================
+// RunService：工作流运行
+// ===========================================================================
+
+message StartRunReq {
+  string task_type_key = 1;
+  int32 task_type_version = 2;  // 0 = 最新已发布版本
+  string biz_key = 3;           // 业务幂等键，如 task:<task_id>
+  bytes trigger_json = 4;
+}
 message StartRunResp {
   int64 run_id = 1;
-  int32 plan_version = 2;
-  bool created = 3; // false = biz_key 已存在，返回已有 run
+  int32 task_type_version = 2;
+  bool created = 3;  // false = biz_key 已存在，返回已有 run
 }
 
 message SignalReq {
   int64 run_id = 1;
   string node_id = 2;
   int32 iteration = 3;
-  string option = 4;   // 人工选择的端口
-  bytes form_json = 5; // 必填项、备注、snooze 时长等
-  string actor = 6;    // 调用方已按任务表鉴权的内部用户
+  string option = 4;
+  bytes form_json = 5;  // 必填项、备注、snooze 时长等
 }
-
 message SignalResp {
   bool accepted = 1;
-  string reason = 2; // 被拒绝时的原因，卡片上即时提示
+  string reason = 2;  // 被拒绝时的原因，卡片上即时提示
 }
 
 message CancelRunReq {
   int64 run_id = 1;
-  string actor = 2;
-  string reason = 3;
+  string reason = 2;
 }
 
-message GetRunReq {
+message RunIdReq {
   int64 run_id = 1;
 }
 
 message NodeView {
   string node_id = 1;
   int32 iteration = 2;
-  string status = 3; // pending / ready / running / waiting / succeeded / skipped / failed
+  string status = 3;  // pending / ready / running / waiting / succeeded / skipped / failed
   string port = 4;
   int32 attempt = 5;
   int64 started_at = 6;
@@ -88,154 +1078,132 @@ message NodeView {
 
 message RunView {
   int64 run_id = 1;
-  string plan_id = 2;
-  int32 plan_version = 3;
-  string status = 4; // running / succeeded / failed / needs_intervention / cancelled
+  string task_type_key = 2;
+  int32 task_type_version = 3;
+  string status = 4;  // running / succeeded / failed / needs_intervention / cancelled
   repeated NodeView nodes = 5;
+  bytes graph_json = 6;  // 该版本的 workflow 图，供运行态画布绘制
+}
+
+message ListRunsReq {
+  int64 task_id = 1;
+  string biz_key = 2;
+  string status = 3;
+  PageReq page = 4;
+}
+message RunSummary {
+  int64 run_id = 1;
+  string task_type_key = 2;
+  int32 task_type_version = 3;
+  string status = 4;
+  int64 created_at = 5;
+  int64 updated_at = 6;
+}
+message ListRunsResp {
+  repeated RunSummary items = 1;
+  string next_cursor = 2;
+}
+
+message GetRunEventsReq {
+  int64 run_id = 1;
+  PageReq page = 2;
+}
+message RunEvent {
+  int64 id = 1;
+  string node_id = 2;
+  int32 iteration = 3;
+  string type = 4;
+  bytes payload_json = 5;
+  string actor = 6;
+  int64 created_at = 7;
+}
+message GetRunEventsResp {
+  repeated RunEvent items = 1;
+  string next_cursor = 2;
 }
 
 message AdminNodeReq {
   int64 run_id = 1;
   string node_id = 2;
-  string port = 3; // SkipNode 时指定以哪个端口完成
-  string actor = 4;
-  string reason = 5;
+  string port = 3;  // SkipNode 时指定以哪个端口完成
+  string reason = 4;
 }
 
-message Empty {}
-
-service RunService {
-  // 启动 workflow 运行（按 biz_key 幂等）
-  rpc StartRun(StartRunReq) returns (StartRunResp);
-  // 向等待中的人工节点发送选择
-  rpc Signal(SignalReq) returns (SignalResp);
-  // 取消运行（如源工单离开 Maker Review Case）
-  rpc CancelRun(CancelRunReq) returns (Empty);
-  // 查询运行状态，供运行态画布着色
-  rpc GetRun(GetRunReq) returns (RunView);
-  // 人工干预：重试节点
-  rpc RetryNode(AdminNodeReq) returns (Empty);
-  // 人工干预：以指定端口跳过节点
-  rpc SkipNode(AdminNodeReq) returns (Empty);
-}
-
-// ---------------------------------------------------------------------------
-// 任务中心
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// TaskService：任务处理
+// ===========================================================================
 
 message TaskView {
   int64 id = 1;
-  string task_type = 2;
-  TaskStatus status = 3;
-  TaskPriority priority = 4;
-  string assignee_id = 5;
-  string current_node = 6;
-  string resolution = 7;  // contacted / dismissed / escalated_out / auto_closed
-  string sla_status = 8;  // on_track / at_risk / breached
-  int64 snooze_until = 9;
-  int64 due_at = 10;
-  bytes payload_json = 11; // 已按查看者脱敏
-  int64 updated_at = 12;
+  string task_type_key = 2;
+  int32 task_type_version = 3;
+  TaskStatus status = 4;
+  TaskPriority priority = 5;
+  string assignee_id = 6;
+  string current_node = 7;
+  string resolution = 8;  // contacted / dismissed / escalated_out / auto_closed
+  string sla_status = 9;  // on_track / at_risk / breached
+  int64 snooze_until = 10;
+  int64 due_at = 11;
+  bytes payload_json = 12;  // 已按调用人脱敏
+  int64 run_id = 13;
+  int64 updated_at = 14;
 }
 
-message GetTaskReq {
+message TaskIdReq {
   int64 id = 1;
-  string viewer = 2;
 }
 
 message ListMyTasksReq {
-  string viewer = 1;
-  repeated TaskStatus statuses = 2;
-  string cursor = 3;
-  int32 page_size = 4;
+  repeated TaskStatus statuses = 1;
+  string task_type_key = 2;
+  PageReq page = 3;
 }
-
 message ListMyTasksResp {
   repeated TaskView items = 1;
   string next_cursor = 2;
 }
 
-message TaskActionReq {
+message GetTaskEventsReq {
   int64 id = 1;
-  string actor = 2;
+  PageReq page = 2;
+}
+message TaskEvent {
+  int64 id = 1;
+  string type = 2;
+  TaskStatus from_status = 3;
+  TaskStatus to_status = 4;
+  string actor = 5;
+  string reason = 6;
+  bytes detail_json = 7;
+  int64 created_at = 8;
+}
+message GetTaskEventsResp {
+  repeated TaskEvent items = 1;
+  string next_cursor = 2;
 }
 
 message UpdatePriorityReq {
   int64 id = 1;
   TaskPriority priority = 2;
-  string actor = 3;
-  string reason = 4; // 必填
+  string reason = 3;  // 必填
 }
 
 message ReassignReq {
   int64 id = 1;
   string assignee_id = 2;
-  string actor = 3;
-  string reason = 4; // 必填
+  string reason = 3;  // 必填
 }
 
-service TaskService {
-  // 任务详情
-  rpc GetTask(GetTaskReq) returns (TaskView);
-  // 我的任务列表，按优先级、截止时间排序
-  rpc ListMyTasks(ListMyTasksReq) returns (ListMyTasksResp);
-  // 认领组任务（unassigned -> pending，CAS）
-  rpc ClaimTask(TaskActionReq) returns (TaskView);
-  // 开始处理（pending -> processing，不影响流程）
-  rpc StartProcessing(TaskActionReq) returns (TaskView);
-  // 调整优先级（需权限，原因必填，写 Task Event）
-  rpc UpdatePriority(UpdatePriorityReq) returns (TaskView);
-  // 转派（只改变处理人，状态不变）
-  rpc Reassign(ReassignReq) returns (TaskView);
+// ===========================================================================
+// CallbackService：第三方回调
+// ===========================================================================
+
+// gateway 透传原始请求体与请求头，平台用原始请求体验签。
+message LarkCardCallbackReq {
+  bytes raw_body = 1;
+  map<string, string> headers = 2;
 }
-
-// ---------------------------------------------------------------------------
-// 配置：编译、试运行、发布
-// ---------------------------------------------------------------------------
-
-message CompileReq {
-  bytes dsl_json = 1;
-}
-
-message CompileIssue {
-  string code = 1;
-  string node_id = 2;
-  string edge_id = 3;
-  string message = 4;
-}
-
-message CompileResp {
-  bool ok = 1;
-  repeated CompileIssue issues = 2;
-}
-
-message DryRunReq {
-  bytes dsl_json = 1;
-  repeated bytes sample_json = 2;  // 历史事件样本或手工 payload
-  map<string, string> choices = 3; // 人工节点预设选择：node_id -> option
-}
-
-message DryRunResp {
-  bytes report_json = 1;
-  repeated CompileIssue issues = 2;
-}
-
-message PublishPlanReq {
-  string plan_id = 1;
-  bytes dsl_json = 2;
-  string actor = 3;
-}
-
-message PublishPlanResp {
-  string plan_id = 1;
-  int32 version = 2;
-}
-
-service PlanService {
-  // 编译并校验 DSL，不保存
-  rpc CompilePlan(CompileReq) returns (CompileResp);
-  // 试运行：复用编译器与推进器，动作节点只记录不执行
-  rpc DryRunPlan(DryRunReq) returns (DryRunResp);
-  // 发布新版本（审批通过后调用；已发布版本不可修改）
-  rpc PublishPlan(PublishPlanReq) returns (PublishPlanResp);
+message LarkCardCallbackResp {
+  bytes body_json = 1;  // 返回给 Lark 的 toast / 更新后的卡片
 }
