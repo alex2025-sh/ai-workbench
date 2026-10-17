@@ -117,7 +117,8 @@
         "timezone": { "type": "string", "default": "Asia/Shanghai" },
         "skill": { "$ref": "#/$defs/skill_name" },
         "input": { "$ref": "#/$defs/template_map" },
-        "filter": { "$ref": "#/$defs/expression", "description": "表达式，基于 record；为 false 的记录丢弃。" },
+        "filter": { "$ref": "#/$defs/expression", "description": "表达式，基于 record；为 true 时创建任务（已存在则跳过），为 false 的记录丢弃。" },
+        "close_when": { "$ref": "#/$defs/expression", "description": "表达式，基于 record；为 true 时按去重键找到未完结的任务，取消它的 run，任务以 auto_closed 完结。先于 filter 求值。" },
         "mapping": { "$ref": "#/$defs/mapping" }
       }
     },
@@ -131,6 +132,7 @@
         "kind": true,
         "event_type": { "type": "string", "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$", "description": "如 appeal.created。" },
         "filter": { "$ref": "#/$defs/expression", "description": "表达式，基于 record（信封中的 data）。" },
+        "close_when": { "$ref": "#/$defs/expression", "description": "表达式，基于 record；为 true 时取消同一去重键下未完结任务的 run。" },
         "mapping": { "$ref": "#/$defs/mapping" }
       }
     },

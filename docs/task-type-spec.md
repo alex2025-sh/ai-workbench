@@ -43,7 +43,7 @@
 
 ## 表达式与模板
 
-- **表达式**：`when`、`anchor`、`filter`、`subject`、`expr`、`exclude`、来源的 `mapping` 直接写表达式，如 `payload.vip_level > 0`。
+- **表达式**：`when`、`anchor`、`filter`、`close_when`、`subject`、`expr`、`exclude`、来源的 `mapping` 直接写表达式，如 `payload.vip_level > 0`。
 - **模板**：其余字符串都是模板，用 `{{ 表达式 }}` 插值，如 `VIP 工单 {{ payload.appeal_id }}`。
 
 语法是 [expr-lang](https://expr-lang.org/docs/language-definition)。表达式是纯函数，不能调用 `now()`。
@@ -54,7 +54,7 @@
 | `task` | 任务公共字段：`id`、`priority`、`assignee` | workflow、卡片模板、默认分配策略 |
 | `nodes.<id>.output` | 上游节点的输出 | workflow（节点必须在当前节点上游）、卡片模板 |
 | `loop.iteration` | 退回环内的轮次 | 环内节点 |
-| `record` | 扫描结果或消息中的原始记录 | 来源的 `filter`、`mapping` |
+| `record` | 扫描结果或消息中的原始记录 | 来源的 `filter`、`close_when`、`mapping` |
 | `viewer` | 查看者：`dept`、`roles` | 卡片的受众变体 `variants[].when` |
 
 ## 节点类型与端口
@@ -74,6 +74,17 @@
 ## 连线
 
 `{ id, from, port, to }`。普通连线必须构成有向无环图；退回用 `kind: rework`，必须同时设置 `max_iterations` 和 `on_exhausted`，源节点必须是 `human_choice`，目标节点必须位于源节点的每条上游路径上。
+
+## 来源
+
+| 字段 | 说明 |
+| --- | --- |
+| `kind` | `cron`（平台按 `schedule` 调用查询 `skill` 增量扫描）/ `kafka` / `api`（生产方按标准信封投递 `event_type`） |
+| `mapping` | payload 字段 → 表达式（基于 `record`），映射结果按 `schema` 校验 |
+| `filter` | 为 true 的记录创建任务；同一 `dedup_key` 的任务已存在时跳过 |
+| `close_when` | 为 true 的记录按 `dedup_key` 找到未完结的任务，取消它的 run，任务以 `auto_closed` 完结；先于 `filter` 求值，需要配置 `dedup_key` |
+
+`close_when` 让外部状态变化直接推动流程：比如工单在中途审核完成，扫描到状态变化就结束提醒，不必等到下一个定时检查点。
 
 ## view 与 assignment 的引用和继承
 

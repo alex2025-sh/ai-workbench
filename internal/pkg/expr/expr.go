@@ -8,6 +8,7 @@
 package expr
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -198,4 +199,53 @@ func uniq(s []string) []string {
 		}
 	}
 	return out
+}
+
+// Decode 解析 JSON 为求值环境可用的值：整数转为 int64，其他数字转为 float64。
+// 金额在 schema 中是 string，不受影响；空输入返回 nil。
+func Decode(raw []byte) (any, error) {
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return nil, nil
+	}
+	dec := json.NewDecoder(strings.NewReader(string(raw)))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	return normalize(v), nil
+}
+
+func normalize(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, val := range x {
+			x[k] = normalize(val)
+		}
+		return x
+	case []any:
+		for i, val := range x {
+			x[i] = normalize(val)
+		}
+		return x
+	case json.Number:
+		if i, err := x.Int64(); err == nil {
+			return i
+		}
+		if f, err := x.Float64(); err == nil {
+			return f
+		}
+		return x.String()
+	default:
+		return v
+	}
+}
+
+// Eval 求值模板：整个模板只是一个 {{ 表达式 }} 时返回表达式的原始值（保留数字、对象等类型），
+// 否则返回拼接后的字符串。
+func (t *Template) Eval(env Env) (any, error) {
+	if len(t.parts) == 1 && t.parts[0].prog != nil {
+		return t.parts[0].prog.Run(env)
+	}
+	return t.Render(env)
 }

@@ -1,9 +1,10 @@
-// Package nodes 是节点执行器注册表。新增节点类型 = 注册一个执行器，推进器代码不变。
+// Package nodes 是节点执行器：每种节点类型一个实现，注册到 Registry，交给引擎按类型查找。
+//
+// 执行器在事务外运行，只通过 engine.ExecContext.Actions（internal/action）访问外部系统，
+// 不直接依赖任务中心、分配服务或 Lark；端口与配置校验在编译期由 dsl 包完成。
 package nodes
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
 	"sync"
 
@@ -11,39 +12,33 @@ import (
 	"github.com/alex2025-sh/ai-workbench/internal/flow/engine"
 )
 
-// ExecContext 是节点执行时可见的上下文。
-type ExecContext struct {
-	Run       engine.Run
-	Node      dsl.Node
-	Iteration int
-	Attempt   int
-	Inputs    json.RawMessage // 已按变量引用求值的输入
-	IdemKey   string          // 外部副作用的幂等键
-	DryRun    bool
-}
-
-// Executor 是一种节点类型的运行时实现。端口与配置校验在编译期由 dsl 包完成（dsl.Ports、dsl.DecodeConfig），
-// 执行器只负责执行。
-type Executor interface {
-	Type() dsl.NodeType
-
-	// Execute 在事务外执行节点，结果交给推进器提交。
-	Execute(ctx context.Context, ec ExecContext) engine.NodeResult
-}
-
-// Registry 保存所有已注册的节点执行器。
+// Registry 保存所有已注册的节点执行器，实现 engine.Executors。
 type Registry struct {
 	mu        sync.RWMutex
-	executors map[dsl.NodeType]Executor
+	executors map[dsl.NodeType]engine.Executor
 }
 
 // NewRegistry 创建空的注册表。
 func NewRegistry() *Registry {
-	return &Registry{executors: make(map[dsl.NodeType]Executor)}
+	return &Registry{executors: make(map[dsl.NodeType]engine.Executor)}
+}
+
+// Default 返回注册了全部内置节点类型的注册表。
+func Default() *Registry {
+	r := NewRegistry()
+	for _, e := range []engine.Executor{
+		trigger{}, end{}, merge{}, condition{}, timer{},
+		skillCall{}, llm{}, larkCard{}, sendEmail{}, emitEvent{}, humanChoice{},
+	} {
+		if err := r.Register(e); err != nil {
+			panic(err)
+		}
+	}
+	return r
 }
 
 // Register 注册执行器；同一类型重复注册返回错误。
-func (r *Registry) Register(e Executor) error {
+func (r *Registry) Register(e engine.Executor) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.executors[e.Type()]; ok {
@@ -53,8 +48,8 @@ func (r *Registry) Register(e Executor) error {
 	return nil
 }
 
-// Get 返回某类型的执行器。
-func (r *Registry) Get(t dsl.NodeType) (Executor, bool) {
+// Get 实现 engine.Executors。
+func (r *Registry) Get(t dsl.NodeType) (engine.Executor, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	e, ok := r.executors[t]

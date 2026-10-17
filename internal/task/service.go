@@ -36,6 +36,7 @@ type SyncStatusCmd struct {
 	TaskID      int64
 	Status      TaskStatus
 	AssigneeID  string
+	Group       string // 待认领的组；AssigneeID 非空时忽略
 	CurrentNode string
 	Resolution  Resolution
 	SnoozeUntil *time.Time

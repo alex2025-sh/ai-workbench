@@ -11,7 +11,11 @@ package schema
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"strings"
 )
 
 // 扩展关键字。
@@ -62,4 +66,61 @@ type Masker interface {
 // EnumSource 提供 x-enum-source 字典的取值与业务含义。
 type EnumSource interface {
 	Label(ctx context.Context, source, value string) (label, description string, err error)
+}
+
+// Mask 按 payload schema 顶层字段（及嵌套 object）的 x-pii 返回脱敏后的副本，原值不变。
+// 用于发往 Lark、邮件、LLM、日志等出口。schemaRaw 无法解析时原样返回。
+func Mask(schemaRaw json.RawMessage, payload map[string]any) map[string]any {
+	var s struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if json.Unmarshal(schemaRaw, &s) != nil || payload == nil {
+		return payload
+	}
+	return maskObject(s.Properties, payload)
+}
+
+func maskObject(props map[string]json.RawMessage, obj map[string]any) map[string]any {
+	out := make(map[string]any, len(obj))
+	for k, v := range obj {
+		out[k] = v
+		raw, ok := props[k]
+		if !ok {
+			continue
+		}
+		var f struct {
+			PII        string                     `json:"x-pii"`
+			Properties map[string]json.RawMessage `json:"properties"`
+		}
+		if json.Unmarshal(raw, &f) != nil {
+			continue
+		}
+		switch PIIStrategy(f.PII) {
+		case PIIDrop:
+			delete(out, k)
+		case PIIHash:
+			sum := sha256.Sum256([]byte(fmt.Sprint(v)))
+			out[k] = hex.EncodeToString(sum[:])[:12]
+		case PIIMaskMiddle:
+			out[k] = maskMiddle(fmt.Sprint(v))
+		default:
+			if sub, ok := v.(map[string]any); ok && len(f.Properties) > 0 {
+				out[k] = maskObject(f.Properties, sub)
+			}
+		}
+	}
+	return out
+}
+
+// maskMiddle 保留首尾各约四分之一，中间替换为 *，如 10000001 → 10****01。
+func maskMiddle(s string) string {
+	r := []rune(s)
+	if len(r) <= 2 {
+		return strings.Repeat("*", len(r))
+	}
+	keep := len(r) / 4
+	if keep == 0 {
+		keep = 1
+	}
+	return string(r[:keep]) + strings.Repeat("*", len(r)-2*keep) + string(r[len(r)-keep:])
 }

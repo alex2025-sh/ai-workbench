@@ -104,6 +104,10 @@ func TestSemanticErrors(t *testing.T) {
 			compiler.IssueSchema, "schema.properties.uid.x-pii"},
 		{"template reads unknown root", `title: "VIP 工单待审核：{{ payload.appeal_id }}"`, `title: "VIP 工单待审核：{{ ticket.id }}"`,
 			compiler.IssueBadReference, "views.rm_card.title"},
+		{"close_when reads payload", `close_when: record.appeal_status != "COMMITED"`, `close_when: payload.appeal_status != "COMMITED"`,
+			compiler.IssueBadReference, "sources.scan_appeal.close_when"},
+		{"close_when needs dedup_key", `dedup_key: "{{ payload.appeal_id }}"`, ``,
+			compiler.IssueBadConfig, "sources.scan_appeal.close_when"},
 		{"workflow error surfaces", "{ id: e12, from: escalate,    port: handled, to: escalated }", "{ id: e12, from: escalate,    port: done, to: escalated }",
 			compiler.IssueUnknownPort, "workflow.edges.e12.port"},
 	}

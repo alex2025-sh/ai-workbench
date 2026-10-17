@@ -19,8 +19,8 @@
   - 业务 JSON 字段用 `bytes`（UTF-8 JSON）承载，不用 `google.protobuf.Struct`，避免数字变 double 丢精度。
   - proto 的 `TaskStatus` 比存储值偏移 2（首值必须为 0），转换统一用 `internal/task` 的 `StatusToProto` / `StatusFromProto`。
 - **没有 HTTP 服务**：Lark 卡片回调与审批平台回调由 gateway 原样透传 raw body 与 headers，落到 gRPC 方法（`CallbackService.LarkCardCallback`、`ChangeSetService.OnApprovalResult`），在服务内验签。
-- 数据访问层由 `goctl model` 从 `deploy/sql/*.sql` 生成到 `internal/model`。
-  - `*_gen.go` 每次生成都会覆盖，**不要手工修改**；自定义查询写在对应的 `*_model.go`。
+- 数据访问层由 `goctl model`（固定 v1.10.2）从 `deploy/sql/*.sql` 生成到 `internal/model`，生成结果已提交，CI 校验与 SQL 一致。
+  - `*_gen.go` 每次生成都会覆盖，**不要手工修改**；自定义查询写在对应的 `*_model.go`（`WithSession` 已导出，供事务内使用）。
   - 改表结构或接口时先改 `.sql` / `.proto`，再 `make gen`。
 - 存储为 TiDB 或 MySQL 8.0（MySQL 协议，只用两者共有的能力；自增 id 不保证单调，排序用 `seq`），外部时钟为 xxl-job，平台只依赖这两者，不引入 Temporal、Redis 等额外服务。
 - goctl 的 DDL 约束：单列主键（联合主键改为 `id` + 联合唯一键）、主键 `AUTO_INCREMENT`；TiDB 专用选项写在 `/*T! ... */` 注释中。
@@ -32,7 +32,7 @@ api/schema/       task_type.schema.json：任务类型 JSON 的结构契约（�
 cmd/wbctl/        命令行：校验 YAML / JSON、导出 body_json 与执行计划、节点类型目录
 examples/         任务类型示例（vip_appeal_alert.yaml），测试保证它们始终能通过校验
 app/rpc/          go-zero zrpc 服务：对外 gRPC 接口（workbench.proto；生成后含 pb/server/logic/svc/etc）
-app/worker/       引擎执行进程：Worker 池、推进器、xxl-job ticker
+app/worker/       引擎进程（main + etc/worker.yaml）：ticker（本地定时器或 xxl-job），触发 cron 来源与到期 job；无常驻工作池
 deploy/sql/       表结构（goctl model 的输入）
 deploy/mock/      本地 mock：业务方的 appeal 表与样例数据、VIP → RM 关系（不进 goctl）
 internal/model/   goctl 生成的数据访问层
@@ -44,10 +44,13 @@ internal/action/  InvokeAction：所有外部 IO 的统一出口
 internal/view/    展示模板、受众变体、AI 摘要、渲染器
 internal/lark/    Lark 发送、回调验签、卡片更新
 internal/ticker/  xxl-job 调度入口（wf-ticker）
-internal/registry/ 配置中心：草稿、变更集、审批、发布清单（表结构见 deploy/sql/config.sql）
+internal/registry/ 配置中心：草稿、变更集、审批、发布清单（表结构见 deploy/sql/config.sql）；direct.go 是开发用的直接发布
+internal/bootstrap/ 组装引擎、任务中心、动作实现与 ticker（app/worker、wbctl 与端到端测试共用）
+internal/ingest/  cron 来源：扫描 skill → 过滤 → 映射 → 建任务 → 启动 run
+internal/skill/   平台内置 skill（appeal：VIP 场景的工单扫描与状态查询）
 internal/approval/ directory/ skillhub/  外部系统客户端：公司审批平台、BSP、Skillhub
-internal/pkg/     expr（表达式与模板，基于 expr-lang）、schema（x- 扩展）、yamljson（YAML 1.2 转 JSON）、obs
-internal/event/ ingest/ subscription/ mcp/
+internal/pkg/     expr（表达式与模板，基于 expr-lang）、schema（x- 扩展与脱敏）、yamljson（YAML 1.2 转 JSON）、testdb（集成测试临时库）、obs
+internal/event/ subscription/ mcp/
 ```
 
 依赖方向单向：`internal/flow` 不得直接 import `task`、`assign`、`lark`，只能通过 `internal/action` 调用。
@@ -59,7 +62,8 @@ internal/event/ ingest/ subscription/ mcp/
 - **单人决策**：每个人工节点只由一个人决策；多人参与就拆成多个人工节点串联。
 - **引擎是流程的事实来源，任务表是投影**：节点事件经 `sync_task` job 异步同步，任务中心只接受更大的 `seq`。
 - **写入入口**：影响流程的操作（选择、推迟、退回）走引擎 Signal；开始处理、认领、调整优先级、转派直接走任务中心。
-- **推进可复现**：外部 IO 在事务外执行；图的推进只在锁 `wf_run` 行的悲观事务内完成；遍历编译期排好序的切片，不遍历 map；不在推进逻辑里读系统时间（用注入的 Clock）。
+- **事件驱动，不轮询**：流程只由事件推进（来源启动 run、人工 Signal、外部状态变化 Cancel、xxl-job tick 唤醒到期 job），事件处理完后就地执行新就绪的节点；`wf_job` 只存将来或待恢复的工作。不引入常驻工作池。
+- **推进可复现**：外部 IO 在事务外执行；图的推进只在锁 `wf_run` 行的悲观事务内完成；遍历编译期排好序的切片，不遍历 map；不在推进逻辑里读系统时间（用注入的 Clock）。`wf_job` 只按主键更新，连接使用 READ-COMMITTED。
 - **至少执行一次**：所有外部动作带幂等键 `run_id:node_id:iteration[:seq]`。
 - **金额不经过 float64**：schema 中金额为 string，解码用 `UseNumber()`，计算用 decimal。
 - **出口统一脱敏**：按 schema 的 `x-pii` 在发往 Lark、LLM、日志时处理。
@@ -78,6 +82,11 @@ make check   # go vet + go test + go build
 make validate  # 用 wbctl 校验 examples/ 下的任务类型
 ```
 
+集成测试（引擎、端到端）需要 MySQL 8.0 或 TiDB，设置 `WB_TEST_MYSQL=root:@tcp(127.0.0.1:3306)/` 后运行 `go test ./...`；未设置时这些测试跳过。CI 中用 MySQL 服务容器运行。
+
+外部系统目前都是本地实现：Lark 为 `internal/lark` 的 Mock（卡片打到日志），分配服务为 `assign.Local`（关系表读 `deploy/mock/vip_rm.yaml`），邮件、事件、LLM 为 `action.Logger`。
+
 ## 当前进度
 
-骨架阶段：领域类型与接口已定义，`.proto` 与 `.sql` 已就绪，生成代码尚未提交。任务类型 JSON 契约、编译器与 VIP 示例已完成。下一步是引擎阶段一（见 `docs/workflow-engine.md`「分阶段实现」）。
+- 已完成：任务类型 JSON 契约与编译器；引擎阶段一与阶段二的主体（事件驱动的推进器、重试与防护、timer、human_choice 的等待 / 信号 / 超时、cron 来源与 `close_when`、任务状态同步、xxl-job ticker）；VIP 工单提醒在本地端到端跑通。
+- 未完成：Lark 真实接入与卡片回调、重复提醒与 snooze、受控的环（rework）运行期、共享组件（`key@version`）解析、gRPC 服务实现、变更集与审批。

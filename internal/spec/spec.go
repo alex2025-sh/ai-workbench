@@ -66,8 +66,9 @@ type Source struct {
 	Skill     string            `json:"skill,omitempty"`
 	Input     map[string]any    `json:"input,omitempty"`
 	EventType string            `json:"event_type,omitempty"`
-	Filter    string            `json:"filter,omitempty"`  // 表达式，基于 record
-	Mapping   map[string]string `json:"mapping,omitempty"` // payload 字段 → 表达式
+	Filter    string            `json:"filter,omitempty"`     // 表达式，基于 record；为 true 时创建任务
+	CloseWhen string            `json:"close_when,omitempty"` // 表达式，基于 record；为 true 时取消同一去重键下未完结任务的 run
+	Mapping   map[string]string `json:"mapping,omitempty"`    // payload 字段 → 表达式
 }
 
 // ViewEntry 是 views 中的一项：内嵌模板（自有组件）或共享组件引用 key@version。
@@ -280,6 +281,12 @@ func (c *checker) checkSources() {
 		}
 		if s.Filter != "" {
 			c.add(compiler.CheckExpression(s.Filter, p+".filter", scopeRecord))
+		}
+		if s.CloseWhen != "" {
+			c.add(compiler.CheckExpression(s.CloseWhen, p+".close_when", scopeRecord))
+			if c.t.DedupKey == "" {
+				c.errorf(compiler.IssueBadConfig, p+".close_when", "使用 close_when 时必须配置 dedup_key，才能找到要关闭的任务")
+			}
 		}
 		for _, field := range sortedKeys(s.Mapping) {
 			fp := p + ".mapping." + field
