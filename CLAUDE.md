@@ -2,9 +2,10 @@
 
 企业内部 AI 任务平台：把各类数据源（cron 扫描、Kafka、API 推送）归一成事件，按配置生成任务、分配处理人、驱动 workflow，通过 Lark 触达。首批场景是 VIP 工单提醒和周期业务报表。
 
-## 先读这两份设计
+## 先读这几份设计
 
 - `docs/ai-task-platform.md`：核心概念（事件类型、任务类型、workflow、展示模板、分配策略）、任务状态与优先级、功能模块。
+- `docs/task-type-spec.md`：任务类型 JSON（前后端契约）的字段说明。
 - `docs/workflow-engine.md`：自研轻量工作流引擎（不使用 Temporal）的数据模型、执行模型、人工节点、xxl-job 时钟、受控的环、与任务中心的集成、试运行。
 
 设计文档的原稿在 Claude Docs 中维护，这里是导出副本；改动设计时两边同步。
@@ -27,20 +28,26 @@
 ## 目录
 
 ```text
+api/schema/       task_type.schema.json：任务类型 JSON 的结构契约（前端、YAML、AI 生成共用），嵌入到 Go 中校验
+cmd/wbctl/        命令行：校验 YAML / JSON、导出 body_json 与执行计划、节点类型目录
+examples/         任务类型示例（vip_appeal_alert.yaml），测试保证它们始终能通过校验
 app/rpc/          go-zero zrpc 服务：对外 gRPC 接口（workbench.proto；生成后含 pb/server/logic/svc/etc）
 app/worker/       引擎执行进程：Worker 池、推进器、xxl-job ticker
 deploy/sql/       表结构（goctl model 的输入）
+deploy/mock/      本地 mock：业务方的 appeal 表与样例数据、VIP → RM 关系（不进 goctl）
 internal/model/   goctl 生成的数据访问层
 internal/task/    任务状态、优先级、转移表、任务中心接口
 internal/assign/  分配策略链、认领、转派
-internal/flow/    dsl（图模型）、compiler（编译与校验）、engine（推进器）、nodes（节点执行器）
+internal/spec/    任务类型的 Go 模型与完整校验（结构 → 语义 → 编译 workflow）
+internal/flow/    dsl（图模型、节点配置、端口目录）、compiler（编译与校验）、engine（推进器）、nodes（节点执行器）
 internal/action/  InvokeAction：所有外部 IO 的统一出口
 internal/view/    展示模板、受众变体、AI 摘要、渲染器
 internal/lark/    Lark 发送、回调验签、卡片更新
 internal/ticker/  xxl-job 调度入口（wf-ticker）
 internal/registry/ 配置中心：草稿、变更集、审批、发布清单（表结构见 deploy/sql/config.sql）
 internal/approval/ directory/ skillhub/  外部系统客户端：公司审批平台、BSP、Skillhub
-internal/event/ ingest/ subscription/ mcp/ pkg/
+internal/pkg/     expr（表达式与模板，基于 expr-lang）、schema（x- 扩展）、yamljson（YAML 1.2 转 JSON）、obs
+internal/event/ ingest/ subscription/ mcp/
 ```
 
 依赖方向单向：`internal/flow` 不得直接 import `task`、`assign`、`lark`，只能通过 `internal/action` 调用。
@@ -56,6 +63,7 @@ internal/event/ ingest/ subscription/ mcp/ pkg/
 - **至少执行一次**：所有外部动作带幂等键 `run_id:node_id:iteration[:seq]`。
 - **金额不经过 float64**：schema 中金额为 string，解码用 `UseNumber()`，计算用 decimal。
 - **出口统一脱敏**：按 schema 的 `x-pii` 在发往 Lark、LLM、日志时处理。
+- **任务类型 JSON 只有一份契约**：改字段时同时改 `api/schema/task_type.schema.json`、`internal/flow/dsl` / `internal/spec` 的 Go 类型和 `docs/task-type-spec.md`；示例必须继续通过 `go test ./...`。表达式不能读取当前时间（禁用 `now()`）。
 - **AI 用在设计时**：AI 生成的配置必须通过同一编译器校验，只能存草稿；发布需审批与试运行。
 - **版本模型**：任务类型是发布单元，schema、来源、workflow、专属模板内嵌其中；共享组件（view / assignment / agreement / prompt）独立版本化，以 `key@version` 固定引用，没有“跟随最新”。运行时只按发布清单（`cfg_manifest_item`）取配置。
 - **审批在外部**：使用公司审批平台；变更集状态机在平台内，提交时快照草稿，审批通过后重新编译再原子发布，回调必须幂等。
@@ -67,8 +75,9 @@ internal/event/ ingest/ subscription/ mcp/ pkg/
 ```bash
 make gen     # 生成 rpc 与 model，然后 go mod tidy
 make check   # go vet + go test + go build
+make validate  # 用 wbctl 校验 examples/ 下的任务类型
 ```
 
 ## 当前进度
 
-骨架阶段：领域类型与接口已定义，`.proto` 与 `.sql` 已就绪，生成代码尚未提交。下一步是引擎阶段一（见 `docs/workflow-engine.md`「分阶段实现」）。
+骨架阶段：领域类型与接口已定义，`.proto` 与 `.sql` 已就绪，生成代码尚未提交。任务类型 JSON 契约、编译器与 VIP 示例已完成。下一步是引擎阶段一（见 `docs/workflow-engine.md`「分阶段实现」）。

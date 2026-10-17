@@ -177,6 +177,7 @@ sla:
 - **多个上游**：节点经 `merge` 汇合、不同路径上的“上一个人工节点”配置不一致时，编译报错，要求显式配置，避免运行时取决于走了哪条分支。
 - **继承的是策略，不是人**：沿用上一节点的分配策略时会重新求值，结果通常是同一个人；需要固定为上一节点的实际处理人时，显式写 `assignment: { resolvers: [{ type: previous_assignee }] }`。
 - **退回的环**：环内节点的继承同样在编译期确定，每一轮使用相同的模板和策略。
+- **通知节点**：`lark_card` 不写 `view` 或 `to` 时按同样规则取值，但它不会成为下游节点的继承来源。
 
 **AI 摘要（可选）**：配置 view 时可以开启 AI 对当前任务的总结摘要，摘要失败时卡片上不显示该区块。
 
@@ -321,6 +322,16 @@ rpc SaveTaskTypeDraft(SaveTaskTypeDraftReq) returns (SaveTaskTypeDraftResp) {
 | 我的任务 | 列表、详情、认领、开始处理、调整优先级、转派 | TaskService |
 
 人员、用户组选择器由前端直接调用 BSP（已经通过 gateway 开放），平台只保存用户与组的 ID。
+
+### 任务类型 JSON
+
+前端提交给 `SaveTaskTypeDraft` 的 `body_json` 是一份完整的任务类型 JSON，结构契约是仓库中的 [`api/schema/task_type.schema.json`](../api/schema/task_type.schema.json)（JSON Schema draft 2020-12）。仓库里手写的 YAML、AI 生成的配置都是同一种 JSON，经过同一个编译器校验。字段说明见 [任务类型 JSON 说明](task-type-spec.md)。
+
+- **顶层结构**：`key`、`name`、`schema`（payload JSON Schema）、`sources`、`dedup_key`、`views`、`view` / `assignment`（默认值）、`workflow`（`nodes` + `edges`）、`ui`。
+- **节点配置表单**：`CatalogService.ListNodeTypes` 返回的 `config_schema_json` 从同一份 schema 中抽出，前端据此生成表单；端口规则（固定端口、按分支、按选项）也一并返回。
+- **表达式**：条件、映射、锚点时间等字段直接写表达式（如 `payload.vip_level > 0`），其余字符串是模板，用 `{{ }}` 插值。可用的命名空间是 `payload`、`task`、`nodes.<id>.output`、`loop`；来源映射中只能用 `record`，受众变体中额外可用 `viewer`。表达式不能读取当前时间。
+- **校验结果**：问题统一为 `code`、`severity`（error / warning）、`path`、`message`。`path` 用 ID 定位，如 `workflow.nodes.ask_rm.config.timeout`、`workflow.edges.e3`，前端可直接高亮画布上的节点和连线。
+- **`ui` 字段**：画布坐标等纯展示数据放在这里，后端原样保存，编译器忽略。
 
 ## 配置生命周期
 
