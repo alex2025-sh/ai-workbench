@@ -4,7 +4,7 @@ syntax = "proto3";
 // 认证与限流。设计见 docs/ai-task-platform.md「前后端交互」「接口清单」。
 //
 // 约定：
-//   * 每个方法用 bgw.v1.method_options 声明 HTTP 路径，路径为 /ai_workbench/api/v1/<资源>/<动作>，统一 POST。
+//   * 每个方法用 bgw.v1.method_options 声明 HTTP 路径，路径为 /byai_platform/api/v1/<资源>/<动作>，统一 POST。
 //   * 调用人身份由 gateway 写入 gRPC metadata，请求消息中不包含 actor / viewer 等身份字段。
 //   * 接口级权限在 BSP 权限平台按方法配置。
 //   * 业务 JSON（payload、body、dsl、report）用 bytes 承载 UTF-8 JSON，不用 google.protobuf.Struct，
@@ -22,7 +22,7 @@ service TaskTypeService {
   // 新建任务类型并创建草稿
   rpc CreateTaskType(CreateTaskTypeReq) returns (CreateTaskTypeResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/task_type/create";
+      path       : "/byai_platform/api/v1/task_type/create";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -36,7 +36,7 @@ service TaskTypeService {
   // 任务类型列表，按 namespace 筛选
   rpc ListTaskTypes(ListTaskTypesReq) returns (ListTaskTypesResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/task_type/list";
+      path       : "/byai_platform/api/v1/task_type/list";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -44,7 +44,7 @@ service TaskTypeService {
   // 获取已发布版本及其发布清单
   rpc GetTaskType(GetTaskTypeReq) returns (GetTaskTypeResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/task_type/get";
+      path       : "/byai_platform/api/v1/task_type/get";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -52,7 +52,7 @@ service TaskTypeService {
   // 获取草稿；没有时基于最新发布版本创建
   rpc GetTaskTypeDraft(TaskTypeKeyReq) returns (GetTaskTypeDraftResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/task_type/draft/get";
+      path       : "/byai_platform/api/v1/task_type/draft/get";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -60,7 +60,7 @@ service TaskTypeService {
   // 保存草稿（revision 乐观锁）
   rpc SaveTaskTypeDraft(SaveTaskTypeDraftReq) returns (SaveTaskTypeDraftResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/task_type/draft/save";
+      path       : "/byai_platform/api/v1/task_type/draft/save";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -74,7 +74,7 @@ service TaskTypeService {
   // 丢弃草稿
   rpc DiscardTaskTypeDraft(DiscardDraftReq) returns (Empty) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/task_type/draft/discard";
+      path       : "/byai_platform/api/v1/task_type/draft/discard";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -88,7 +88,7 @@ service TaskTypeService {
   // 对草稿及其依赖闭包完整编译校验
   rpc ValidateTaskTypeDraft(TaskTypeKeyReq) returns (ValidateResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/task_type/draft/validate";
+      path       : "/byai_platform/api/v1/task_type/draft/validate";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -96,7 +96,7 @@ service TaskTypeService {
   // 试运行：动作节点只记录不执行，虚拟时钟
   rpc DryRunTaskTypeDraft(DryRunTaskTypeDraftReq) returns (DryRunResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/task_type/draft/dry_run";
+      path       : "/byai_platform/api/v1/task_type/draft/dry_run";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -110,7 +110,7 @@ service TaskTypeService {
   // 按 schema 生成或从历史任务取样例 payload
   rpc GenerateSamplePayload(GenerateSamplePayloadReq) returns (GenerateSamplePayloadResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/task_type/sample_payload";
+      path       : "/byai_platform/api/v1/task_type/sample_payload";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -118,7 +118,7 @@ service TaskTypeService {
   // 用样例数据预览卡片模板
   rpc PreviewView(PreviewViewReq) returns (PreviewViewResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/task_type/view/preview";
+      path       : "/byai_platform/api/v1/task_type/view/preview";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -126,7 +126,7 @@ service TaskTypeService {
   // 试跑来源：cron 立即扫描一次，Kafka / API 用样例消息
   rpc TrialSource(TrialSourceReq) returns (TrialSourceResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/task_type/source/trial";
+      path       : "/byai_platform/api/v1/task_type/source/trial";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -140,7 +140,7 @@ service TaskTypeService {
   // 版本历史
   rpc ListTaskTypeVersions(TaskTypeKeyReq) returns (ListVersionsResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/task_type/versions";
+      path       : "/byai_platform/api/v1/task_type/versions";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -151,7 +151,7 @@ service ComponentService {
   // 新建共享组件并创建草稿
   rpc CreateComponent(CreateComponentReq) returns (CreateComponentResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/component/create";
+      path       : "/byai_platform/api/v1/component/create";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -165,7 +165,7 @@ service ComponentService {
   // 组件库列表
   rpc ListComponents(ListComponentsReq) returns (ListComponentsResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/component/list";
+      path       : "/byai_platform/api/v1/component/list";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -173,7 +173,7 @@ service ComponentService {
   // 获取已发布版本
   rpc GetComponent(GetComponentReq) returns (GetComponentResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/component/get";
+      path       : "/byai_platform/api/v1/component/get";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -181,7 +181,7 @@ service ComponentService {
   // 获取草稿；没有时基于最新发布版本创建
   rpc GetComponentDraft(ComponentRefReq) returns (GetComponentDraftResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/component/draft/get";
+      path       : "/byai_platform/api/v1/component/draft/get";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -189,7 +189,7 @@ service ComponentService {
   // 保存草稿（revision 乐观锁）
   rpc SaveComponentDraft(SaveComponentDraftReq) returns (SaveComponentDraftResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/component/draft/save";
+      path       : "/byai_platform/api/v1/component/draft/save";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -203,7 +203,7 @@ service ComponentService {
   // 丢弃草稿
   rpc DiscardComponentDraft(DiscardComponentDraftReq) returns (Empty) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/component/draft/discard";
+      path       : "/byai_platform/api/v1/component/draft/discard";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -217,7 +217,7 @@ service ComponentService {
   // 校验草稿，并检查对引用方的影响
   rpc ValidateComponentDraft(ComponentRefReq) returns (ValidateResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/component/draft/validate";
+      path       : "/byai_platform/api/v1/component/draft/validate";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -225,7 +225,7 @@ service ComponentService {
   // 版本历史
   rpc ListComponentVersions(ComponentRefReq) returns (ListVersionsResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/component/versions";
+      path       : "/byai_platform/api/v1/component/versions";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -233,7 +233,7 @@ service ComponentService {
   // 查看哪些任务类型版本引用了该组件
   rpc ListDependents(ListDependentsReq) returns (ListDependentsResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/component/dependents";
+      path       : "/byai_platform/api/v1/component/dependents";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -244,7 +244,7 @@ service ChangeSetService {
   // 把草稿打包为变更集，并对依赖闭包编译校验
   rpc CreateChangeSet(CreateChangeSetReq) returns (ChangeSet) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/change_set/create";
+      path       : "/byai_platform/api/v1/change_set/create";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -258,7 +258,7 @@ service ChangeSetService {
   // 为共享组件的引用方一键生成升级草稿并加入变更集
   rpc AddDependentUpgrades(AddDependentUpgradesReq) returns (ChangeSet) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/change_set/add_dependents";
+      path       : "/byai_platform/api/v1/change_set/add_dependents";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -272,7 +272,7 @@ service ChangeSetService {
   // 变更集详情
   rpc GetChangeSet(ChangeSetIdReq) returns (ChangeSet) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/change_set/get";
+      path       : "/byai_platform/api/v1/change_set/get";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -280,7 +280,7 @@ service ChangeSetService {
   // 变更集列表
   rpc ListChangeSets(ListChangeSetsReq) returns (ListChangeSetsResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/change_set/list";
+      path       : "/byai_platform/api/v1/change_set/list";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -288,7 +288,7 @@ service ChangeSetService {
   // 变更集内各项与其基础版本的差异（审批单链接到此）
   rpc DiffChangeSet(ChangeSetIdReq) returns (DiffChangeSetResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/change_set/diff";
+      path       : "/byai_platform/api/v1/change_set/diff";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -296,7 +296,7 @@ service ChangeSetService {
   // 提交审批：快照草稿、锁定、在公司审批平台创建审批实例
   rpc SubmitChangeSet(ChangeSetIdReq) returns (SubmitChangeSetResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/change_set/submit";
+      path       : "/byai_platform/api/v1/change_set/submit";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -310,7 +310,7 @@ service ChangeSetService {
   // 撤回审批，草稿解锁
   rpc WithdrawChangeSet(ChangeSetIdReq) returns (ChangeSet) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/change_set/withdraw";
+      path       : "/byai_platform/api/v1/change_set/withdraw";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -324,7 +324,7 @@ service ChangeSetService {
   // 公司审批平台回调：通过则原子发布，驳回则退回草稿
   rpc OnApprovalResult(OnApprovalResultReq) returns (OnApprovalResultResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/change_set/approval_callback";
+      path       : "/byai_platform/api/v1/change_set/approval_callback";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -338,7 +338,7 @@ service ChangeSetService {
   // 下线某个版本；仍被引用的共享组件版本不能下线
   rpc RetireVersion(RetireVersionReq) returns (Empty) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/config/version/retire";
+      path       : "/byai_platform/api/v1/config/version/retire";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -355,7 +355,7 @@ service CatalogService {
   // 节点类型目录：配置 schema、UI 提示、端口规则
   rpc ListNodeTypes(Empty) returns (ListNodeTypesResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/catalog/node_types";
+      path       : "/byai_platform/api/v1/catalog/node_types";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -363,7 +363,7 @@ service CatalogService {
   // skill 列表（转发 Skillhub）
   rpc ListSkills(ListSkillsReq) returns (ListSkillsResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/catalog/skills";
+      path       : "/byai_platform/api/v1/catalog/skills";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -371,7 +371,7 @@ service CatalogService {
   // skill 的输入输出 schema（转发 Skillhub）
   rpc GetSkillSchema(GetSkillSchemaReq) returns (GetSkillSchemaResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/catalog/skill/schema";
+      path       : "/byai_platform/api/v1/catalog/skill/schema";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -382,7 +382,7 @@ service IngestService {
   // 推送事件（按 dedup_key 幂等）
   rpc PushEvent(PushEventReq) returns (PushEventResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/ingest/event/push";
+      path       : "/byai_platform/api/v1/ingest/event/push";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -399,7 +399,7 @@ service RunService {
   // 启动运行（按 biz_key 幂等）
   rpc StartRun(StartRunReq) returns (StartRunResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/run/start";
+      path       : "/byai_platform/api/v1/run/start";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -413,7 +413,7 @@ service RunService {
   // 向等待中的人工节点发送选择（按任务表鉴权）
   rpc Signal(SignalReq) returns (SignalResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/run/signal";
+      path       : "/byai_platform/api/v1/run/signal";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -427,7 +427,7 @@ service RunService {
   // 取消运行
   rpc CancelRun(CancelRunReq) returns (Empty) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/run/cancel";
+      path       : "/byai_platform/api/v1/run/cancel";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -441,7 +441,7 @@ service RunService {
   // 运行状态，供运行态画布着色
   rpc GetRun(RunIdReq) returns (RunView) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/run/get";
+      path       : "/byai_platform/api/v1/run/get";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -449,7 +449,7 @@ service RunService {
   // 按任务、biz_key、状态查运行
   rpc ListRuns(ListRunsReq) returns (ListRunsResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/run/list";
+      path       : "/byai_platform/api/v1/run/list";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -457,7 +457,7 @@ service RunService {
   // 运行事件时间线
   rpc GetRunEvents(GetRunEventsReq) returns (GetRunEventsResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/run/events";
+      path       : "/byai_platform/api/v1/run/events";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -465,7 +465,7 @@ service RunService {
   // 人工干预：重试节点
   rpc RetryNode(AdminNodeReq) returns (Empty) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/run/node/retry";
+      path       : "/byai_platform/api/v1/run/node/retry";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -479,7 +479,7 @@ service RunService {
   // 人工干预：以指定端口跳过节点
   rpc SkipNode(AdminNodeReq) returns (Empty) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/run/node/skip";
+      path       : "/byai_platform/api/v1/run/node/skip";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -496,7 +496,7 @@ service TaskService {
   // 任务详情（按调用人脱敏）
   rpc GetTask(TaskIdReq) returns (TaskView) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/task/get";
+      path       : "/byai_platform/api/v1/task/get";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -504,7 +504,7 @@ service TaskService {
   // 我的任务，按优先级、截止时间排序
   rpc ListMyTasks(ListMyTasksReq) returns (ListMyTasksResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/task/my/list";
+      path       : "/byai_platform/api/v1/task/my/list";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -512,7 +512,7 @@ service TaskService {
   // 任务事件时间线
   rpc GetTaskEvents(GetTaskEventsReq) returns (GetTaskEventsResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/task/events";
+      path       : "/byai_platform/api/v1/task/events";
       http_method: HTTP_METHOD_POST;
     };
   }
@@ -520,7 +520,7 @@ service TaskService {
   // 认领组任务（unassigned -> pending，CAS）
   rpc ClaimTask(TaskIdReq) returns (TaskView) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/task/claim";
+      path       : "/byai_platform/api/v1/task/claim";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -534,7 +534,7 @@ service TaskService {
   // 开始处理（pending -> processing，不影响流程）
   rpc StartProcessing(TaskIdReq) returns (TaskView) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/task/start";
+      path       : "/byai_platform/api/v1/task/start";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -548,7 +548,7 @@ service TaskService {
   // 调整优先级（原因必填，写 Task Event）
   rpc UpdatePriority(UpdatePriorityReq) returns (TaskView) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/task/priority/update";
+      path       : "/byai_platform/api/v1/task/priority/update";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -562,7 +562,7 @@ service TaskService {
   // 转派（只改变处理人，状态不变）
   rpc Reassign(ReassignReq) returns (TaskView) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/task/reassign";
+      path       : "/byai_platform/api/v1/task/reassign";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {
@@ -579,7 +579,7 @@ service CallbackService {
   // Lark 卡片交互：验签 -> open_id 映射 -> 按任务表鉴权 -> Signal
   rpc LarkCardCallback(LarkCardCallbackReq) returns (LarkCardCallbackResp) {
     option (bgw.v1.method_options) = {
-      path       : "/ai_workbench/api/v1/callback/lark/card";
+      path       : "/byai_platform/api/v1/callback/lark/card";
       http_method: HTTP_METHOD_POST;
       filters    : [
         {

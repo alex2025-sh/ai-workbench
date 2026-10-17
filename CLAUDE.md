@@ -13,7 +13,7 @@
 
 - Go 1.24，工具库为 [go-zero](https://github.com/zeromicro/go-zero)。
 - **对外接口只有 gRPC**：协议写在 `app/rpc/workbench.proto`（TaskTypeService、ComponentService、ChangeSetService、CatalogService、IngestService、RunService、TaskService、CallbackService），由 `goctl rpc protoc -m` 生成 zrpc 服务。
-  - 前端经公司 gateway（bgw）访问：每个方法用 `option (bgw.v1.method_options)` 声明 `path` 与 `http_method`，路径约定 `/ai_workbench/api/v1/<资源>/<动作>`，一律 POST；写接口与外部入口加限流 filter。
+  - 前端经公司 gateway（bgw）访问：每个方法用 `option (bgw.v1.method_options)` 声明 `path` 与 `http_method`，路径约定 `/byai_platform/api/v1/<资源>/<动作>`，一律 POST；写接口与外部入口加限流 filter。
   - `third_party/bgw/v1/options.proto` 是本地占位，接入时替换为公司定义，import 路径与 option 名保持不变。
   - 调用者身份由 gateway 写入 gRPC metadata，请求消息里不放 actor / viewer 字段。
   - 业务 JSON 字段用 `bytes`（UTF-8 JSON）承载，不用 `google.protobuf.Struct`，避免数字变 double 丢精度。
