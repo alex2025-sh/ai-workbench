@@ -1,0 +1,16 @@
+# build output
+/bin/
+*.exe
+*.test
+*.out
+coverage.*
+
+# local config and secrets
+app/**/etc/*.local.yaml
+.env
+.env.*
+
+# editors / OS
+.idea/
+.vscode/
+.DS_Store

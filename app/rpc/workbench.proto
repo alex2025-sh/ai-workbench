@@ -1,0 +1,241 @@
+syntax = "proto3";
+
+// AI Workbench 对外 gRPC 接口：工作流运行、任务中心、配置发布。
+// 设计见 docs/ai-task-platform.md 与 docs/workflow-engine.md。
+//
+// 约定：
+//   * 业务 JSON（trigger、payload、form、dsl、report）一律用 bytes 承载 UTF-8 JSON，
+//     不用 google.protobuf.Struct——Struct 的数字是 double，金额等字段会丢精度。
+//   * 时间统一为 Unix 毫秒（int64），0 表示未设置。
+//   * 状态、优先级取值对齐 Morning Brief（见 TaskStatus、TaskPriority）。
+package workbench.v1;
+
+option go_package = "./pb";
+
+// ---------------------------------------------------------------------------
+// 枚举
+// ---------------------------------------------------------------------------
+
+// 任务状态。proto3 枚举首值必须为 0，因此用 TASK_STATUS_UNSPECIFIED 占位；
+// 线上存储与 Go 代码使用 internal/task.TaskStatus（-1/0/1/2/3），由转换层映射。
+enum TaskStatus {
+  TASK_STATUS_UNSPECIFIED = 0;
+  TASK_STATUS_UNASSIGNED = 1;  // 存储值 -1
+  TASK_STATUS_PENDING = 2;     // 存储值 0
+  TASK_STATUS_PROCESSING = 3;  // 存储值 1
+  TASK_STATUS_SNOOZED = 4;     // 存储值 2
+  TASK_STATUS_SOLVED = 5;      // 存储值 3，终态
+}
+
+// 任务优先级，数值越小越紧急。
+enum TaskPriority {
+  TASK_PRIORITY_P0 = 0;  // 立即
+  TASK_PRIORITY_P1 = 1;  // 今日
+  TASK_PRIORITY_P2 = 2;  // 机会
+  TASK_PRIORITY_P3 = 3;  // 维护
+}
+
+// ---------------------------------------------------------------------------
+// 工作流运行（引擎 API）
+// ---------------------------------------------------------------------------
+
+message StartRunReq {
+  string plan_id = 1;
+  string biz_key = 2;     // 业务幂等键，如 task:<task_id>
+  bytes trigger_json = 3; // 触发数据
+  bool dry_run = 4;
+}
+
+message StartRunResp {
+  int64 run_id = 1;
+  int32 plan_version = 2;
+  bool created = 3; // false = biz_key 已存在，返回已有 run
+}
+
+message SignalReq {
+  int64 run_id = 1;
+  string node_id = 2;
+  int32 iteration = 3;
+  string option = 4;   // 人工选择的端口
+  bytes form_json = 5; // 必填项、备注、snooze 时长等
+  string actor = 6;    // 调用方已按任务表鉴权的内部用户
+}
+
+message SignalResp {
+  bool accepted = 1;
+  string reason = 2; // 被拒绝时的原因，卡片上即时提示
+}
+
+message CancelRunReq {
+  int64 run_id = 1;
+  string actor = 2;
+  string reason = 3;
+}
+
+message GetRunReq {
+  int64 run_id = 1;
+}
+
+message NodeView {
+  string node_id = 1;
+  int32 iteration = 2;
+  string status = 3; // pending / ready / running / waiting / succeeded / skipped / failed
+  string port = 4;
+  int32 attempt = 5;
+  int64 started_at = 6;
+  int64 finished_at = 7;
+}
+
+message RunView {
+  int64 run_id = 1;
+  string plan_id = 2;
+  int32 plan_version = 3;
+  string status = 4; // running / succeeded / failed / needs_intervention / cancelled
+  repeated NodeView nodes = 5;
+}
+
+message AdminNodeReq {
+  int64 run_id = 1;
+  string node_id = 2;
+  string port = 3; // SkipNode 时指定以哪个端口完成
+  string actor = 4;
+  string reason = 5;
+}
+
+message Empty {}
+
+service RunService {
+  // 启动 workflow 运行（按 biz_key 幂等）
+  rpc StartRun(StartRunReq) returns (StartRunResp);
+  // 向等待中的人工节点发送选择
+  rpc Signal(SignalReq) returns (SignalResp);
+  // 取消运行（如源工单离开 Maker Review Case）
+  rpc CancelRun(CancelRunReq) returns (Empty);
+  // 查询运行状态，供运行态画布着色
+  rpc GetRun(GetRunReq) returns (RunView);
+  // 人工干预：重试节点
+  rpc RetryNode(AdminNodeReq) returns (Empty);
+  // 人工干预：以指定端口跳过节点
+  rpc SkipNode(AdminNodeReq) returns (Empty);
+}
+
+// ---------------------------------------------------------------------------
+// 任务中心
+// ---------------------------------------------------------------------------
+
+message TaskView {
+  int64 id = 1;
+  string task_type = 2;
+  TaskStatus status = 3;
+  TaskPriority priority = 4;
+  string assignee_id = 5;
+  string current_node = 6;
+  string resolution = 7;  // contacted / dismissed / escalated_out / auto_closed
+  string sla_status = 8;  // on_track / at_risk / breached
+  int64 snooze_until = 9;
+  int64 due_at = 10;
+  bytes payload_json = 11; // 已按查看者脱敏
+  int64 updated_at = 12;
+}
+
+message GetTaskReq {
+  int64 id = 1;
+  string viewer = 2;
+}
+
+message ListMyTasksReq {
+  string viewer = 1;
+  repeated TaskStatus statuses = 2;
+  string cursor = 3;
+  int32 page_size = 4;
+}
+
+message ListMyTasksResp {
+  repeated TaskView items = 1;
+  string next_cursor = 2;
+}
+
+message TaskActionReq {
+  int64 id = 1;
+  string actor = 2;
+}
+
+message UpdatePriorityReq {
+  int64 id = 1;
+  TaskPriority priority = 2;
+  string actor = 3;
+  string reason = 4; // 必填
+}
+
+message ReassignReq {
+  int64 id = 1;
+  string assignee_id = 2;
+  string actor = 3;
+  string reason = 4; // 必填
+}
+
+service TaskService {
+  // 任务详情
+  rpc GetTask(GetTaskReq) returns (TaskView);
+  // 我的任务列表，按优先级、截止时间排序
+  rpc ListMyTasks(ListMyTasksReq) returns (ListMyTasksResp);
+  // 认领组任务（unassigned -> pending，CAS）
+  rpc ClaimTask(TaskActionReq) returns (TaskView);
+  // 开始处理（pending -> processing，不影响流程）
+  rpc StartProcessing(TaskActionReq) returns (TaskView);
+  // 调整优先级（需权限，原因必填，写 Task Event）
+  rpc UpdatePriority(UpdatePriorityReq) returns (TaskView);
+  // 转派（只改变处理人，状态不变）
+  rpc Reassign(ReassignReq) returns (TaskView);
+}
+
+// ---------------------------------------------------------------------------
+// 配置：编译、试运行、发布
+// ---------------------------------------------------------------------------
+
+message CompileReq {
+  bytes dsl_json = 1;
+}
+
+message CompileIssue {
+  string code = 1;
+  string node_id = 2;
+  string edge_id = 3;
+  string message = 4;
+}
+
+message CompileResp {
+  bool ok = 1;
+  repeated CompileIssue issues = 2;
+}
+
+message DryRunReq {
+  bytes dsl_json = 1;
+  repeated bytes sample_json = 2;  // 历史事件样本或手工 payload
+  map<string, string> choices = 3; // 人工节点预设选择：node_id -> option
+}
+
+message DryRunResp {
+  bytes report_json = 1;
+  repeated CompileIssue issues = 2;
+}
+
+message PublishPlanReq {
+  string plan_id = 1;
+  bytes dsl_json = 2;
+  string actor = 3;
+}
+
+message PublishPlanResp {
+  string plan_id = 1;
+  int32 version = 2;
+}
+
+service PlanService {
+  // 编译并校验 DSL，不保存
+  rpc CompilePlan(CompileReq) returns (CompileResp);
+  // 试运行：复用编译器与推进器，动作节点只记录不执行
+  rpc DryRunPlan(DryRunReq) returns (DryRunResp);
+  // 发布新版本（审批通过后调用；已发布版本不可修改）
+  rpc PublishPlan(PublishPlanReq) returns (PublishPlanResp);
+}
