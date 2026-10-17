@@ -22,15 +22,10 @@ type ExecContext struct {
 	DryRun    bool
 }
 
-// Executor 是一种节点类型的实现。
+// Executor 是一种节点类型的运行时实现。端口与配置校验在编译期由 dsl 包完成（dsl.Ports、dsl.DecodeConfig），
+// 执行器只负责执行。
 type Executor interface {
 	Type() dsl.NodeType
-
-	// Ports 返回该节点在给定配置下的输出端口，编译期用于校验连线。
-	Ports(cfg json.RawMessage) ([]string, error)
-
-	// Validate 在编译期校验节点配置。
-	Validate(cfg json.RawMessage) error
 
 	// Execute 在事务外执行节点，结果交给推进器提交。
 	Execute(ctx context.Context, ec ExecContext) engine.NodeResult

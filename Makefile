@@ -1,7 +1,7 @@
 GOCTL ?= goctl
 STYLE ?= go_zero
 
-.PHONY: all gen gen-rpc gen-model tidy build vet test fmt check
+.PHONY: all gen gen-rpc gen-model tidy build vet test fmt check validate
 
 all: check
 
@@ -38,3 +38,7 @@ fmt:
 	gofmt -s -w .
 
 check: vet test build
+
+# 校验 examples/ 下的任务类型（测试中也会校验）
+validate:
+	go run ./cmd/wbctl validate examples/task_types/*.yaml
