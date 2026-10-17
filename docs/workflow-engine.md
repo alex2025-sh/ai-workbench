@@ -179,7 +179,7 @@ DSL 是“节点 + 端口 + 连线”的图；编译器在发布时完成全部�
 
 ### 一次节点执行的完整流程
 
-1. **认领**：worker 用 CAS 抢占 job，参考 Camunda 的锁拥有者 + 锁过期时间做法。TiDB 不支持 `SKIP LOCKED`，CAS 方式在 TiDB 上可直接使用。MySQL 8.0 虽然支持 SKIP LOCKED，也统一用 CAS，两种库的行为保持一致。
+1. **认领**：worker 用 CAS 抢占 job，参考 Camunda 的锁拥有者 + 锁过期时间做法。TiDB 不支持 `SKIP LOCKED`，CAS 方式在 TiDB 上可直接使用。MySQL 8.0 虽然支持 SKIP LOCKED，也统一用 CAS，两种库的行为保持一致。认领成功后重新读取 job 的 `attempt`：执行时用它给节点打上围栏，内存里来自较早轮询的 job 副本可能已经过期。
 2. **执行**：事务外调用节点执行器（skill、LLM、发卡片等），不持有任何数据库锁。
 3. **提交**：开启悲观事务，锁 run 行，做防护校验，写结果，传播，插入新 job，全部一次提交。
 4. **派发**：提交成功后，把新就绪的 job 直接交给本进程 worker 池；ticker 只做兜底。
@@ -263,10 +263,10 @@ Camunda 记录过一个典型问题：执行时间超过锁时长的 job 会被�
 
 只注册一个调度任务 `wf-ticker`，每 10 到 30 秒触发一次：
 
-1. 认领并执行到期的 `timeout` / `wake` / `timer` job。
-2. 回收租约过期的 `execute` job，使其可被重新认领。
-3. 扫描 `wf_schedule`，对到期的 cron 来源触发扫描或启动 run，然后用乐观锁推进 `next_fire_at`，防止多实例重复触发。
-4. 巡检：长时间 `waiting` 或 `needs_intervention` 的 run 告警。
+1. 扫描 `wf_schedule`，对到期的 cron 来源先用乐观锁推进 `next_fire_at`（防止多实例重复触发），推进成功的实例再执行扫描并保存游标。
+2. 巡检：长时间 `waiting` 或 `needs_intervention` 的 run 告警。
+
+到期的 `timeout` / `wake` / `timer` job 和租约过期的 job 不需要 ticker 单独处理：Worker 每秒轮询一次到期 job，认领条件本身就包含“未被认领或租约已过期”，CAS 保证同一个 job 只被一个 worker 拿到。
 
 要求：ticker 幂等，重复触发无副作用，漏触发由下一次补上。实例多了之后使用 xxl-job 的分片广播，按 `run_id` 取模分担扫描。
 
@@ -343,6 +343,7 @@ xxl-job 只通知一台机器，解决的是 ticker 不重复触发；这里防�
 | 引擎事件 | 任务状态（取值对齐 Morning Brief） |
 | --- | --- |
 | 进入人工节点，处理人已确定 | `pending`（0），assignee 更新为该节点处理人 |
+| 通知节点（`lark_card`）确定接收人 | 同上：接收人成为任务的处理人；接收人是组时为 `unassigned`（-1） |
 | 进入人工节点，处理人待认领 | `unassigned`（-1） |
 | 处理人选择推迟 | `snoozed`（2），写入 `snooze_until` |
 | wake job 到期 | 回迁 `pending`（0） |
@@ -485,6 +486,8 @@ xxl-job 只通知一台机器，解决的是 ticker 不重复触发；这里防�
 ## 分阶段实现
 
 先把并发正确性做扎实，再加能力；每一阶段都以 VIP 工单提醒作为验收用例。
+
+当前进度：阶段一已完成；阶段二除 Lark 真实接入（目前为 mock）、重复提醒与 snooze 外已完成，VIP 工单提醒在本地 MySQL 上端到端跑通（`internal/bootstrap` 的端到端测试）。
 
 1. **阶段一：核心执行**。数据模型（含 `iteration` 字段，恒为 0）；编译器（拓扑排序、端口与配置校验）；认领、执行、提交、传播；`condition`、`merge`、动作节点；并发与故障注入测试。验收：手写 DSL 跑通无人工节点的流程。
 2. **阶段二：等待与时钟**。`human_choice`（超时可选、重复提醒、snooze）、`timer`；xxl-job ticker；租约回收；`wf_schedule` cron 来源；Lark 回调接入信号 API；任务状态同步（sync\_task）；节点级分配、模板与编译期继承。验收：VIP 工单提醒端到端上线。

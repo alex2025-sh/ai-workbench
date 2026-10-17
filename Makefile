@@ -7,7 +7,7 @@ all: check
 
 ## 代码生成
 # 需要 protoc（含 google/protobuf 标准 proto）、protoc-gen-go、protoc-gen-go-grpc 与 goctl：
-#   go install github.com/zeromicro/go-zero/tools/goctl@latest
+#   go install github.com/zeromicro/go-zero/tools/goctl@v1.10.2   （与已提交的 internal/model 保持同一版本）
 #   go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
 #   go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
 gen: gen-rpc gen-model tidy

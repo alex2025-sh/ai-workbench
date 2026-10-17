@@ -6,7 +6,9 @@ package apischema
 
 import (
 	"bytes"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -152,4 +154,28 @@ func NodeConfigSchema(nodeType string) ([]byte, error) {
 		"$ref":    "#/$defs/" + def,
 		"$defs":   root.Defs,
 	})
+}
+
+var payloadSchemas sync.Map // 内容哈希 → *jsonschema.Schema
+
+// ValidatePayload 按 payload schema 校验一份任务 payload。编译结果按 schema 内容缓存。
+func ValidatePayload(schemaRaw, payload []byte) ([]Violation, error) {
+	sum := sha256.Sum256(schemaRaw)
+	key := hex.EncodeToString(sum[:])
+	var s *jsonschema.Schema
+	if v, ok := payloadSchemas.Load(key); ok {
+		s = v.(*jsonschema.Schema)
+	} else {
+		compiled, err := compileDoc("https://schemas.ai-workbench/payload/"+key+".json", schemaRaw)
+		if err != nil {
+			return nil, err
+		}
+		payloadSchemas.Store(key, compiled)
+		s = compiled
+	}
+	inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("apischema: invalid payload json: %w", err)
+	}
+	return violations(s.Validate(inst)), nil
 }

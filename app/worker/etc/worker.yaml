@@ -1,0 +1,19 @@
+# 本地开发配置。平台库与业务 mock 库可以是同一个 MySQL 8.0 / TiDB 实例的不同 database。
+DataSource: root:@tcp(127.0.0.1:3306)/ai_workbench?parseTime=true&loc=UTC&charset=utf8mb4
+BizDataSource: root:@tcp(127.0.0.1:3306)/biz_mock?parseTime=true&loc=UTC&charset=utf8mb4
+RelationsFile: deploy/mock/vip_rm.yaml
+
+Log:
+  Encoding: plain
+
+Worker:
+  Concurrency: 8
+  PollInterval: 1s
+
+Ticker:
+  Mode: local          # local：进程内定时器；xxljob：注册到 xxl-job 调度中心
+  Interval: 15s
+  XxlJob:
+    AdminAddr: http://127.0.0.1:8080/xxl-job-admin
+    AppName: ai-workbench
+    Port: "9999"

@@ -8,14 +8,27 @@
 ## 快速开始
 
 ```bash
-go install github.com/zeromicro/go-zero/tools/goctl@latest
-goctl env check --install --verbose --force   # 安装 protoc 与 protoc-gen-go / protoc-gen-go-grpc
-
-make gen     # 由 workbench.proto 与 deploy/sql/*.sql 生成代码
-make check   # vet + test + build
+make check      # vet + test + build（集成测试需要 WB_TEST_MYSQL，见 CLAUDE.md）
+make validate   # 校验 examples/ 下的任务类型
 ```
 
-数据库初始化：执行 `deploy/sql/` 下的 `engine.sql`、`task.sql` 与 `config.sql`。
+在本地 MySQL 8.0 上跑 VIP 工单提醒：
+
+```bash
+mysql -e "CREATE DATABASE ai_workbench; CREATE DATABASE biz_mock"
+cat deploy/sql/*.sql | mysql ai_workbench           # 平台表
+mysql biz_mock < deploy/mock/appeal.sql             # 业务方 appeal 表的 mock 与样例数据
+
+export WB_DSN='root:@tcp(127.0.0.1:3306)/ai_workbench?parseTime=true&loc=UTC&charset=utf8mb4'
+go run ./cmd/wbctl publish examples/task_types/vip_appeal_alert.yaml
+go run ./app/worker -f app/worker/etc/worker.yaml   # 每分钟扫描一次，卡片打印在日志中
+
+# 模拟组长在升级卡片上点击「已处理」，并查看 run
+go run ./cmd/wbctl signal -run <run_id> -node escalate -option handled -actor lead@example.com
+go run ./cmd/wbctl run <run_id>
+```
+
+代码生成：`make gen`（需要 protoc、protoc-gen-go、protoc-gen-go-grpc 与 goctl v1.10.2）。
 
 ## 目录
 

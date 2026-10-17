@@ -1,0 +1,235 @@
+package bootstrap
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/alex2025-sh/ai-workbench/internal/flow/engine"
+	"github.com/alex2025-sh/ai-workbench/internal/model"
+	"github.com/alex2025-sh/ai-workbench/internal/pkg/testdb"
+	"github.com/alex2025-sh/ai-workbench/internal/registry"
+	"github.com/alex2025-sh/ai-workbench/internal/spec"
+	"github.com/alex2025-sh/ai-workbench/internal/task"
+)
+
+func repoFile(t *testing.T, rel string) string {
+	_, file, _, _ := runtime.Caller(0)
+	return filepath.Join(filepath.Dir(file), "..", "..", rel)
+}
+
+type harness struct {
+	t     *testing.T
+	ctx   context.Context
+	clock *engine.FakeClock
+	svc   *Services
+	w     *engine.Worker
+	biz   string
+}
+
+func newHarness(t *testing.T) *harness {
+	platform := testdb.New(t, "deploy/sql/*.sql")
+	biz := testdb.New(t, "deploy/mock/appeal.sql")
+	// 扫描只读取已经过去的整秒，把样例数据的更新时间往前拨一点。
+	testdb.Exec(t, biz, "UPDATE appeal SET updated_at = updated_at - INTERVAL 10 SECOND")
+
+	clock := engine.NewFakeClock(time.Now())
+	svc, err := Build(Config{DataSource: platform, BizDataSource: biz, RelationsFile: repoFile(t, "deploy/mock/vip_rm.yaml"), Owner: "test", Lease: time.Minute}, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &harness{t: t, ctx: context.Background(), clock: clock, svc: svc, biz: biz}
+	h.w = engine.NewWorker(svc.Engine, engine.WorkerOptions{Concurrency: 4})
+	return h
+}
+
+func (h *harness) publish(path string) {
+	h.t.Helper()
+	raw, err := os.ReadFile(repoFile(h.t, path))
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	body, err := spec.FromYAML(raw)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	res, err := registry.PublishDirect(h.ctx, h.svc.Conn, body, "test", h.clock.Now())
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	if res.Version != 1 {
+		h.t.Fatalf("publish: version=%d issues=%+v", res.Version, res.Issues)
+	}
+}
+
+// tick 把时钟拨到 d 之后，触发到期的来源，并处理完所有到期 job。
+func (h *harness) tick(d time.Duration) {
+	h.t.Helper()
+	h.clock.Advance(d)
+	if err := h.svc.Ticker.Tick(h.ctx, struct{ Index, Total int }{0, 1}); err != nil {
+		h.t.Fatal(err)
+	}
+	h.w.Drain(h.ctx)
+}
+
+func (h *harness) task(appealID string) *task.Task {
+	h.t.Helper()
+	row, err := model.NewTaskModel(h.svc.Conn).FindOneByDedupKey(h.ctx, "vip_appeal_alert:"+appealID)
+	if err != nil {
+		h.t.Fatalf("task for %s: %v", appealID, err)
+	}
+	tk, err := h.svc.Tasks.Get(h.ctx, int64(row.Id))
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return tk
+}
+
+func (h *harness) run(appealID string) *engine.RunView {
+	h.t.Helper()
+	v, err := h.svc.Engine.GetRun(h.ctx, h.task(appealID).RunID)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	return v
+}
+
+func (h *harness) node(appealID, nodeID string) engine.NodeRun {
+	for _, n := range h.run(appealID).Nodes {
+		if n.NodeID == nodeID {
+			return n
+		}
+	}
+	h.t.Fatalf("node %s not found", nodeID)
+	return engine.NodeRun{}
+}
+
+func (h *harness) cards(appealID string) []string {
+	var out []string
+	for _, c := range h.svc.Lark.Sent() {
+		if strings.Contains(c.Card.Title, appealID) {
+			out = append(out, c.Card.Title)
+		}
+	}
+	return out
+}
+
+// TestVIPAppealAlert 按 deploy/mock/appeal.sql 的样例数据跑通 examples/task_types/vip_appeal_alert.yaml：
+// 扫描 → 建任务 → 通知 RM → 48 小时提醒 → 7 天升级 → 组长处理；时间用可快进的时钟推进。
+func TestVIPAppealAlert(t *testing.T) {
+	h := newHarness(t)
+	h.publish("examples/task_types/vip_appeal_alert.yaml")
+
+	// 第一次触发：cron 是每分钟一次，拨到下一分钟。
+	h.tick(time.Minute)
+
+	// 只有 VIP 且待审核的 A1001 / A1002 / A1003 建任务；A1004 已通过，A1005 非 VIP，A1006 未提交。
+	for _, id := range []string{"A1004", "A1005", "A1006"} {
+		if _, err := model.NewTaskModel(h.svc.Conn).FindOneByDedupKey(h.ctx, "vip_appeal_alert:"+id); err == nil {
+			t.Errorf("%s should be filtered", id)
+		}
+	}
+
+	// A1001 刚提交：通知了 RM，等 48 小时。
+	if c := h.cards("A1001"); len(c) != 1 || !strings.Contains(c[0], "待审核") {
+		t.Fatalf("A1001 cards = %v", c)
+	}
+	if tk := h.task("A1001"); tk.Status != task.TaskStatusPending || tk.AssigneeID != "rm.alice@example.com" || tk.CurrentNode != "notify_rm" {
+		t.Fatalf("A1001 task = %+v", tk)
+	}
+	if n := h.node("A1001", "wait_48h"); n.Status != engine.NodeWaiting {
+		t.Fatalf("A1001 wait_48h = %s", n.Status)
+	}
+
+	// A1002 已提交 50 小时：通知后立即触发 48 小时提醒，然后等到 7 天。
+	if c := h.cards("A1002"); len(c) != 2 || !strings.Contains(c[1], "48 小时") {
+		t.Fatalf("A1002 cards = %v", c)
+	}
+	if n := h.node("A1002", "wait_7d"); n.Status != engine.NodeWaiting {
+		t.Fatalf("A1002 wait_7d = %s", n.Status)
+	}
+
+	// A1003 已提交 8 天：通知、提醒后升级给 VIP 客服组长，进入组队列待认领。
+	if c := h.cards("A1003"); len(c) != 3 || !strings.Contains(c[2], "超过 7 天") {
+		t.Fatalf("A1003 cards = %v", c)
+	}
+	tk := h.task("A1003")
+	if tk.Status != task.TaskStatusUnassigned || tk.AssigneeGroup != "vip_cs_leads" || tk.CurrentNode != "escalate" {
+		t.Fatalf("A1003 task = %+v", tk)
+	}
+	esc := h.node("A1003", "escalate")
+	if esc.Status != engine.NodeWaiting {
+		t.Fatalf("A1003 escalate = %s", esc.Status)
+	}
+
+	// 卡片上的 uid 已按 x-pii 脱敏。
+	for _, c := range h.svc.Lark.Sent() {
+		for _, f := range c.Card.Fields {
+			if f.Label == "用户 UID" && !strings.Contains(f.Value, "*") {
+				t.Fatalf("uid not masked: %q", f.Value)
+			}
+		}
+	}
+
+	// 再触发一次：数据没有变化，不会重复建任务或重复发卡片。
+	before := len(h.svc.Lark.Sent())
+	h.tick(time.Minute)
+	if after := len(h.svc.Lark.Sent()); after != before {
+		t.Fatalf("duplicate cards: %d → %d", before, after)
+	}
+
+	// 组长处理 A1003：推迟暂不支持，未知选项被拒绝，处理后流程结束、任务完结。
+	runID := h.task("A1003").RunID
+	for _, c := range []struct{ option, reason string }{{"snooze", "推迟"}, {"nope", "未知选项"}} {
+		res, err := h.svc.Engine.Signal(h.ctx, engine.SignalCmd{RunID: runID, NodeID: "escalate", Option: c.option, Actor: "lead@example.com"})
+		if err != nil || res.Accepted || !strings.Contains(res.Reason, c.reason) {
+			t.Fatalf("signal %s: %+v %v", c.option, res, err)
+		}
+	}
+	res, err := h.svc.Engine.Signal(h.ctx, engine.SignalCmd{RunID: runID, NodeID: "escalate", Option: "handled", Actor: "lead@example.com"})
+	if err != nil || !res.Accepted {
+		t.Fatalf("signal handled: %+v %v", res, err)
+	}
+	res, _ = h.svc.Engine.Signal(h.ctx, engine.SignalCmd{RunID: runID, NodeID: "escalate", Option: "handled", Actor: "lead@example.com"})
+	if res.Accepted {
+		t.Fatal("second click must be rejected")
+	}
+	h.w.Drain(h.ctx)
+	if v := h.run("A1003"); v.Run.Status != engine.RunSucceeded {
+		t.Fatalf("A1003 run = %s", v.Run.Status)
+	}
+	if tk := h.task("A1003"); tk.Status != task.TaskStatusSolved || tk.Resolution != "escalated" {
+		t.Fatalf("A1003 task = %+v", tk)
+	}
+
+	// 48 小时后：A1001 仍待审核，提醒 RM。
+	h.tick(48 * time.Hour)
+	if c := h.cards("A1001"); len(c) != 2 {
+		t.Fatalf("A1001 cards after 48h = %v", c)
+	}
+
+	// A1001 在 7 天前审核通过：7 天检查时直接结束，不再升级。
+	testdb.Exec(t, h.biz, "UPDATE appeal SET appeal_status = 'PASS' WHERE appeal_id = 'A1001'")
+	h.tick(6 * 24 * time.Hour)
+	if v := h.run("A1001"); v.Run.Status != engine.RunSucceeded {
+		t.Fatalf("A1001 run = %s", v.Run.Status)
+	}
+	if c := h.cards("A1001"); len(c) != 2 {
+		t.Fatalf("A1001 must not escalate: %v", c)
+	}
+	if tk := h.task("A1001"); tk.Status != task.TaskStatusSolved || tk.Resolution != "reviewed" {
+		t.Fatalf("A1001 task = %+v", tk)
+	}
+
+	// A1002 到 7 天时仍待审核：升级给组长。
+	if c := h.cards("A1002"); len(c) != 3 {
+		t.Fatalf("A1002 cards after 7d = %v", c)
+	}
+	if n := h.node("A1002", "escalate"); n.Status != engine.NodeWaiting {
+		t.Fatalf("A1002 escalate = %s", n.Status)
+	}
+}

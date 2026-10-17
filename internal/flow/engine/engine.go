@@ -3,20 +3,96 @@ package engine
 import (
 	"context"
 	"encoding/json"
-	"strconv"
 	"time"
+
+	"github.com/alex2025-sh/ai-workbench/internal/action"
+	"github.com/alex2025-sh/ai-workbench/internal/flow/compiler"
+	"github.com/alex2025-sh/ai-workbench/internal/flow/dsl"
+	"github.com/alex2025-sh/ai-workbench/internal/pkg/expr"
+	"github.com/alex2025-sh/ai-workbench/internal/spec"
 )
 
-func formatIdemKey(runID int64, nodeID string, iteration int, kind string) string {
-	return strconv.FormatInt(runID, 10) + ":" + nodeID + ":" + strconv.Itoa(iteration) + ":" + kind
+// Definition 是一个已发布的任务类型版本：完整定义与编译后的执行计划。发布后不可变。
+type Definition struct {
+	Key     string
+	Version int
+	Spec    *spec.TaskType
+	Plan    *compiler.Plan
+}
+
+// PlanSource 按 (任务类型, 版本) 加载已发布的定义。
+type PlanSource interface {
+	Load(ctx context.Context, key string, version int) (*Definition, error)
+}
+
+// Invoker 是动作运行时，所有外部 IO 都经它调用（见 internal/action）。
+type Invoker interface {
+	InvokeAction(ctx context.Context, req action.Request) (action.Result, error)
+}
+
+// Clock 抽象时间来源。推进逻辑只从这里取时间；试运行和测试使用可快进的时钟。
+type Clock interface {
+	Now() time.Time
+}
+
+// ExecContext 是节点在事务外执行时可见的上下文。
+type ExecContext struct {
+	Run       Run
+	Def       *Definition
+	Node      dsl.Node
+	Config    any                       // dsl.DecodeConfig 解码后的配置
+	Binding   *compiler.ResolvedBinding // human_choice / lark_card 的模板与分配策略
+	Iteration int
+	Attempt   int
+	IdemKey   string // 外部动作的幂等键 run_id:node_id:iteration
+	Env       expr.Env
+	Now       time.Time
+	Actions   Invoker
+}
+
+// Assignment 是节点确定的处理人，用于更新任务的 assignee。
+type Assignment struct {
+	Assignee string `json:"assignee,omitempty"`
+	Group    string `json:"group,omitempty"`
+}
+
+// NodeResult 是节点执行器在事务外执行后的结果，由推进器在事务内提交。
+//   - Err 非空：执行失败，按重试策略重试；Permanent 为 true 时不重试。
+//   - Wait 非空：节点进入等待（timer / human_choice）。
+//   - 否则：节点完成，选中 Port（end 节点没有端口）。
+type NodeResult struct {
+	Port       string
+	Output     json.RawMessage
+	Wait       *WaitSpec
+	Assignment *Assignment
+	Err        error
+	Permanent  bool
+}
+
+// WaitSpec 描述节点进入 waiting 时需要插入的定时 job。
+type WaitSpec struct {
+	TimerAt   *time.Time // timer 节点到期后走 next
+	TimeoutAt *time.Time // human_choice 超时后走 timeout
+}
+
+// Executor 是一种节点类型的运行时实现，见 internal/flow/nodes。
+type Executor interface {
+	Type() dsl.NodeType
+	Execute(ctx context.Context, ec ExecContext) NodeResult
+}
+
+// Executors 按节点类型查找执行器。
+type Executors interface {
+	Get(t dsl.NodeType) (Executor, bool)
 }
 
 // StartRunCmd 启动一次运行；BizKey 唯一，重复启动返回已有 run。
 type StartRunCmd struct {
-	PlanID  string
-	BizKey  string
-	Trigger json.RawMessage
-	DryRun  bool
+	PlanKey     string
+	PlanVersion int
+	BizKey      string
+	Vars        Vars
+	DryRun      bool
 }
 
 // SignalCmd 是外部对等待中人工节点的输入。调用方（API 层）负责先按任务表鉴权。
@@ -25,75 +101,18 @@ type SignalCmd struct {
 	NodeID    string
 	Iteration int
 	Option    string
-	Form      json.RawMessage
+	Form      map[string]string
 	Actor     string
 }
 
 // SignalResult 对应 Temporal Update 的语义：先校验，不通过直接拒绝并返回原因。
 type SignalResult struct {
-	Accepted bool
-	Reason   string
+	Accepted bool   `json:"accepted"`
+	Reason   string `json:"reason,omitempty"`
 }
 
 // RunView 是运行状态的查询视图，供运行态画布着色。
 type RunView struct {
-	Run   Run
-	Nodes []NodeRun
-}
-
-// Engine 是引擎对外的 API。
-type Engine interface {
-	StartRun(ctx context.Context, cmd StartRunCmd) (run Run, created bool, err error)
-	Signal(ctx context.Context, cmd SignalCmd) (SignalResult, error)
-	Cancel(ctx context.Context, runID int64, actor, reason string) error
-	GetRun(ctx context.Context, runID int64) (*RunView, error)
-
-	// 人工干预：重试节点、以指定端口跳过节点。
-	RetryNode(ctx context.Context, runID int64, nodeID, actor, reason string) error
-	SkipNode(ctx context.Context, runID int64, nodeID, port, actor, reason string) error
-}
-
-// NodeResult 是节点执行器在事务外执行后的结果，交给推进器在事务内提交。
-type NodeResult struct {
-	Port   string          // 选中的输出端口；为空表示进入等待（human_choice / timer）
-	Output json.RawMessage // 大输出只放引用
-	Wait   *WaitSpec       // 进入等待时插入的 job
-	Err    error
-}
-
-// WaitSpec 描述节点进入 waiting 时需要插入的定时 job。
-type WaitSpec struct {
-	TimeoutAt *time.Time // 为空表示不设超时
-	WakeAt    *time.Time // 重复提醒或 snooze 唤醒
-	TimerAt   *time.Time // timer 节点
-}
-
-// Advancer 是唯一修改节点状态的组件。每个方法都在一个悲观事务内完成：
-// 锁 run 行 → 防护校验（status / iteration / attempt）→ 写结果 → 边传播与死路径消除
-// → 插入新 job（含 sync_task）→ 判断 run 是否结束 → 写 wf_event。
-type Advancer interface {
-	// Complete 提交一次节点执行的结果。返回提交后新就绪、可立即派发的 job。
-	Complete(ctx context.Context, job Job, result NodeResult) (ready []Job, err error)
-
-	// ApplySignal 在事务内校验并应用人工选择。点击与超时在同一行锁下竞争。
-	ApplySignal(ctx context.Context, cmd SignalCmd) (SignalResult, []Job, error)
-
-	// Fire 处理到期的 timeout / wake / timer job。
-	Fire(ctx context.Context, job Job) ([]Job, error)
-}
-
-// Worker 认领并执行 job。
-type Worker interface {
-	// Claim 用 CAS 认领一个到期 job（TiDB 不支持 SKIP LOCKED）：
-	//   UPDATE wf_job SET owner=?, locked_until=?, attempt=attempt+1
-	//   WHERE id=? AND status='pending' AND due_at<=NOW() AND (owner='' OR locked_until<NOW())
-	Claim(ctx context.Context, jobID int64, owner string, lease time.Duration) (bool, error)
-
-	// Dispatch 把提交后新就绪的 job 直接交给本进程的执行池；ticker 只做兜底。
-	Dispatch(jobs []Job)
-}
-
-// Clock 抽象时间来源。试运行使用虚拟时钟，让超时与提醒即时快进。
-type Clock interface {
-	Now() time.Time
+	Run   Run       `json:"run"`
+	Nodes []NodeRun `json:"nodes"`
 }
