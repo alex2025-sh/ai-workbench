@@ -52,6 +52,7 @@ const (
 	JobExecute JobKind = "execute" // 执行节点
 	JobTimer   JobKind = "timer"   // timer 节点到期，走 next
 	JobTimeout JobKind = "timeout" // human_choice 超时，走 timeout
+	JobWake    JobKind = "wake"    // human_choice 等待期间重新提醒：重复提醒到点，或推迟到期
 	JobEffect  JobKind = "effect"  // 节点状态提交之后才执行的外部动作：人工节点的卡片、任务状态同步
 
 	// jobLegacySyncTask 是升级前写入的任务同步 job（payload 为 SyncPayload）。新版写成 kind = effect、
@@ -60,7 +61,17 @@ const (
 )
 
 // graphJobs 是推进图的 job；run 结束或取消时撤销它们。effect 不撤销：已提交的状态仍要触达外部。
-var graphJobs = []JobKind{JobExecute, JobTimer, JobTimeout}
+var graphJobs = []JobKind{JobExecute, JobTimer, JobTimeout, JobWake}
+
+// wakePayload 是 wake job 的参数。Key 是这次提醒的后缀（:r<n>.<version> 为第 n 次重复提醒，:s<version> 为推迟到期），
+// 拼进重发卡片的幂等键。
+type wakePayload struct {
+	Key     string `json:"key"`
+	Snoozed bool   `json:"snoozed,omitempty"` // 推迟到期：任务从 snoozed 回迁 pending
+}
+
+// voidedWhilePaused 是 run 暂停期间到期而作废的定时 job 的结束原因；恢复时据此补回 wake。
+const voidedWhilePaused = "voided: run paused"
 
 // EffectPayload 是 effect job 的参数。
 type EffectPayload struct {

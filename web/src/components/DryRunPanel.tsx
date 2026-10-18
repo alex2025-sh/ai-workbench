@@ -74,7 +74,7 @@ export function DryRunPanel({ taskKey, body, beforeRun }: { taskKey: string; bod
                     style={{ width: 300 }}
                     value={choices[n.id]}
                     onChange={(v?: string) => setChoices((c) => ({ ...Object.fromEntries(Object.entries(c).filter(([k]) => k !== n.id)), ...(v ? { [n.id]: v } : {}) }))}
-                    options={(n.config?.options ?? []).map((o) => ({ value: o.key, label: o.snooze ? `${o.label}（推迟，暂不支持）` : o.label }))}
+                    options={(n.config?.options ?? []).map((o) => ({ value: o.key, label: o.snooze ? `${o.label}（推迟 ${o.snooze}）` : o.label }))}
                   />
                 </Space>
               ))}

@@ -56,9 +56,10 @@ type runState struct {
 	inserts  []*model.WfJob
 	events   []*model.WfEvent
 
-	sync       string // 非空时 flush 插入一个任务同步，目标状态见 Sync*
-	reassigned bool   // 本次推进明确分配了处理人（节点确定处理人，或有人做了决定）
-	current    string // 任务当前所处的节点
+	sync        string     // 非空时 flush 插入一个任务同步，目标状态见 Sync*
+	snoozeUntil *time.Time // sync 为 snoozed 时的回迁时间
+	reassigned  bool       // 本次推进明确分配了处理人（节点确定处理人，或有人做了决定）
+	current     string     // 任务当前所处的节点
 }
 
 // cancelReq 撤销某节点当前轮（nodeID 为空时为整个 run）尚未执行的指定类型 job。
@@ -201,6 +202,9 @@ func (s *runState) addSync() error {
 	p := SyncPayload{
 		TaskID: task.ID, Status: s.sync, Reassign: s.reassigned, Assignee: task.Assignee, Group: task.Group,
 		CurrentNode: s.current, Seq: s.run.Version,
+	}
+	if s.sync == SyncSnoozed {
+		p.SnoozeUntil = s.snoozeUntil
 	}
 	if s.sync == SyncSolved {
 		p.Resolution = s.resolution()
@@ -423,6 +427,72 @@ func (s *runState) wait(nodeID string, res NodeResult) {
 	})
 	s.assign(nodeID, res.Assignment)
 	s.event(nodeID, "node_waiting", "", map[string]any{"until": until})
+	s.scheduleRemind(nodeID, 0)
+}
+
+// scheduleRemind 在人工节点配置了重复提醒、且已提醒次数 sent 未达上限时，插入下一次提醒的 wake job。
+func (s *runState) scheduleRemind(nodeID string, sent int) {
+	_, cfg := s.def.node(nodeID)
+	hc, ok := cfg.(*dsl.HumanChoiceConfig)
+	if !ok || hc.Remind == nil || sent >= hc.Remind.Max {
+		return
+	}
+	// 带上 run 版本：推迟作废了第 n 次提醒后重新安排的第 n 次，幂等键不能与作废的那个相同。
+	key := fmt.Sprintf(":r%d.%d", sent+1, s.run.Version)
+	b, _ := json.Marshal(wakePayload{Key: key})
+	s.addJob(nodeID, JobWake, s.now.Add(hc.Remind.Every.Std()), b, key)
+}
+
+// remind 处理到期的 wake job（节点仍在等待）：重发卡片给当前处理人，推迟到期时任务回迁 pending，
+// 然后按配置安排下一次提醒。已提醒次数记在节点输出的 reminded 中，推迟不计入。
+func (s *runState) remind(nodeID string, raw json.RawMessage) error {
+	var p wakePayload
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return fmt.Errorf("wake payload: %w", err)
+	}
+	r := s.nodes[nodeID]
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(nullOr(r.Output)), &out); err != nil {
+		return fmt.Errorf("node %s output: %w", nodeID, err)
+	}
+	var sent int
+	_ = json.Unmarshal(out["reminded"], &sent)
+	// 发给流程当前的处理人：推迟过的话是做推迟的人，否则是节点确定的处理人。
+	task := s.run.Vars.Task
+	in, err := json.Marshal(map[string]any{"to": map[string]string{"assignee": task.Assignee, "group": task.Group}, "card": out["card"]})
+	if err != nil {
+		return err
+	}
+	if err := s.addEffect(nodeID, Effect{Kind: action.KindLarkCard, Input: in, Key: ":card" + p.Key, WhileWaiting: true}); err != nil {
+		return err
+	}
+	if p.Snoozed {
+		s.event(nodeID, "snooze_ended", "", nil)
+		s.sync, s.current, s.changed = SyncPending, nodeID, true
+	} else {
+		sent++
+		out["reminded"], _ = json.Marshal(sent)
+		b, _ := json.Marshal(out)
+		s.setNode(nodeID, NodeWaiting, func(r *model.WfNodeRun) { r.Output = nullJSON(b) })
+		s.event(nodeID, "node_reminded", "", map[string]any{"n": sent})
+	}
+	s.scheduleRemind(nodeID, sent)
+	return nil
+}
+
+// snooze 推迟人工节点：节点继续等待，作废尚未到期的提醒，到期时重发卡片；任务置为 snoozed。超时照常计时。
+func (s *runState) snooze(cmd SignalCmd, after time.Duration) {
+	until := s.now.Add(after)
+	s.cancelJobs(cmd.NodeID, JobWake)
+	key := fmt.Sprintf(":s%d", s.run.Version)
+	b, _ := json.Marshal(wakePayload{Key: key, Snoozed: true})
+	s.addJob(cmd.NodeID, JobWake, until, b, key)
+	s.event(cmd.NodeID, "snoozed", cmd.Actor, map[string]any{"option": cmd.Option, "form": cmd.Form, "until": until})
+	// 做推迟的人成为处理人（组任务没人认领时也一样），到期提醒发给他。
+	if cmd.Actor != "" {
+		s.assign(cmd.NodeID, &Assignment{Assignee: cmd.Actor})
+	}
+	s.sync, s.snoozeUntil, s.current, s.changed = SyncSnoozed, &until, cmd.NodeID, true
 }
 
 // finish 结束 run：撤销尚未执行的节点与定时，任务置为 solved。已落库的 effect 照常执行。

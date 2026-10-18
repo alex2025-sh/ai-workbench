@@ -109,7 +109,7 @@ func TestDryRun(t *testing.T) {
 	t.Run("bad sample and rejected choice fail the dry run", func(t *testing.T) {
 		res := dry(&pb.DryRunTaskTypeDraftReq{
 			SampleJson: [][]byte{[]byte(`[1]`), sample("A1003", "10000003", 8*24*time.Hour)},
-			Choices:    map[string]string{"escalate": "snooze"},
+			Choices:    map[string]string{"escalate": "nope"},
 		})
 		if res.Passed || res.Cases[0].Issues[0].Code != "bad_sample" || res.Cases[1].Issues[0].Code != "choice_rejected" {
 			t.Fatalf("res = %+v", res)
