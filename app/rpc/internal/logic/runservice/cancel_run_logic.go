@@ -2,7 +2,10 @@ package runservicelogic
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
+	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/identity"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/svc"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/pb"
 
@@ -27,5 +30,19 @@ func NewCancelRunLogic(ctx context.Context, svcCtx *svc.ServiceContext) *CancelR
 
 // 取消运行
 func (l *CancelRunLogic) CancelRun(in *pb.CancelRunReq) (*pb.Empty, error) {
-	return nil, status.Error(codes.Unimplemented, "not implemented")
+	actor, err := identity.Require(l.ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := identity.RequirePermission(l.ctx, l.svcCtx.Authz, actor, identity.PermRunAdmin); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(in.Reason) == "" {
+		return nil, status.Error(codes.InvalidArgument, "reason is required")
+	}
+	// 已结束的 run 不受影响；任务经同步置为 solved（auto_closed）。
+	if err := l.svcCtx.Engine.Cancel(l.ctx, in.RunId, actor, in.Reason); err != nil {
+		return nil, queryError(err, fmt.Sprintf("run %d", in.RunId))
+	}
+	return &pb.Empty{}, nil
 }

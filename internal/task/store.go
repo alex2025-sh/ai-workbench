@@ -15,8 +15,12 @@ import (
 	"github.com/alex2025-sh/ai-workbench/internal/model"
 )
 
-// ErrNotImplemented 表示该能力会在任务中心的 RPC 阶段实现。
-var ErrNotImplemented = errors.New("task: not implemented yet")
+// 任务中心操作的错误。RPC 层把它们映射为 gRPC 状态码。
+var (
+	ErrNotClaimable   = errors.New("task: not in a claimable queue (already claimed or assigned)")
+	ErrNotAssignee    = errors.New("task: caller is not the assignee")
+	ErrReasonRequired = errors.New("task: reason is required")
+)
 
 // ErrHasRun 表示任务已有 run，应由引擎取消 run 来结束任务。
 var ErrHasRun = errors.New("task: task is driven by a run; cancel the run instead")
@@ -142,7 +146,8 @@ func (s *Store) Get(ctx context.Context, id int64) (*Task, error) {
 // SyncStatus 实现 Service：只接受更大的 seq；任务已终结时忽略。
 //
 // 处理人的归属：只有流程明确分配处理人时（Reassign）才覆盖；否则保留任务中心当前的处理人，
-// 认领、转派的结果不会被引擎里的旧快照覆盖。处理人未变时不把 processing 退回 pending（处理人已点过「开始处理」）。
+// 认领、转派的结果不会被引擎里的旧快照覆盖，已有处理人的任务也不会被同步回待认领。
+// 处理人未变时不把 processing 退回 pending（处理人已点过「开始处理」）。
 func (s *Store) SyncStatus(ctx context.Context, cmd SyncStatusCmd) (bool, error) {
 	applied := false
 	err := s.conn.TransactCtx(ctx, func(ctx context.Context, session sqlx.Session) error {
@@ -163,6 +168,11 @@ func (s *Store) SyncStatus(ctx context.Context, cmd SyncStatusCmd) (bool, error)
 			}
 		}
 		to := cmd.Status
+		// 认领或转派之后，引擎快照里仍是组队列（引擎不知道任务中心的处理人变化），同步来的是 unassigned；
+		// 流程没有重新分配时保留处理人，任务也不能退回待认领。
+		if !cmd.Reassign && to == TaskStatusUnassigned && assignee != "" {
+			to = TaskStatusPending
+		}
 		if to == TaskStatusPending && from == TaskStatusProcessing && assignee == cur.AssigneeId {
 			to = TaskStatusProcessing
 		}
@@ -198,17 +208,113 @@ func (s *Store) event(ctx context.Context, m model.TaskEventModel, taskID uint64
 	return err
 }
 
-// 以下能力在任务中心 RPC 阶段实现。
+// ---- 任务中心直接处理的操作（不影响流程，不经过引擎） ----
+//
+// 权限（谁能认领、谁能调整优先级或转派）由 RPC 层按 BSP 的接口权限与用户组判断；这里只保证状态规则：
+// 在锁住任务行的事务内检查当前状态再写入，并发的两次认领只有一次成功。
 
-func (s *Store) Claim(context.Context, int64, string) (*Task, error) { return nil, ErrNotImplemented }
-func (s *Store) StartProcessing(context.Context, int64, string) (*Task, error) {
-	return nil, ErrNotImplemented
+// Claim 实现 Service：组队列中未分配的任务由 actor 认领，unassigned -> pending。
+func (s *Store) Claim(ctx context.Context, id int64, actor string) (*Task, error) {
+	return s.change(ctx, id, func(cur *model.Task, tm model.TaskModel, ev eventFunc) error {
+		from := TaskStatus(cur.Status)
+		if from != TaskStatusUnassigned || cur.AssigneeId != "" || cur.AssigneeGroup == "" {
+			return ErrNotClaimable
+		}
+		if err := tm.SetAssignment(ctx, cur.Id, int64(TaskStatusPending), actor, ""); err != nil {
+			return err
+		}
+		return ev("claimed", &from, TaskStatusPending, actor, "", map[string]any{"group": cur.AssigneeGroup})
+	})
 }
-func (s *Store) UpdatePriority(context.Context, int64, TaskPriority, string, string) (*Task, error) {
-	return nil, ErrNotImplemented
+
+// StartProcessing 实现 Service：处理人开始处理，pending -> processing。
+func (s *Store) StartProcessing(ctx context.Context, id int64, actor string) (*Task, error) {
+	return s.change(ctx, id, func(cur *model.Task, tm model.TaskModel, ev eventFunc) error {
+		from := TaskStatus(cur.Status)
+		if cur.AssigneeId != actor {
+			return ErrNotAssignee
+		}
+		if err := CheckTransition(from, TaskStatusProcessing); err != nil {
+			return err
+		}
+		if err := tm.SetAssignment(ctx, cur.Id, int64(TaskStatusProcessing), cur.AssigneeId, cur.AssigneeGroup); err != nil {
+			return err
+		}
+		return ev("status_changed", &from, TaskStatusProcessing, actor, "", nil)
+	})
 }
-func (s *Store) Reassign(context.Context, int64, string, string, string) (*Task, error) {
-	return nil, ErrNotImplemented
+
+// UpdatePriority 实现 Service：调整未完结任务的优先级，原因必填。已发出卡片的刷新在接入 Lark 网关后实现。
+func (s *Store) UpdatePriority(ctx context.Context, id int64, p TaskPriority, actor, reason string) (*Task, error) {
+	if !p.Valid() {
+		return nil, fmt.Errorf("task: invalid priority %d", p)
+	}
+	if strings.TrimSpace(reason) == "" {
+		return nil, ErrReasonRequired
+	}
+	return s.change(ctx, id, func(cur *model.Task, tm model.TaskModel, ev eventFunc) error {
+		st := TaskStatus(cur.Status)
+		if st.IsTerminal() {
+			return ErrInvalidTransition{From: st, To: st}
+		}
+		if TaskPriority(cur.Priority) == p {
+			return nil
+		}
+		if err := tm.SetPriority(ctx, cur.Id, int64(p)); err != nil {
+			return err
+		}
+		return ev("priority_changed", &st, st, actor, reason, map[string]any{"from": cur.Priority, "to": int64(p)})
+	})
+}
+
+// Reassign 实现 Service：把未完结任务转给 assignee，原因必填。只改变处理人、状态不变；
+// 组队列中待认领的任务转派后有了处理人，状态随之变为 pending。之后引擎的同步保留这个处理人，
+// 只有流程再次明确分配处理人（如进入下一个人工节点）时才会覆盖。
+func (s *Store) Reassign(ctx context.Context, id int64, assignee, actor, reason string) (*Task, error) {
+	if strings.TrimSpace(assignee) == "" {
+		return nil, fmt.Errorf("task: assignee is required")
+	}
+	if strings.TrimSpace(reason) == "" {
+		return nil, ErrReasonRequired
+	}
+	return s.change(ctx, id, func(cur *model.Task, tm model.TaskModel, ev eventFunc) error {
+		from := TaskStatus(cur.Status)
+		if from.IsTerminal() {
+			return ErrInvalidTransition{From: from, To: from}
+		}
+		if cur.AssigneeId == assignee {
+			return nil
+		}
+		to := from
+		if from == TaskStatusUnassigned {
+			to = TaskStatusPending
+		}
+		if err := tm.SetAssignment(ctx, cur.Id, int64(to), assignee, ""); err != nil {
+			return err
+		}
+		return ev("reassigned", &from, to, actor, reason, map[string]any{"from": cur.AssigneeId, "group": cur.AssigneeGroup, "to": assignee})
+	})
+}
+
+type eventFunc func(typ string, from *TaskStatus, to TaskStatus, actor, reason string, detail any) error
+
+// change 在锁住任务行的事务内执行一次修改并写任务事件，返回修改后的任务。
+func (s *Store) change(ctx context.Context, id int64, fn func(cur *model.Task, tm model.TaskModel, ev eventFunc) error) (*Task, error) {
+	err := s.conn.TransactCtx(ctx, func(ctx context.Context, session sqlx.Session) error {
+		tm := s.tasks.WithSession(session)
+		cur, err := tm.FindOneForUpdate(ctx, uint64(id))
+		if err != nil {
+			return err
+		}
+		em := s.events.WithSession(session)
+		return fn(cur, tm, func(typ string, from *TaskStatus, to TaskStatus, actor, reason string, detail any) error {
+			return s.event(ctx, em, cur.Id, typ, from, to, actor, reason, detail)
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s.Get(ctx, id)
 }
 
 func fromRow(r *model.Task) Task {

@@ -47,6 +47,7 @@ func New(t *testing.T) *Env {
 	s, err := bootstrap.Build(bootstrap.Config{
 		DataSource: platform, BizDataSource: biz, DryRunDataSource: dry, Owner: "test",
 		RelationsFile: RepoFile("deploy/mock/vip_rm.yaml"), GroupsFile: RepoFile("deploy/mock/groups.yaml"),
+		PermissionsFile: RepoFile("deploy/mock/permissions.yaml"),
 	}, clock)
 	if err != nil {
 		t.Fatal(err)

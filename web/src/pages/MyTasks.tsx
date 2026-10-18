@@ -1,6 +1,6 @@
 // 我的任务 / 可认领：后端按优先级、截止时间排序，前端平铺并用左侧色条区分优先级（游标分页下分组计数不准，不做分组）。
 import { ReloadOutlined } from '@ant-design/icons';
-import { Alert, Button, Empty, List, Space, Tabs, Tag, Typography } from 'antd';
+import { Alert, App as AntApp, Button, Empty, List, Space, Tabs, Tag, Typography } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ApiError } from '../api/client';
@@ -31,6 +31,23 @@ export default function MyTasks() {
   const [cursor, setCursor] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
+  const [claiming, setClaiming] = useState<string>();
+  const { message } = AntApp.useApp();
+
+  // 认领成功后任务移到「我的任务」。
+  const claim = async (id: string) => {
+    setClaiming(id);
+    try {
+      await taskApi.claim(id);
+      message.success('已认领，任务已移到「我的任务」');
+      setItems((prev) => prev.filter((t) => t.id !== id));
+    } catch (e) {
+      message.error(e instanceof ApiError ? `认领失败：${e.message}` : String(e));
+      void load();
+    } finally {
+      setClaiming(undefined);
+    }
+  };
 
   const load = useCallback(
     async (after = '') => {
@@ -110,6 +127,11 @@ export default function MyTasks() {
               <Typography.Text type="secondary">{t.assignee_id || '—'}</Typography.Text>
               <Typography.Text type="secondary">截止 {fmtTime(t.due_at)}</Typography.Text>
               <Typography.Text type="secondary">更新 {fmtTime(t.updated_at)}</Typography.Text>
+              {tab === 'claimable' && (
+                <Button size="small" type="primary" ghost loading={claiming === t.id} onClick={() => void claim(t.id)}>
+                  认领
+                </Button>
+              )}
             </Space>
           </List.Item>
         )}

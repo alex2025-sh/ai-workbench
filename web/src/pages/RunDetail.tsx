@@ -1,12 +1,13 @@
-// 运行详情（只读）：节点状态表与事件时间线。重试、跳过、取消在一期开放；三期换成运行态画布。
+// 运行详情：节点状态表与事件时间线，运行干预（取消运行；重试、跳过节点待实现）需要 run.admin。三期换成运行态画布。
 import { ArrowLeftOutlined, ReloadOutlined } from '@ant-design/icons';
-import { Button, Card, Descriptions, Result, Space, Spin, Table, Tag, Typography } from 'antd';
+import { App as AntApp, Button, Card, Descriptions, Form, Input, Modal, Result, Space, Spin, Table, Tag, Typography } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ApiError, decodeJson } from '../api/client';
 import { runApi } from '../api/services';
 import type { NodeView, RunEvent, RunView } from '../api/types';
 import { fmtTime, nodeStatusLabel, runStatusColor, runStatusLabel } from '../format';
+import { useIdentity } from '../identity';
 
 const nodeColor: Record<string, string> = {
   succeeded: 'success',
@@ -21,6 +22,8 @@ export default function RunDetail() {
   const [run, setRun] = useState<RunView>();
   const [events, setEvents] = useState<RunEvent[]>([]);
   const [error, setError] = useState<Error>();
+  const [cancelling, setCancelling] = useState(false);
+  const { can } = useIdentity();
 
   const load = useCallback(async () => {
     try {
@@ -65,9 +68,16 @@ export default function RunDetail() {
           </Space>
         }
         extra={
-          <Button icon={<ReloadOutlined />} onClick={() => void load()}>
-            刷新
-          </Button>
+          <Space>
+            {can('run.admin') && (run.status === 'running' || run.status === 'needs_intervention') && (
+              <Button danger onClick={() => setCancelling(true)}>
+                取消运行
+              </Button>
+            )}
+            <Button icon={<ReloadOutlined />} onClick={() => void load()}>
+              刷新
+            </Button>
+          </Space>
         }
         style={{ marginBottom: 16 }}
       >
@@ -79,6 +89,16 @@ export default function RunDetail() {
           </Descriptions.Item>
         </Descriptions>
       </Card>
+      {cancelling && (
+        <CancelModal
+          runId={run.run_id}
+          onClose={() => setCancelling(false)}
+          onDone={() => {
+            setCancelling(false);
+            void load();
+          }}
+        />
+      )}
       <Card title="节点" size="small" style={{ marginBottom: 16 }}>
         <Table<NodeView>
           rowKey={(n) => `${n.node_id}:${n.iteration}`}
@@ -88,7 +108,17 @@ export default function RunDetail() {
           columns={[
             { title: '节点', dataIndex: 'node_id', render: (v: string) => <Typography.Text code>{v}</Typography.Text> },
             { title: '轮次', dataIndex: 'iteration' },
-            { title: '状态', dataIndex: 'status', render: (s: string) => <Tag color={nodeColor[s]}>{nodeStatusLabel[s] ?? s}</Tag> },
+            {
+              title: '状态',
+              dataIndex: 'status',
+              render: (s: string) =>
+                // run 已结束（如被取消）时，引擎不改写未完成节点的状态，这里显示为已中止。
+                run.status !== 'running' && run.status !== 'needs_intervention' && ['waiting', 'running', 'ready'].includes(s) ? (
+                  <Tag>已中止</Tag>
+                ) : (
+                  <Tag color={nodeColor[s]}>{nodeStatusLabel[s] ?? s}</Tag>
+                ),
+            },
             { title: '出口', dataIndex: 'port', render: (v: string) => v || '—' },
             { title: '执行次数', dataIndex: 'attempt' },
             { title: '开始', dataIndex: 'started_at', render: (v: string) => fmtTime(v, 'MM-DD HH:mm:ss') },
@@ -115,5 +145,35 @@ export default function RunDetail() {
         />
       </Card>
     </>
+  );
+}
+
+// 取消运行：撤销尚未执行的节点与定时，任务置为已完成（auto_closed）。原因必填，写入 run 事件。
+function CancelModal(props: { runId: string; onClose: () => void; onDone: () => void }) {
+  const { message } = AntApp.useApp();
+  const [form] = Form.useForm<{ reason: string }>();
+  const [saving, setSaving] = useState(false);
+  const submit = async () => {
+    const { reason } = await form.validateFields();
+    setSaving(true);
+    try {
+      await runApi.cancel(props.runId, reason);
+      message.success('已取消运行');
+      props.onDone();
+    } catch (e) {
+      message.error(e instanceof ApiError ? `取消失败：${e.message}` : String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <Modal open title={`取消运行 #${props.runId}`} okText="确认取消" okButtonProps={{ danger: true }} onOk={() => void submit()} onCancel={props.onClose} confirmLoading={saving}>
+      <Typography.Paragraph type="secondary">尚未执行的节点与定时会被撤销，关联的任务置为已完成，此操作不可撤回。</Typography.Paragraph>
+      <Form form={form} layout="vertical">
+        <Form.Item name="reason" label="原因" rules={[{ required: true, whitespace: true, message: '请填写原因' }]}>
+          <Input.TextArea rows={3} />
+        </Form.Item>
+      </Form>
+    </Modal>
   );
 }

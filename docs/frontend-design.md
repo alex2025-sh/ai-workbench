@@ -21,7 +21,7 @@
 | 二期 | 任务类型编辑：Monaco + JSON Schema 校验、Issue 面板、试运行、卡片预览、来源试跑；组件库；AI 生成草稿入口（草稿走同一编译器校验） |
 | 三期 | React Flow 画布：设计态与运行态；试运行路径叠加；语义化 workflow 差异 |
 
-demo 不含变更集：变更集、审批后端尚未实现，demo 也没有草稿编辑器，页面没有数据。任务中心的 `Claim`、`StartProcessing`、`UpdatePriority`、`Reassign` 目前返回未实现，`sla_status` 也没有更新逻辑，所以这些放在一期。
+demo 不含变更集：变更集、审批后端尚未实现，demo 也没有草稿编辑器，页面没有数据。`sla_status` 还没有更新逻辑，放在一期。一期中认领、开始处理、调整优先级、转派与取消运行已实现，重试、跳过节点待实现。
 
 ### demo 的运行方式
 
@@ -98,7 +98,18 @@ demo 不含变更集：变更集、审批后端尚未实现，demo 也没有草�
 | --- | --- |
 | 进入 | `GetTask({id})` → `TaskDetail{task, rendered_json, pending_action, progress}` |
 | 时间线 | `GetTaskEvents` |
-| 认领、开始处理、调整优先级、转派 | `ClaimTask`、`StartProcessing`、`UpdatePriority`、`Reassign`（直接走任务中心，同步生效；一期） |
+| 认领、开始处理、调整优先级、转派 | `ClaimTask`、`StartProcessing`、`UpdatePriority`、`Reassign`（直接走任务中心，同步生效） |
+
+任务中心操作的规则与权限（接口级权限线上来自 BSP，本地见 `deploy/mock/permissions.yaml`）：
+
+| 操作 | 谁可以 | 规则 |
+| --- | --- | --- |
+| 认领 | 组队列的成员 | 只有 `UNASSIGNED` 且在组队列中的任务；并发认领只有一个成功，其余 `FailedPrecondition` |
+| 开始处理 | 处理人 | `PENDING` → `PROCESSING` |
+| 调整优先级 | 处理人，或有 `task.admin` | 未完结；原因必填 |
+| 转派 | 处理人，或有 `task.admin` | 未完结；原因必填；只改变处理人、状态不变（待认领的任务转派后变为 `PENDING`） |
+
+认领或转派之后，引擎同步过来的状态不会把任务退回待认领，也不会覆盖处理人；只有流程再次明确分配处理人（如进入下一个人工节点）时才会覆盖。
 | 流程操作 | `Signal({run_id, node_id, iteration, option, form})`，`run_id` 取自 `task.run_id`，`node_id`、`iteration`、选项取自 `pending_action` |
 
 `RunService.Signal` 是人工操作唯一的对外入口，服务端按任务表鉴权，与 Lark 卡片回调共用同一个鉴权函数（引擎本身不鉴权）。

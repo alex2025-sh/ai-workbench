@@ -8,11 +8,13 @@ const STORAGE_KEY = 'wb.devUser';
 interface Identity {
   user: string;
   users: DevUser[];
+  /** 当前身份是否有某个接口级权限（只决定是否显示入口）。 */
+  can: (permission: string) => boolean;
   setUser: (id: string) => void;
   error?: string;
 }
 
-const Ctx = createContext<Identity>({ user: '', users: [], setUser: () => {} });
+const Ctx = createContext<Identity>({ user: '', users: [], can: () => false, setUser: () => {} });
 
 function stored(): string {
   try {
@@ -50,7 +52,9 @@ export function IdentityProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  return <Ctx.Provider value={{ user, users, setUser: change, error }}>{children}</Ctx.Provider>;
+  const can = (permission: string) => users.find((u) => u.id === user)?.permissions.includes(permission) ?? false;
+
+  return <Ctx.Provider value={{ user, users, can, setUser: change, error }}>{children}</Ctx.Provider>;
 }
 
 export const useIdentity = () => useContext(Ctx);

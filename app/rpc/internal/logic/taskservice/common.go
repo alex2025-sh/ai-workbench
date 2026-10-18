@@ -7,7 +7,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/identity"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/svc"
+	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/taskview"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/pb"
 	"github.com/alex2025-sh/ai-workbench/internal/model"
 	"github.com/alex2025-sh/ai-workbench/internal/pkg/cursor"
@@ -49,4 +51,36 @@ func queryError(err error) error {
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
 	return err
+}
+
+// taskError 把任务中心的错误映射为 gRPC 状态码。
+func taskError(err error) error {
+	var bad task.ErrInvalidTransition
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, model.ErrNotFound):
+		return status.Error(codes.NotFound, "task not found")
+	case errors.Is(err, task.ErrNotClaimable), errors.As(err, &bad):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, task.ErrNotAssignee):
+		return status.Error(codes.PermissionDenied, err.Error())
+	case errors.Is(err, task.ErrReasonRequired):
+		return status.Error(codes.InvalidArgument, err.Error())
+	default:
+		return err
+	}
+}
+
+// requireOwnerOrAdmin 允许任务的处理人，或有 task.admin 权限的人（如组长、运营）。
+func requireOwnerOrAdmin(ctx context.Context, svcCtx *svc.ServiceContext, t *task.Task, actor string) error {
+	if t.AssigneeID != "" && t.AssigneeID == actor {
+		return nil
+	}
+	return identity.RequirePermission(ctx, svcCtx.Authz, actor, identity.PermTaskAdmin)
+}
+
+// view 返回操作后的任务视图。
+func view(ctx context.Context, svcCtx *svc.ServiceContext, t *task.Task) *pb.TaskView {
+	return taskview.Builder{S: svcCtx.Services}.View(ctx, t)
 }

@@ -30,6 +30,7 @@ type Config struct {
 	DryRunDataSource string `json:",optional"`
 	RelationsFile    string `json:",optional"`  // 本地关系表（如 deploy/mock/vip_rm.yaml）
 	GroupsFile       string `json:",optional"`  // 本地用户组（如 deploy/mock/groups.yaml），供组任务的决策鉴权与可认领列表使用
+	PermissionsFile  string `json:",optional"`  // 本地接口级权限（如 deploy/mock/permissions.yaml）；为空时没有任何管理权限
 	Owner            string `json:",optional"`  // 进程标识，默认 worker-<随机数>，只用于排查
 	Parallelism      int    `json:",default=4"` // 一次推进（含一次 tick 的每一批）同时执行的 job 数
 }
@@ -58,6 +59,7 @@ type Services struct {
 	Actions *action.Runtime
 	Lark    *lark.Mock
 	Groups  directory.Groups
+	Authz   directory.Authorizer
 	DryRun  *dryrun.Runner // 未配置试运行库时为 nil
 	Cron    *ingest.CronRunner
 	Ticker  *ticker.Ticker
@@ -79,6 +81,14 @@ func Build(c Config, clock engine.Clock) (*Services, error) {
 			return nil, err
 		}
 		s.Groups = g
+	}
+	s.Authz = directory.StaticPermissions{}
+	if c.PermissionsFile != "" {
+		p, err := directory.LoadPermissions(c.PermissionsFile)
+		if err != nil {
+			return nil, err
+		}
+		s.Authz = p
 	}
 	var relations assign.RelationSource = &assign.StaticRelations{}
 	if c.RelationsFile != "" {
