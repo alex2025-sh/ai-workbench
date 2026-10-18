@@ -75,6 +75,8 @@ export interface DevUser {
   id: string;
   roles: string[];
   groups: string[];
+  /** 接口级权限，如 task.admin、run.admin（线上由 BSP 配置）。前端只用来决定是否显示入口，校验在服务端。 */
+  permissions: string[];
 }
 
 export async function listDevUsers(): Promise<DevUser[]> {

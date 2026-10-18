@@ -26,6 +26,10 @@ type (
 		SetRun(ctx context.Context, id, runID uint64) error
 		// CloseUnstarted 关闭尚未启动 run、尚未完结的任务。
 		CloseUnstarted(ctx context.Context, id uint64, status int64, resolution string) error
+		// SetAssignment 改变处理人与状态（认领、开始处理、转派），在锁住任务行的事务内调用。
+		SetAssignment(ctx context.Context, id uint64, status int64, assignee, group string) error
+		// SetPriority 调整优先级，在锁住任务行的事务内调用。
+		SetPriority(ctx context.Context, id uint64, priority int64) error
 		// List 按优先级、截止时间（空排最后）、id 排序分页查询，键集分页。
 		List(ctx context.Context, f TaskFilter) ([]*Task, error)
 	}
@@ -153,4 +157,16 @@ func (m *customTaskModel) List(ctx context.Context, f TaskFilter) ([]*Task, erro
 
 func placeholders(n int) string {
 	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+}
+
+func (m *customTaskModel) SetAssignment(ctx context.Context, id uint64, status int64, assignee, group string) error {
+	query := fmt.Sprintf("update %s set `status` = ?, `assignee_id` = ?, `assignee_group` = ?, `version` = `version` + 1 where `id` = ?", m.table)
+	_, err := m.conn.ExecCtx(ctx, query, status, assignee, group, id)
+	return err
+}
+
+func (m *customTaskModel) SetPriority(ctx context.Context, id uint64, priority int64) error {
+	query := fmt.Sprintf("update %s set `priority` = ?, `version` = `version` + 1 where `id` = ?", m.table)
+	_, err := m.conn.ExecCtx(ctx, query, priority, id)
+	return err
 }

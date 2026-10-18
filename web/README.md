@@ -2,7 +2,7 @@
 
 React 18 + Vite + TypeScript + Ant Design 5。页面与交互约定见 [docs/frontend-design.md](../docs/frontend-design.md)。
 
-demo 范围：我的任务、可认领、任务详情（卡片、流程操作、进度、事件）、运行监控（只读）、任务类型只读查看与试运行。认领、开始处理、调整优先级、转派与运行干预在一期开放（后端接口尚未实现），页面上置灰显示。
+范围：我的任务、可认领、任务详情（卡片、流程操作、认领 / 开始处理 / 调整优先级 / 转派、进度、事件）、运行监控（取消运行）、任务类型只读查看与试运行。重试、跳过节点尚未实现。
 
 ## 本地运行
 
@@ -29,7 +29,8 @@ Vite 把 `/byai_platform` 与 `/dev` 代理到 devgw（默认 `http://127.0.0.1:
 右上角「切换身份」读取 devgw 的 `GET /dev/users`（来自 `deploy/mock/vip_rm.yaml` 与 `groups.yaml`），选中的身份经 `X-Dev-User` 请求头传给后端。演示路径：
 
 - `rm.alice@example.com`：我的任务中有 A1001、A1002；
-- `lead@example.com`：可认领中有升级后的 A1003，进入详情点「已处理」完成任务；
+- `lead@example.com`：可认领中有升级后的 A1003，可以认领、开始处理、调整优先级、转派，或进入详情点「已处理」完成任务；
+- `ops@example.com`：有 `task.admin`、`run.admin`，可以转派任意任务、取消运行（权限见 `deploy/mock/permissions.yaml`）；
 - 任意身份：运行监控、任务类型页的试运行。
 
 ## 目录

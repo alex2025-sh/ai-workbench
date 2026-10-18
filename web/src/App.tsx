@@ -38,7 +38,7 @@ export default function App() {
             onChange={setUser}
             options={users.map((u) => ({
               value: u.id,
-              label: `${u.id}${[...u.roles, ...u.groups].length ? `（${[...u.roles, ...u.groups].join('、')}）` : ''}`,
+              label: `${u.id}${[...u.roles, ...u.groups, ...u.permissions].length ? `（${[...u.roles, ...u.groups, ...u.permissions].join('、')}）` : ''}`,
             }))}
           />
         </Space>

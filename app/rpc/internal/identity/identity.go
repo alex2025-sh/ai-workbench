@@ -5,6 +5,8 @@ package identity
 import (
 	"context"
 
+	"github.com/alex2025-sh/ai-workbench/internal/directory"
+
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -31,4 +33,30 @@ func Require(ctx context.Context) (string, error) {
 		return u, nil
 	}
 	return "", status.Error(codes.Unauthenticated, "missing caller identity")
+}
+
+// 接口级权限。线上在 BSP 权限平台按接口配置，本地见 deploy/mock/permissions.yaml。
+const (
+	PermTaskAdmin = "task.admin" // 调整任意任务的优先级、转派
+	PermRunAdmin  = "run.admin"  // 运行干预：取消运行、重试节点、跳过节点
+)
+
+// Allowed 判断调用人是否有某个接口级权限。
+func Allowed(ctx context.Context, authz directory.Authorizer, user, permission string) (bool, error) {
+	if authz == nil {
+		return false, nil
+	}
+	return authz.Allowed(ctx, user, permission)
+}
+
+// RequirePermission 在调用人没有权限时返回 PermissionDenied。
+func RequirePermission(ctx context.Context, authz directory.Authorizer, user, permission string) error {
+	ok, err := Allowed(ctx, authz, user, permission)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return status.Errorf(codes.PermissionDenied, "permission %s required", permission)
+	}
+	return nil
 }

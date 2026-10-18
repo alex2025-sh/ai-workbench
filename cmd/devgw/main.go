@@ -8,7 +8,7 @@
 // 字段名为 proto 中的 snake_case；int64 输出为字符串、bytes 输出为 base64（proto3 JSON 映射）。
 // 错误返回 {"code": "<gRPC 状态码名>", "message": "..."}，HTTP 状态码与 grpc-gateway 的默认映射一致。
 //
-// 另有开发专用的 GET /dev/users：列出 mock 中的人员与所属组，供前端的「切换身份」使用。
+// 另有开发专用的 GET /dev/users：列出 mock 中的人员、所属组与接口级权限，供前端的「切换身份」使用。
 package main
 
 import (
@@ -31,7 +31,7 @@ func main() {
 	protoFile := flag.String("proto", "app/rpc/workbench.proto", "proto file with the HTTP paths")
 	relations := flag.String("relations", "deploy/mock/vip_rm.yaml", "mock relations, for /dev/users")
 	groups := flag.String("groups", "deploy/mock/groups.yaml", "mock groups, for /dev/users")
-	ops := flag.String("ops", "ops@example.com", "an extra operator identity listed in /dev/users")
+	permissions := flag.String("permissions", "deploy/mock/permissions.yaml", "mock permissions, for /dev/users")
 	flag.Parse()
 
 	routes, err := loadRoutes(*protoFile)
@@ -42,7 +42,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	users, err := mockUsers(*relations, *groups, *ops)
+	users, err := mockUsers(*relations, *groups, *permissions)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -58,17 +58,18 @@ func main() {
 
 // devUser 是 /dev/users 中的一个身份。
 type devUser struct {
-	ID     string   `json:"id"`
-	Roles  []string `json:"roles"`  // rm / ops
-	Groups []string `json:"groups"` // 所属用户组
+	ID          string   `json:"id"`
+	Roles       []string `json:"roles"`       // rm：业务关系表中的处理人
+	Groups      []string `json:"groups"`      // 所属用户组
+	Permissions []string `json:"permissions"` // 接口级权限，如 task.admin、run.admin
 }
 
-// mockUsers 从 mock 关系表与用户组中收集人员：关系表中的处理人标为 rm，组成员带上组名。
-func mockUsers(relationsFile, groupsFile, ops string) ([]devUser, error) {
+// mockUsers 从 mock 关系表、用户组与权限表中收集人员：关系表中的处理人标为 rm，组成员带上组名，并附上权限。
+func mockUsers(relationsFile, groupsFile, permissionsFile string) ([]devUser, error) {
 	byID := map[string]*devUser{}
 	get := func(id string) *devUser {
 		if byID[id] == nil {
-			byID[id] = &devUser{ID: id, Roles: []string{}, Groups: []string{}}
+			byID[id] = &devUser{ID: id, Roles: []string{}, Groups: []string{}, Permissions: []string{}}
 		}
 		return byID[id]
 	}
@@ -93,9 +94,13 @@ func mockUsers(relationsFile, groupsFile, ops string) ([]devUser, error) {
 			u.Groups = append(u.Groups, g)
 		}
 	}
-	if ops != "" {
-		u := get(ops)
-		u.Roles = append(u.Roles, "ops")
+	var perms map[string][]string
+	if err := readYAML(permissionsFile, &perms); err != nil {
+		return nil, err
+	}
+	for who, p := range perms {
+		u := get(who)
+		u.Permissions = append(u.Permissions, p...)
 	}
 	out := make([]devUser, 0, len(byID))
 	for _, u := range byID {

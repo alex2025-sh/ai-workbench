@@ -133,7 +133,7 @@ func TestForwarding(t *testing.T) {
 }
 
 func TestMockUsers(t *testing.T) {
-	users, err := mockUsers("../../deploy/mock/vip_rm.yaml", "../../deploy/mock/groups.yaml", "ops@example.com")
+	users, err := mockUsers("../../deploy/mock/vip_rm.yaml", "../../deploy/mock/groups.yaml", "../../deploy/mock/permissions.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +147,7 @@ func TestMockUsers(t *testing.T) {
 	if u := got["lead@example.com"]; len(u.Groups) != 1 || u.Groups[0] != "vip_cs_leads" {
 		t.Fatalf("lead = %+v", u)
 	}
-	if u := got["ops@example.com"]; len(u.Roles) != 1 || u.Roles[0] != "ops" {
+	if u := got["ops@example.com"]; len(u.Permissions) != 2 || u.Permissions[1] != "run.admin" {
 		t.Fatalf("ops = %+v", u)
 	}
 }

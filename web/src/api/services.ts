@@ -14,6 +14,7 @@ import type {
   TaskPriority,
   TaskStatus,
   TaskTypeSummary,
+  TaskView,
   VersionInfo,
 } from './types';
 
@@ -24,6 +25,11 @@ export const taskApi = {
     call<ListTasksResp>('task/claimable/list', req),
   get: (id: string) => call<TaskDetail>('task/get', { id }),
   events: (id: string, page?: PageReq) => call<TaskEventsResp>('task/events', { id, page }),
+  claim: (id: string) => call<TaskView>('task/claim', { id }),
+  startProcessing: (id: string) => call<TaskView>('task/start', { id }),
+  updatePriority: (id: string, priority: TaskPriority, reason: string) =>
+    call<TaskView>('task/priority/update', { id, priority, reason }),
+  reassign: (id: string, assignee_id: string, reason: string) => call<TaskView>('task/reassign', { id, assignee_id, reason }),
 };
 
 export const runApi = {
@@ -33,6 +39,7 @@ export const runApi = {
     call<ListRunsResp>('run/list', req),
   get: (run_id: string) => call<RunView>('run/get', { run_id }),
   events: (run_id: string, page?: PageReq) => call<RunEventsResp>('run/events', { run_id, page }),
+  cancel: (run_id: string, reason: string) => call<Record<string, never>>('run/cancel', { run_id, reason }),
 };
 
 export const taskTypeApi = {

@@ -6,6 +6,7 @@ import { ArrowLeftOutlined, ReloadOutlined } from '@ant-design/icons';
 import {
   Alert,
   App as AntApp,
+  AutoComplete,
   Button,
   Card,
   Col,
@@ -29,8 +30,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ApiError, decodeJson } from '../api/client';
 import { runApi, taskApi } from '../api/services';
-import type { ActionOption, Card as CardData, PendingAction, TaskDetail as Detail, TaskEvent } from '../api/types';
+import type { ActionOption, Card as CardData, PendingAction, TaskDetail as Detail, TaskEvent, TaskPriority } from '../api/types';
 import { TaskCard } from '../components/TaskCard';
+import { useIdentity } from '../identity';
 import { fmtDuration, fmtTime, nodeStatusLabel, priorityColor, priorityLabel, taskStatusColor, taskStatusLabel } from '../format';
 
 const POLL_INTERVAL = 2000;
@@ -181,11 +183,7 @@ export default function TaskDetail() {
           </Card>
         </Col>
         <Col span={10}>
-          <ActionPanel
-            detail={detail}
-            syncing={syncing}
-            onChoose={setChoosing}
-          />
+          <ActionPanel detail={detail} syncing={syncing} onChoose={setChoosing} onChanged={() => void load()} />
           <Card title="进度" size="small" style={{ marginTop: 16 }}>
             <Steps
               direction="vertical"
@@ -222,25 +220,73 @@ export default function TaskDetail() {
   );
 }
 
-// 操作区：任务中心的操作（一期开放）与流程操作（等待中的人工节点的选项）。
-function ActionPanel({ detail, syncing, onChoose }: { detail: Detail; syncing: boolean; onChoose: (o: ActionOption) => void }) {
+// 操作区：任务中心的操作（认领、开始处理、调整优先级、转派，直接生效）与流程操作（等待中的人工节点的选项）。
+// 按钮是否显示按当前身份判断，权限以服务端校验为准。
+function ActionPanel(props: { detail: Detail; syncing: boolean; onChoose: (o: ActionOption) => void; onChanged: () => void }) {
+  const { detail, syncing, onChoose } = props;
   const t = detail.task;
   const p = detail.pending_action;
-  const later = (label: string) => (
-    <Tooltip title="一期开放（任务中心接口尚未实现）" key={label}>
-      <Button disabled>{label}</Button>
-    </Tooltip>
-  );
+  const { user, can } = useIdentity();
+  const { message } = AntApp.useApp();
+  const [busy, setBusy] = useState<string>();
+  const [dialog, setDialog] = useState<'priority' | 'reassign'>();
+
+  const run = async (label: string, fn: () => Promise<unknown>) => {
+    setBusy(label);
+    try {
+      await fn();
+      message.success(`${label}成功`);
+      props.onChanged();
+    } catch (e) {
+      message.error(e instanceof ApiError ? `${label}失败：${e.message}` : String(e));
+    } finally {
+      setBusy(undefined);
+    }
+  };
+
+  const open = t.status !== 'TASK_STATUS_SOLVED';
+  const mine = t.assignee_id !== '' && t.assignee_id === user;
+  const manage = open && (mine || can('task.admin'));
   const taskActions = [
-    t.status === 'TASK_STATUS_UNASSIGNED' && later('认领'),
-    t.status === 'TASK_STATUS_PENDING' && later('开始处理'),
-    t.status !== 'TASK_STATUS_SOLVED' && later('调整优先级'),
-    t.status !== 'TASK_STATUS_SOLVED' && later('转派'),
+    t.status === 'TASK_STATUS_UNASSIGNED' && (
+      <Button key="claim" type="primary" ghost loading={busy === '认领'} onClick={() => void run('认领', () => taskApi.claim(t.id))}>
+        认领
+      </Button>
+    ),
+    t.status === 'TASK_STATUS_PENDING' && mine && (
+      <Button key="start" loading={busy === '开始处理'} onClick={() => void run('开始处理', () => taskApi.startProcessing(t.id))}>
+        开始处理
+      </Button>
+    ),
+    manage && (
+      <Button key="priority" onClick={() => setDialog('priority')}>
+        调整优先级
+      </Button>
+    ),
+    manage && (
+      <Button key="reassign" onClick={() => setDialog('reassign')}>
+        转派
+      </Button>
+    ),
   ].filter(Boolean);
 
   return (
     <Card title="操作" size="small">
       {taskActions.length > 0 && <Space wrap style={{ marginBottom: 16 }}>{taskActions}</Space>}
+      {dialog === 'priority' && (
+        <PriorityModal
+          current={t.priority}
+          onClose={() => setDialog(undefined)}
+          onSubmit={(priority, reason) => run('调整优先级', () => taskApi.updatePriority(t.id, priority, reason)).then(() => setDialog(undefined))}
+        />
+      )}
+      {dialog === 'reassign' && (
+        <ReassignModal
+          current={t.assignee_id}
+          onClose={() => setDialog(undefined)}
+          onSubmit={(assignee, reason) => run('转派', () => taskApi.reassign(t.id, assignee, reason)).then(() => setDialog(undefined))}
+        />
+      )}
       {syncing && <Alert type="info" showIcon message="已提交，正在同步任务状态…" style={{ marginBottom: 12 }} />}
       {!p ? (
         <Typography.Text type="secondary">{t.status === 'TASK_STATUS_SOLVED' ? '任务已完成' : '当前没有等待你决定的流程节点'}</Typography.Text>
@@ -251,7 +297,12 @@ function ActionPanel({ detail, syncing, onChoose }: { detail: Detail; syncing: b
             {Number(p.deadline_at) > 0 && <> · 超时 {fmtTime(p.deadline_at)}</>}
           </Typography.Paragraph>
           {!p.can_signal && (
-            <Alert type="warning" showIcon message="你不是该任务的处理人，也不在候选组内，只能查看" style={{ marginBottom: 12 }} />
+            <Alert
+              type="warning"
+              showIcon
+              message={t.assignee_id ? `处理人是 ${t.assignee_id}，你只能查看` : '你不在该任务的候选组内，只能查看'}
+              style={{ marginBottom: 12 }}
+            />
           )}
           <Space wrap>
             {p.options.map((o) => {
@@ -357,6 +408,57 @@ function SignalModal(props: {
             )}
           </Form.Item>
         ))}
+      </Form>
+    </Modal>
+  );
+}
+
+function PriorityModal(props: { current: TaskPriority; onClose: () => void; onSubmit: (p: TaskPriority, reason: string) => Promise<void> }) {
+  const [form] = Form.useForm<{ priority: TaskPriority; reason: string }>();
+  const [saving, setSaving] = useState(false);
+  const submit = async () => {
+    const v = await form.validateFields();
+    setSaving(true);
+    await props.onSubmit(v.priority, v.reason).finally(() => setSaving(false));
+  };
+  return (
+    <Modal open title="调整优先级" okText="确认" onOk={() => void submit()} onCancel={props.onClose} confirmLoading={saving}>
+      <Form form={form} layout="vertical" initialValues={{ priority: props.current }}>
+        <Form.Item name="priority" label="优先级" rules={[{ required: true }]}>
+          <Select options={Object.entries(priorityLabel).map(([value, label]) => ({ value, label }))} />
+        </Form.Item>
+        <Form.Item name="reason" label="原因" rules={[{ required: true, whitespace: true, message: '请填写原因' }]}>
+          <Input.TextArea rows={3} />
+        </Form.Item>
+      </Form>
+    </Modal>
+  );
+}
+
+// 转派：人员选择器线上直接调 BSP，demo 用 devgw 的 mock 身份列表，也可以直接输入。
+function ReassignModal(props: { current: string; onClose: () => void; onSubmit: (assignee: string, reason: string) => Promise<void> }) {
+  const { users } = useIdentity();
+  const [form] = Form.useForm<{ assignee: string; reason: string }>();
+  const [saving, setSaving] = useState(false);
+  const submit = async () => {
+    const v = await form.validateFields();
+    setSaving(true);
+    await props.onSubmit(v.assignee.trim(), v.reason).finally(() => setSaving(false));
+  };
+  return (
+    <Modal open title="转派" okText="确认" onOk={() => void submit()} onCancel={props.onClose} confirmLoading={saving}>
+      <Typography.Paragraph type="secondary">当前处理人：{props.current || '—（组队列）'}。转派只改变处理人，任务状态不变。</Typography.Paragraph>
+      <Form form={form} layout="vertical">
+        <Form.Item name="assignee" label="转派给" rules={[{ required: true, whitespace: true, message: '请选择处理人' }]}>
+          <AutoComplete
+            options={users.filter((u) => u.id !== props.current).map((u) => ({ value: u.id }))}
+            filterOption={(input, o) => (o?.value ?? '').includes(input)}
+            placeholder="选择或输入人员 ID"
+          />
+        </Form.Item>
+        <Form.Item name="reason" label="原因" rules={[{ required: true, whitespace: true, message: '请填写原因' }]}>
+          <Input.TextArea rows={3} />
+        </Form.Item>
       </Form>
     </Modal>
   );
