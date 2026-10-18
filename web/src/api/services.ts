@@ -1,14 +1,18 @@
 // 各 service 的调用封装，路径与 workbench.proto 行尾注释一致。
 import { call } from './client';
 import type {
+  Draft,
   DryRunResp,
   GetTaskTypeResp,
+  Issue,
   ListRunsResp,
   ListTasksResp,
+  NodeTypeInfo,
   PageReq,
   RunEventsResp,
   RunView,
   SignalResp,
+  Skill,
   TaskDetail,
   TaskEventsResp,
   TaskPriority,
@@ -53,4 +57,18 @@ export const taskTypeApi = {
   versions: (key: string) => call<{ items: VersionInfo[] }>('task_type/versions', { key }),
   dryRun: (req: { key: string; sample_json: string[]; choices: Record<string, string> }) =>
     call<DryRunResp>('task_type/draft/dry_run', req),
+  create: (req: { key: string; name: string; namespace: string; description?: string }) =>
+    call<{ key: string; draft: Draft }>('task_type/create', req),
+  getDraft: (key: string) => call<{ draft: Draft }>('task_type/draft/get', { key }),
+  saveDraft: (key: string, revision: string, body_json: string) =>
+    call<{ revision: string; issues: Issue[] }>('task_type/draft/save', { key, revision, body_json }),
+  validateDraft: (key: string) => call<{ ok: boolean; issues: Issue[] }>('task_type/draft/validate', { key }),
+  discardDraft: (key: string, revision: string) => call<Record<string, never>>('task_type/draft/discard', { key, revision }),
+  publishDraft: (key: string, revision: string) =>
+    call<{ version: number; issues: Issue[] }>('task_type/draft/publish', { key, revision }),
+};
+
+export const catalogApi = {
+  nodeTypes: () => call<{ items: NodeTypeInfo[] }>('catalog/node_types', {}),
+  skills: (keyword = '') => call<{ items: Skill[]; next_cursor: string }>('catalog/skills', { keyword }),
 };

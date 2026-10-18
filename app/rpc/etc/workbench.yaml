@@ -1,5 +1,6 @@
 # 本地开发配置。不注册 etcd；dev 模式开启 gRPC reflection，便于 grpcurl 调试。
 Name: workbench.rpc
+AllowDirectPublish: true   # 开发环境：任务类型草稿可直接发布（正式环境走变更集与审批）
 ListenOn: 127.0.0.1:9090
 Mode: dev
 Log:

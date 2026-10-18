@@ -265,3 +265,36 @@ export interface TaskTypeBody {
     nodes: { id: string; type: string; name?: string; config?: { options?: { key: string; label: string; snooze?: string }[] } }[];
   };
 }
+
+// ---- 草稿与节点目录 ----
+
+export interface Draft {
+  base_version: number; // 0 = 尚未发布过
+  revision: Int64;
+  body_json: Bytes;
+  locked_by_change_set: Int64;
+  updated_by: string;
+  updated_at: Int64;
+  content_hash: string; // 不含 ui，只移动坐标时不变
+}
+
+export interface NodeTypeInfo {
+  type: string;
+  category: string; // native / action
+  display_name: string;
+  description: string;
+  icon: string;
+  config_schema_json: Bytes; // 独立的 JSON Schema（含 $defs）
+  ui_schema_json: Bytes;
+  port_rule: string; // fixed / from_options / from_branches
+  fixed_ports: string[];
+}
+
+export interface Skill {
+  name: string;
+  display_name: string;
+  description: string;
+  category: string;
+  side_effect: boolean;
+  latest_version: string;
+}

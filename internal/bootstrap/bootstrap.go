@@ -57,6 +57,7 @@ type Services struct {
 	Engine  *engine.Engine
 	Tasks   *task.Store
 	Actions *action.Runtime
+	Skills  *action.Skills // 平台内置 skill（CatalogService.ListSkills 列出；Skillhub 接入后作为 Fallback）
 	Lark    *lark.Mock
 	Groups  directory.Groups
 	Authz   directory.Authorizer
@@ -99,6 +100,7 @@ func Build(c Config, clock engine.Clock) (*Services, error) {
 		relations = r
 	}
 	skills := &action.Skills{}
+	s.Skills = skills
 	if c.BizDataSource != "" {
 		appeal.Register(skills, sqlx.NewMysql(c.BizDataSource))
 	}

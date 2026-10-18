@@ -39,6 +39,8 @@ type (
 	PageReq                   = pb.PageReq
 	PreviewViewReq            = pb.PreviewViewReq
 	PreviewViewResp           = pb.PreviewViewResp
+	PublishTaskTypeDraftReq   = pb.PublishTaskTypeDraftReq
+	PublishTaskTypeDraftResp  = pb.PublishTaskTypeDraftResp
 	SaveTaskTypeDraftReq      = pb.SaveTaskTypeDraftReq
 	SaveTaskTypeDraftResp     = pb.SaveTaskTypeDraftResp
 	TaskTypeKeyReq            = pb.TaskTypeKeyReq
@@ -63,7 +65,7 @@ type (
 		DiscardTaskTypeDraft(ctx context.Context, in *DiscardDraftReq, opts ...grpc.CallOption) (*Empty, error)
 		// 对草稿及其依赖闭包完整编译校验
 		ValidateTaskTypeDraft(ctx context.Context, in *TaskTypeKeyReq, opts ...grpc.CallOption) (*ValidateResp, error)
-		// 试运行：动作节点只记录不执行，虚拟时钟。草稿尚未实现时，对最新发布版本试运行
+		// 试运行：动作节点只记录不执行，虚拟时钟。有草稿时试运行草稿，否则试运行最新发布版本
 		DryRunTaskTypeDraft(ctx context.Context, in *DryRunTaskTypeDraftReq, opts ...grpc.CallOption) (*DryRunResp, error)
 		// 按 schema 生成或从历史任务取样例 payload
 		GenerateSamplePayload(ctx context.Context, in *GenerateSamplePayloadReq, opts ...grpc.CallOption) (*GenerateSamplePayloadResp, error)
@@ -73,6 +75,8 @@ type (
 		TrialSource(ctx context.Context, in *TrialSourceReq, opts ...grpc.CallOption) (*TrialSourceResp, error)
 		// 版本历史
 		ListTaskTypeVersions(ctx context.Context, in *TaskTypeKeyReq, opts ...grpc.CallOption) (*ListVersionsResp, error)
+		// 仅开发环境：把草稿直接发布为新版本，跳过变更集与审批（正式发布走 ChangeSetService）。
+		PublishTaskTypeDraft(ctx context.Context, in *PublishTaskTypeDraftReq, opts ...grpc.CallOption) (*PublishTaskTypeDraftResp, error)
 	}
 
 	defaultTaskTypeService struct {
@@ -128,7 +132,7 @@ func (m *defaultTaskTypeService) ValidateTaskTypeDraft(ctx context.Context, in *
 	return client.ValidateTaskTypeDraft(ctx, in, opts...)
 }
 
-// 试运行：动作节点只记录不执行，虚拟时钟。草稿尚未实现时，对最新发布版本试运行
+// 试运行：动作节点只记录不执行，虚拟时钟。有草稿时试运行草稿，否则试运行最新发布版本
 func (m *defaultTaskTypeService) DryRunTaskTypeDraft(ctx context.Context, in *DryRunTaskTypeDraftReq, opts ...grpc.CallOption) (*DryRunResp, error) {
 	client := pb.NewTaskTypeServiceClient(m.cli.Conn())
 	return client.DryRunTaskTypeDraft(ctx, in, opts...)
@@ -156,4 +160,10 @@ func (m *defaultTaskTypeService) TrialSource(ctx context.Context, in *TrialSourc
 func (m *defaultTaskTypeService) ListTaskTypeVersions(ctx context.Context, in *TaskTypeKeyReq, opts ...grpc.CallOption) (*ListVersionsResp, error) {
 	client := pb.NewTaskTypeServiceClient(m.cli.Conn())
 	return client.ListTaskTypeVersions(ctx, in, opts...)
+}
+
+// 仅开发环境：把草稿直接发布为新版本，跳过变更集与审批（正式发布走 ChangeSetService）。
+func (m *defaultTaskTypeService) PublishTaskTypeDraft(ctx context.Context, in *PublishTaskTypeDraftReq, opts ...grpc.CallOption) (*PublishTaskTypeDraftResp, error) {
+	client := pb.NewTaskTypeServiceClient(m.cli.Conn())
+	return client.PublishTaskTypeDraft(ctx, in, opts...)
 }

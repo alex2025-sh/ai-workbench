@@ -1,6 +1,11 @@
 package model
 
-import "github.com/zeromicro/go-zero/core/stores/sqlx"
+import (
+	"context"
+	"fmt"
+
+	"github.com/zeromicro/go-zero/core/stores/sqlx"
+)
 
 var _ CfgComponentModel = (*customCfgComponentModel)(nil)
 
@@ -10,6 +15,8 @@ type (
 	CfgComponentModel interface {
 		cfgComponentModel
 		WithSession(session sqlx.Session) CfgComponentModel
+		// ListByKind 返回某类配置对象，按 key 排序。
+		ListByKind(ctx context.Context, kind string) ([]*CfgComponent, error)
 	}
 
 	customCfgComponentModel struct {
@@ -26,4 +33,10 @@ func NewCfgComponentModel(conn sqlx.SqlConn) CfgComponentModel {
 
 func (m *customCfgComponentModel) WithSession(session sqlx.Session) CfgComponentModel {
 	return NewCfgComponentModel(sqlx.NewSqlConnFromSession(session))
+}
+
+func (m *customCfgComponentModel) ListByKind(ctx context.Context, kind string) ([]*CfgComponent, error) {
+	var out []*CfgComponent
+	err := m.conn.QueryRowsCtx(ctx, &out, fmt.Sprintf("select %s from %s where `kind` = ? order by `comp_key`", cfgComponentRows, m.table), kind)
+	return out, err
 }

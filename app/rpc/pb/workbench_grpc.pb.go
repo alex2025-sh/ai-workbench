@@ -43,6 +43,7 @@ const (
 	TaskTypeService_PreviewView_FullMethodName           = "/workbench.v1.TaskTypeService/PreviewView"
 	TaskTypeService_TrialSource_FullMethodName           = "/workbench.v1.TaskTypeService/TrialSource"
 	TaskTypeService_ListTaskTypeVersions_FullMethodName  = "/workbench.v1.TaskTypeService/ListTaskTypeVersions"
+	TaskTypeService_PublishTaskTypeDraft_FullMethodName  = "/workbench.v1.TaskTypeService/PublishTaskTypeDraft"
 )
 
 // TaskTypeServiceClient is the client API for TaskTypeService service.
@@ -65,7 +66,7 @@ type TaskTypeServiceClient interface {
 	DiscardTaskTypeDraft(ctx context.Context, in *DiscardDraftReq, opts ...grpc.CallOption) (*Empty, error)
 	// 对草稿及其依赖闭包完整编译校验
 	ValidateTaskTypeDraft(ctx context.Context, in *TaskTypeKeyReq, opts ...grpc.CallOption) (*ValidateResp, error)
-	// 试运行：动作节点只记录不执行，虚拟时钟。草稿尚未实现时，对最新发布版本试运行
+	// 试运行：动作节点只记录不执行，虚拟时钟。有草稿时试运行草稿，否则试运行最新发布版本
 	DryRunTaskTypeDraft(ctx context.Context, in *DryRunTaskTypeDraftReq, opts ...grpc.CallOption) (*DryRunResp, error)
 	// 按 schema 生成或从历史任务取样例 payload
 	GenerateSamplePayload(ctx context.Context, in *GenerateSamplePayloadReq, opts ...grpc.CallOption) (*GenerateSamplePayloadResp, error)
@@ -75,6 +76,9 @@ type TaskTypeServiceClient interface {
 	TrialSource(ctx context.Context, in *TrialSourceReq, opts ...grpc.CallOption) (*TrialSourceResp, error)
 	// 版本历史
 	ListTaskTypeVersions(ctx context.Context, in *TaskTypeKeyReq, opts ...grpc.CallOption) (*ListVersionsResp, error)
+	// 仅开发环境：把草稿直接发布为新版本，跳过变更集与审批（正式发布走 ChangeSetService）。
+	// 需要配置开启 AllowDirectPublish，调用人需有 task_type.publish 权限；草稿有 error 级问题时不发布。
+	PublishTaskTypeDraft(ctx context.Context, in *PublishTaskTypeDraftReq, opts ...grpc.CallOption) (*PublishTaskTypeDraftResp, error)
 }
 
 type taskTypeServiceClient struct {
@@ -205,6 +209,16 @@ func (c *taskTypeServiceClient) ListTaskTypeVersions(ctx context.Context, in *Ta
 	return out, nil
 }
 
+func (c *taskTypeServiceClient) PublishTaskTypeDraft(ctx context.Context, in *PublishTaskTypeDraftReq, opts ...grpc.CallOption) (*PublishTaskTypeDraftResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PublishTaskTypeDraftResp)
+	err := c.cc.Invoke(ctx, TaskTypeService_PublishTaskTypeDraft_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // TaskTypeServiceServer is the server API for TaskTypeService service.
 // All implementations must embed UnimplementedTaskTypeServiceServer
 // for forward compatibility.
@@ -225,7 +239,7 @@ type TaskTypeServiceServer interface {
 	DiscardTaskTypeDraft(context.Context, *DiscardDraftReq) (*Empty, error)
 	// 对草稿及其依赖闭包完整编译校验
 	ValidateTaskTypeDraft(context.Context, *TaskTypeKeyReq) (*ValidateResp, error)
-	// 试运行：动作节点只记录不执行，虚拟时钟。草稿尚未实现时，对最新发布版本试运行
+	// 试运行：动作节点只记录不执行，虚拟时钟。有草稿时试运行草稿，否则试运行最新发布版本
 	DryRunTaskTypeDraft(context.Context, *DryRunTaskTypeDraftReq) (*DryRunResp, error)
 	// 按 schema 生成或从历史任务取样例 payload
 	GenerateSamplePayload(context.Context, *GenerateSamplePayloadReq) (*GenerateSamplePayloadResp, error)
@@ -235,6 +249,9 @@ type TaskTypeServiceServer interface {
 	TrialSource(context.Context, *TrialSourceReq) (*TrialSourceResp, error)
 	// 版本历史
 	ListTaskTypeVersions(context.Context, *TaskTypeKeyReq) (*ListVersionsResp, error)
+	// 仅开发环境：把草稿直接发布为新版本，跳过变更集与审批（正式发布走 ChangeSetService）。
+	// 需要配置开启 AllowDirectPublish，调用人需有 task_type.publish 权限；草稿有 error 级问题时不发布。
+	PublishTaskTypeDraft(context.Context, *PublishTaskTypeDraftReq) (*PublishTaskTypeDraftResp, error)
 	mustEmbedUnimplementedTaskTypeServiceServer()
 }
 
@@ -280,6 +297,9 @@ func (UnimplementedTaskTypeServiceServer) TrialSource(context.Context, *TrialSou
 }
 func (UnimplementedTaskTypeServiceServer) ListTaskTypeVersions(context.Context, *TaskTypeKeyReq) (*ListVersionsResp, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ListTaskTypeVersions not implemented")
+}
+func (UnimplementedTaskTypeServiceServer) PublishTaskTypeDraft(context.Context, *PublishTaskTypeDraftReq) (*PublishTaskTypeDraftResp, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method PublishTaskTypeDraft not implemented")
 }
 func (UnimplementedTaskTypeServiceServer) mustEmbedUnimplementedTaskTypeServiceServer() {}
 func (UnimplementedTaskTypeServiceServer) testEmbeddedByValue()                         {}
@@ -518,6 +538,24 @@ func _TaskTypeService_ListTaskTypeVersions_Handler(srv interface{}, ctx context.
 	return interceptor(ctx, in, info, handler)
 }
 
+func _TaskTypeService_PublishTaskTypeDraft_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PublishTaskTypeDraftReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TaskTypeServiceServer).PublishTaskTypeDraft(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TaskTypeService_PublishTaskTypeDraft_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TaskTypeServiceServer).PublishTaskTypeDraft(ctx, req.(*PublishTaskTypeDraftReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // TaskTypeService_ServiceDesc is the grpc.ServiceDesc for TaskTypeService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -572,6 +610,10 @@ var TaskTypeService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListTaskTypeVersions",
 			Handler:    _TaskTypeService_ListTaskTypeVersions_Handler,
+		},
+		{
+			MethodName: "PublishTaskTypeDraft",
+			Handler:    _TaskTypeService_PublishTaskTypeDraft_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

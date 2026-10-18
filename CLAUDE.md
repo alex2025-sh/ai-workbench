@@ -98,4 +98,5 @@ cd web && npm run dev  # 前端 demo（127.0.0.1:5173，代理到 devgw）
 
 - 已完成：任务类型 JSON 契约与编译器；引擎阶段一与阶段二的主体（事件驱动的推进器、重试与防护、timer、human_choice 的等待 / 信号 / 超时、cron 来源与 `close_when`、任务状态同步、xxl-job ticker）；VIP 工单提醒在本地端到端跑通。gRPC 服务的 demo 范围：任务查询与详情、按任务表鉴权的 Signal、运行监控只读、任务类型只读与试运行（独立试运行库）；`cmd/devgw` 与 `web/` 前端 demo。
 - 任务中心写操作（认领、开始处理、调整优先级、转派）与运行干预（取消运行、重试节点、跳过节点，恢复时补回暂停期间被消耗的 job）已实现；接口级权限本地读 `deploy/mock/permissions.yaml`。
-- 未完成：草稿与组件库、Lark 真实接入与卡片回调、重复提醒与 snooze、受控的环（rework）运行期、共享组件（`key@version`）解析、变更集与审批；其余 gRPC 方法返回 Unimplemented。
+- 任务类型草稿（`internal/registry/tasktypes.go`，cfg_draft）、新建、开发环境直接发布（`PublishTaskTypeDraft`，需 `AllowDirectPublish` 与 `task_type.publish`）、节点目录（`ListNodeTypes`）；前端任务类型编辑页与 workflow 画布。
+- 未完成：变更集与审批、组件库与共享组件（`key@version` 解析）、Lark 真实接入与卡片回调、重复提醒与 snooze、受控的环（rework）运行期；其余 gRPC 方法返回 Unimplemented。

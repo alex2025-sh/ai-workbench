@@ -3,12 +3,11 @@ package tasktypeservicelogic
 import (
 	"context"
 
+	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/identity"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/svc"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/pb"
 
 	"github.com/zeromicro/go-zero/core/logx"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 type DiscardTaskTypeDraftLogic struct {
@@ -27,5 +26,11 @@ func NewDiscardTaskTypeDraftLogic(ctx context.Context, svcCtx *svc.ServiceContex
 
 // 丢弃草稿
 func (l *DiscardTaskTypeDraftLogic) DiscardTaskTypeDraft(in *pb.DiscardDraftReq) (*pb.Empty, error) {
-	return nil, status.Error(codes.Unimplemented, "not implemented")
+	if _, err := identity.Require(l.ctx); err != nil {
+		return nil, err
+	}
+	if err := l.svcCtx.TaskTypes.Discard(l.ctx, in.Key, in.Revision); err != nil {
+		return nil, draftError(err)
+	}
+	return &pb.Empty{}, nil
 }

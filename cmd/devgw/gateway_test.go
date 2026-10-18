@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -147,7 +148,7 @@ func TestMockUsers(t *testing.T) {
 	if u := got["lead@example.com"]; len(u.Groups) != 1 || u.Groups[0] != "vip_cs_leads" {
 		t.Fatalf("lead = %+v", u)
 	}
-	if u := got["ops@example.com"]; len(u.Permissions) != 2 || u.Permissions[1] != "run.admin" {
+	if u := got["ops@example.com"]; !slices.Contains(u.Permissions, "run.admin") {
 		t.Fatalf("ops = %+v", u)
 	}
 }
