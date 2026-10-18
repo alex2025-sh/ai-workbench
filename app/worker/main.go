@@ -15,7 +15,6 @@ import (
 	"github.com/zeromicro/go-zero/core/logx"
 
 	"github.com/alex2025-sh/ai-workbench/internal/bootstrap"
-	"github.com/alex2025-sh/ai-workbench/internal/flow/engine"
 	"github.com/alex2025-sh/ai-workbench/internal/ticker"
 )
 
@@ -24,10 +23,9 @@ type Config struct {
 	bootstrap.Config
 	Log    logx.LogConf `json:",optional"`
 	Ticker struct {
-		Mode        string              `json:",default=local,options=local|xxljob"`
-		Interval    time.Duration       `json:",default=15s"` // local 模式的触发间隔
-		Parallelism int                 `json:",default=4"`   // 一次 tick 内并行执行的到期 job 数
-		XxlJob      ticker.XxlJobConfig `json:",optional"`
+		Mode     string              `json:",default=local,options=local|xxljob"`
+		Interval time.Duration       `json:",default=15s"` // local 模式的触发间隔
+		XxlJob   ticker.XxlJobConfig `json:",optional"`
 	} `json:",optional"`
 }
 
@@ -46,8 +44,6 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	svc.Ticker.Options = engine.TickOptions{Parallelism: c.Ticker.Parallelism}
-
 	switch c.Ticker.Mode {
 	case "xxljob":
 		logx.Infof("worker: ticker via xxl-job %s (app %s)", c.Ticker.XxlJob.AdminAddr, c.Ticker.XxlJob.AppName)
@@ -56,7 +52,7 @@ func main() {
 		logx.Infof("worker: local ticker every %s", c.Ticker.Interval)
 		ticker.RunLocal(ctx, svc.Ticker, c.Ticker.Interval)
 	}
-	// 退出前等待后台推进结束；超时则取消，已认领的 job 立即释放，由其他实例的 tick 接手。
+	// 退出前等待后台推进结束；超时则取消，被打断的执行放回队列，由其他实例的 tick 接手。
 	sctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := svc.Engine.Close(sctx); err != nil {

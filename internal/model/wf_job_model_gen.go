@@ -42,16 +42,16 @@ type (
 		RunId       uint64         `db:"run_id"`
 		NodeId      string         `db:"node_id"`
 		Iteration   int64          `db:"iteration"`
-		Kind        string         `db:"kind"`    // execute / timeout / wake / timer / sync_task
-		Payload     sql.NullString `db:"payload"` // sync_task 等 job 的参数
+		Kind        string         `db:"kind"`    // execute / timer / timeout / effect
+		Payload     sql.NullString `db:"payload"` // effect 的参数
 		DueAt       time.Time      `db:"due_at"`
 		Status      string         `db:"status"`       // pending / done / cancelled / failed（隔离的毒丸 job）
-		Attempt     int64          `db:"attempt"`      // 认领次数；(owner, attempt) 是一次认领的凭证
-		FailCount   int64          `db:"fail_count"`   // 处理失败次数（加载或提交失败，不含节点重试），超限后隔离
+		Attempt     int64          `db:"attempt"`      // 认领次数；每次认领加 1，是这次认领的凭证
+		FailCount   int64          `db:"fail_count"`   // 处理失败次数（加载或提交出错，不含节点重试），超限后隔离
 		Owner       string         `db:"owner"`        // 租约持有者，空 = 未认领
 		LockedUntil sql.NullTime   `db:"locked_until"` // 租约到期时间
 		LastError   string         `db:"last_error"`
-		IdemKey     string         `db:"idem_key"` // run_id:node_id:iteration:kind[:seq]
+		IdemKey     string         `db:"idem_key"` // run_id:node_id:iteration:kind[:后缀]
 		CreatedAt   time.Time      `db:"created_at"`
 		UpdatedAt   time.Time      `db:"updated_at"`
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/zeromicro/go-zero/core/stores/sqlx"
 
 	"github.com/alex2025-sh/ai-workbench/internal/flow/compiler"
+	"github.com/alex2025-sh/ai-workbench/internal/flow/dsl"
 	"github.com/alex2025-sh/ai-workbench/internal/model"
 	"github.com/alex2025-sh/ai-workbench/internal/spec"
 )
@@ -26,8 +27,6 @@ type Store struct {
 	runs  model.WfRunModel
 	nodes model.WfNodeRunModel
 	jobs  model.WfJobModel
-	evts  model.WfEventModel
-	plans model.WfPlanModel
 }
 
 // NewStore 创建 Store。conn 需要 parseTime=true&loc=UTC。
@@ -37,12 +36,10 @@ func NewStore(conn sqlx.SqlConn) *Store {
 		runs:  model.NewWfRunModel(conn),
 		nodes: model.NewWfNodeRunModel(conn),
 		jobs:  model.NewWfJobModel(conn),
-		evts:  model.NewWfEventModel(conn),
-		plans: model.NewWfPlanModel(conn),
 	}
 }
 
-// tx 是一次推进事务内可用的模型。
+// tx 是一个事务内可用的模型。
 type tx struct {
 	ctx   context.Context
 	runs  model.WfRunModel
@@ -51,34 +48,40 @@ type tx struct {
 	evts  model.WfEventModel
 }
 
-// Tx 在一个事务内执行 fn。MySQL / TiDB 默认即悲观事务，SELECT ... FOR UPDATE 锁行。
+// transact 在一个事务内执行 fn，只有提交成功才返回 fn 的结果。
 //
-// 同一个 run 的推进由 run 行锁串行化；不同 run 的事务仍可能在 wf_job 的索引上互相死锁
-// （MySQL 可重复读下的间隙锁），因此遇到死锁或锁等待超时时整体重试：fn 每次都重新加载状态，重试是安全的。
-// 连接默认使用 READ-COMMITTED（见 bootstrap.ReadCommitted），且 wf_job 只按主键更新，死锁已很少见，这里是兜底。
-func (s *Store) Tx(ctx context.Context, fn func(t *tx) error) error {
-	var err error
-	for attempt := 0; attempt < 5; attempt++ {
-		err = s.conn.TransactCtx(ctx, func(ctx context.Context, session sqlx.Session) error {
-			return fn(&tx{
+// 遇到死锁（1213）或锁等待超时（1205）时整体重试：每次尝试都重新加载状态、得到独立的结果，
+// 回滚的那次尝试留下的结果一律丢弃。fn 内不得做外部 IO、启动 goroutine 或修改共享状态。
+// 所有事务都先锁 run 行、只按主键修改 job，正常情况下不会死锁；这里是兜底，出现时记错误日志。
+func transact[T any](ctx context.Context, s *Store, fn func(t *tx) (T, error)) (T, error) {
+	var zero T
+	for attempt := 1; ; attempt++ {
+		var out T
+		err := s.conn.TransactCtx(ctx, func(ctx context.Context, session sqlx.Session) error {
+			conn := sqlx.NewSqlConnFromSession(session)
+			var err error
+			out, err = fn(&tx{
 				ctx:   ctx,
-				runs:  s.runs.WithSession(session),
-				nodes: s.nodes.WithSession(session),
-				jobs:  s.jobs.WithSession(session),
-				evts:  s.evts.WithSession(session),
+				runs:  model.NewWfRunModel(conn),
+				nodes: model.NewWfNodeRunModel(conn),
+				jobs:  model.NewWfJobModel(conn),
+				evts:  model.NewWfEventModel(conn),
 			})
-		})
-		if !retryable(err) {
 			return err
+		})
+		if err == nil {
+			return out, nil
 		}
-		logx.WithContext(ctx).Infof("engine: tx retry %d: %v", attempt+1, err)
+		if !retryable(err) || attempt == 5 {
+			return zero, err
+		}
+		logx.WithContext(ctx).Errorf("engine: tx retry %d: %v", attempt, err)
 		select {
 		case <-ctx.Done():
-			return err
-		case <-time.After(time.Duration(10*(attempt+1)+rand.Intn(20)) * time.Millisecond):
+			return zero, err
+		case <-time.After(time.Duration(10*attempt+rand.Intn(20)) * time.Millisecond):
 		}
 	}
-	return err
 }
 
 // retryable 报告错误是否为死锁（1213）或锁等待超时（1205）。
@@ -103,7 +106,7 @@ func runFromRow(r *model.WfRun) (Run, error) {
 	return run, nil
 }
 
-func runToRow(run Run, id uint64) (*model.WfRun, error) {
+func runToRow(run Run) (*model.WfRun, error) {
 	vars, err := json.Marshal(run.Vars)
 	if err != nil {
 		return nil, err
@@ -113,7 +116,7 @@ func runToRow(run Run, id uint64) (*model.WfRun, error) {
 		dry = 1
 	}
 	return &model.WfRun{
-		Id: id, PlanId: run.PlanKey, PlanVersion: int64(run.PlanVersion), BizKey: run.BizKey, Status: string(run.Status),
+		Id: uint64(run.ID), PlanId: run.PlanKey, PlanVersion: int64(run.PlanVersion), BizKey: run.BizKey, Status: string(run.Status),
 		Vars: string(vars), Version: run.Version, ExecCount: int64(run.ExecCount), DryRun: dry,
 	}, nil
 }
@@ -131,15 +134,10 @@ func nodeFromRow(r *model.WfNodeRun) NodeRun {
 }
 
 func jobFromRow(r *model.WfJob) Job {
-	j := Job{
-		ID: int64(r.Id), RunID: int64(r.RunId), NodeID: r.NodeId, Iteration: int(r.Iteration), Kind: JobKind(r.Kind),
-		DueAt: r.DueAt.UTC(), Status: JobStatus(r.Status), Attempt: int(r.Attempt), FailCount: int(r.FailCount), Owner: r.Owner,
-		LockedUntil: nullTime(r.LockedUntil), IdemKey: r.IdemKey,
+	return Job{
+		ID: int64(r.Id), RunID: int64(r.RunId), NodeID: r.NodeId, Iteration: int(r.Iteration),
+		Kind: JobKind(r.Kind), DueAt: r.DueAt.UTC(), Attempt: int(r.Attempt),
 	}
-	if r.Payload.Valid {
-		j.Payload = json.RawMessage(r.Payload.String)
-	}
-	return j
 }
 
 func nullTime(t sql.NullTime) *time.Time {
@@ -164,71 +162,14 @@ func nullJSON(b json.RawMessage) sql.NullString {
 	return sql.NullString{String: string(b), Valid: true}
 }
 
-// ---- 事务内操作 ----
-
-// lockRun 锁住 run 行并加载全部节点。
-func (t *tx) lockRun(runID int64) (Run, map[string]*model.WfNodeRun, error) {
-	r, err := t.runs.FindOneForUpdate(t.ctx, uint64(runID))
-	if err != nil {
-		return Run{}, nil, fmt.Errorf("engine: lock run %d: %w", runID, err)
+func nullOr(s sql.NullString) string {
+	if s.Valid {
+		return s.String
 	}
-	run, err := runFromRow(r)
-	if err != nil {
-		return Run{}, nil, err
-	}
-	rows, err := t.nodes.FindByRun(t.ctx, uint64(runID))
-	if err != nil {
-		return Run{}, nil, err
-	}
-	nodes := make(map[string]*model.WfNodeRun, len(rows))
-	for _, n := range rows {
-		nodes[n.NodeId] = n
-	}
-	return run, nodes, nil
+	return ""
 }
 
-func (t *tx) saveRun(run Run) error {
-	row, err := runToRow(run, uint64(run.ID))
-	if err != nil {
-		return err
-	}
-	return t.runs.Update(t.ctx, row)
-}
-
-func (t *tx) saveNode(n *model.WfNodeRun) error { return t.nodes.Update(t.ctx, n) }
-
-// insertJob 按幂等键插入 job；已存在则跳过。返回插入成功的 job（含 ID）。
-func (t *tx) insertJob(j Job) (*Job, error) {
-	row := &model.WfJob{
-		RunId: uint64(j.RunID), NodeId: j.NodeID, Iteration: int64(j.Iteration), Kind: string(j.Kind),
-		Payload: nullJSON(j.Payload), DueAt: j.DueAt, Status: string(JobPending), IdemKey: j.IdemKey,
-	}
-	ok, err := t.jobs.InsertIgnore(t.ctx, row)
-	if err != nil || !ok {
-		return nil, err
-	}
-	j.ID = int64(row.Id)
-	j.Status = JobPending
-	return &j, nil
-}
-
-func (t *tx) event(runID int64, nodeID string, iteration int, typ, actor string, payload any) error {
-	ev := &model.WfEvent{RunId: uint64(runID), NodeId: nodeID, Iteration: int64(iteration), Type: typ, Actor: actor}
-	if actor == "" {
-		ev.Actor = "system"
-	}
-	if payload != nil {
-		b, err := json.Marshal(payload)
-		if err != nil {
-			return err
-		}
-		ev.Payload = sql.NullString{String: string(b), Valid: true}
-	}
-	_, err := t.evts.Insert(t.ctx, ev)
-	return err
-}
-
-// ---- 事务外操作 ----
+// ---- 事务外的读取 ----
 
 func (s *Store) findRunByBizKey(ctx context.Context, bizKey string) (*Run, error) {
 	r, err := s.runs.FindOneByBizKey(ctx, bizKey)
@@ -282,26 +223,33 @@ func (s *Store) dueJobs(ctx context.Context, now time.Time, limit int) ([]Job, e
 	return out, nil
 }
 
-func (s *Store) claim(ctx context.Context, j *Job, owner string, now time.Time, lease time.Duration) (bool, error) {
-	until := now.Add(lease)
-	ok, err := s.jobs.Claim(ctx, uint64(j.ID), owner, now, until)
-	if err != nil || !ok {
-		return false, err
-	}
-	// 重新读取认领后的 attempt：调用方手里的 job 副本（如 tick 批量查出的）可能已经过期，
-	// 而 (owner, attempt) 是这次认领的凭证，之后对 job 的每次修改都要带上它。
-	row, err := s.jobs.FindOne(ctx, uint64(j.ID))
-	if err != nil {
-		return false, err
-	}
-	if row.Owner != owner {
-		return false, nil
-	}
-	*j = jobFromRow(row)
-	return true, nil
+// ---- 已发布定义 ----
+
+// Definition 是一个已发布的任务类型版本：完整定义、编译后的执行计划，以及运行时反复用到的预处理结果。发布后不可变。
+type Definition struct {
+	Key     string
+	Version int
+	Spec    *spec.TaskType
+	Plan    *compiler.Plan
+
+	nodes   map[string]dsl.Node
+	configs map[string]any // dsl.DecodeConfig 解码后的配置，只读，多个执行共享
+	modes   map[string]dsl.MergeMode
 }
 
-// ---- 已发布定义 ----
+// NewDefinition 预处理执行计划：节点索引、解码后的配置与 merge 模式。配置无法解码时返回错误。
+func NewDefinition(key string, version int, t *spec.TaskType, plan *compiler.Plan) (*Definition, error) {
+	d := &Definition{Key: key, Version: version, Spec: t, Plan: plan,
+		nodes: map[string]dsl.Node{}, configs: map[string]any{}, modes: mergeModes(plan)}
+	for _, n := range plan.Graph.Nodes {
+		cfg, err := dsl.DecodeConfig(n.Type, n.Config)
+		if err != nil {
+			return nil, fmt.Errorf("engine: plan %s@%d node %s: %w", key, version, n.ID, err)
+		}
+		d.nodes[n.ID], d.configs[n.ID] = n, cfg
+	}
+	return d, nil
+}
 
 // Plans 从 wf_plan 加载已发布的定义，并在进程内缓存（发布后不可变）。
 type Plans struct {
@@ -336,7 +284,9 @@ func (p *Plans) Load(ctx context.Context, key string, version int) (*Definition,
 	if err := json.Unmarshal([]byte(row.Compiled), &plan); err != nil {
 		return nil, fmt.Errorf("engine: plan %s compiled: %w", ck, err)
 	}
-	d = &Definition{Key: key, Version: version, Spec: t, Plan: &plan}
+	if d, err = NewDefinition(key, version, t, &plan); err != nil {
+		return nil, err
+	}
 	p.mu.Lock()
 	p.cache[ck] = d
 	p.mu.Unlock()

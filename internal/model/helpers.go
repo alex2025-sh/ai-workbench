@@ -13,3 +13,11 @@ func affected(ret sql.Result, err error) (bool, error) {
 	}
 	return n == 1, nil
 }
+
+// truncate 把字符串截到 n 字节以内，用于写入有长度上限的列（如 last_error）。
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}

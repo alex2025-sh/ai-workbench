@@ -60,12 +60,12 @@ internal/event/ subscription/ mcp/
 - **任务状态取值对齐 Morning Brief**：`TaskStatusUnassigned=-1`、`Pending=0`、`Processing=1`、`Snoozed=2`、`Solved=3`，`>= Solved` 即终态。命名一律用 task，不用 signal。
 - **优先级** `TaskPriorityP0..P3`（0 最紧急），由业务方定义，平台提供 `UpdatePriority`。
 - **单人决策**：每个人工节点只由一个人决策；多人参与就拆成多个人工节点串联。
-- **引擎是流程的事实来源，任务表是投影**：节点事件经 `sync_task` job 异步同步，任务中心只接受更大的 `seq`。
+- **引擎是流程的事实来源，任务表是投影**：节点事件经任务同步 effect（`sync_task`）异步同步，任务中心只接受更大的 `seq`。
 - **写入入口**：影响流程的操作（选择、推迟、退回）走引擎 Signal；开始处理、认领、调整优先级、转派直接走任务中心。
 - **处理人归属**：引擎只在流程明确分配时写处理人（节点确定处理人、有人做了决定，`sync_task` 带 `reassign`）；其余同步保留任务中心的处理人，认领、转派不会被覆盖。
 - **先提交、后触达**：人工节点先提交 `waiting`，再经 `effect` job 发卡片；会让外部看到流程状态的动作都在状态提交之后执行。
 - **事件驱动，不轮询**：流程只由事件推进（来源启动 run、人工 Signal、外部状态变化 Cancel、xxl-job tick 唤醒到期 job），事件处理完后就地执行新就绪的节点；`wf_job` 只存将来或待恢复的工作。不引入常驻工作池。
-- **推进可复现**：外部 IO 在事务外执行；图的推进只在锁 `wf_run` 行的悲观事务内完成；遍历编译期排好序的切片，不遍历 map；不在推进逻辑里读系统时间（用注入的 Clock）。`wf_job` 只按主键更新，连接使用 READ-COMMITTED。
+- **推进可复现**：外部 IO 在事务外执行；流程状态与 job 状态（含认领）只经引擎的 `update` 在锁 `wf_run` 行的悲观事务内修改，状态转换只改内存、由 `flush` 统一写回；遍历编译期排好序的切片，不遍历 map；不在推进逻辑里读系统时间（用注入的 Clock）。`wf_job` 只按主键更新，连接使用 READ-COMMITTED。
 - **至少执行一次**：所有外部动作带幂等键 `run_id:node_id:iteration[:seq]`。
 - **金额不经过 float64**：schema 中金额为 string，解码用 `UseNumber()`，计算用 decimal。
 - **出口统一脱敏**：按 schema 的 `x-pii` 在发往 Lark、LLM、日志时处理。

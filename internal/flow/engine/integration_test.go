@@ -54,7 +54,7 @@ func newEnv(t *testing.T) *env {
 
 // engine 创建一个引擎实例；多个实例共享同一个库，模拟多个进程。
 func (e *env) engine(owner string) *engine.Engine {
-	return engine.New(engine.NewStore(e.conn), e.plans, e.execs, e.rt, e.clock, engine.Options{Owner: owner, Lease: time.Minute})
+	return engine.New(engine.NewStore(e.conn), e.plans, e.execs, e.rt, e.clock, engine.Options{Owner: owner})
 }
 
 // tick 模拟一次 xxl-job 的 wf-ticker：执行全部到期的 job。

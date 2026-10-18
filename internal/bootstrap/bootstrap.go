@@ -21,11 +21,11 @@ import (
 
 // Config 是组装所需的配置。
 type Config struct {
-	DataSource    string        // 平台库（wf_*、task*、cfg_*），需要 parseTime=true&loc=UTC
-	BizDataSource string        `json:",optional"` // 业务库只读连接，供内置 skill 使用；为空时不注册 appeal skill
-	RelationsFile string        `json:",optional"` // 本地关系表（如 deploy/mock/vip_rm.yaml）
-	Owner         string        `json:",optional"` // 进程标识，默认 worker-<pid>
-	Lease         time.Duration `json:",default=2m"`
+	DataSource    string // 平台库（wf_*、task*、cfg_*），需要 parseTime=true&loc=UTC
+	BizDataSource string `json:",optional"`  // 业务库只读连接，供内置 skill 使用；为空时不注册 appeal skill
+	RelationsFile string `json:",optional"`  // 本地关系表（如 deploy/mock/vip_rm.yaml）
+	Owner         string `json:",optional"`  // 进程标识，默认 worker-<随机数>，只用于排查
+	Parallelism   int    `json:",default=4"` // 一次推进（含一次 tick 的每一批）同时执行的 job 数
 }
 
 // ReadCommitted 在 DSN 上加上 READ-COMMITTED 隔离级别（已指定时不改）。
@@ -94,7 +94,7 @@ func Build(c Config, clock engine.Clock) (*Services, error) {
 	if owner == "" {
 		owner = fmt.Sprintf("worker-%d", time.Now().UnixNano()%1_000_000)
 	}
-	s.Engine = engine.New(s.Store, s.Plans, nodes.Default(), s.Actions, clock, engine.Options{Owner: owner, Lease: c.Lease})
+	s.Engine = engine.New(s.Store, s.Plans, nodes.Default(), s.Actions, clock, engine.Options{Owner: owner, DriveParallelism: c.Parallelism})
 	s.Cron = ingest.NewCronRunner(conn, s.Plans, s.Tasks, s.Engine, s.Actions, clock)
 	s.Ticker = &ticker.Ticker{Cron: s.Cron, Engine: s.Engine}
 	return s, nil

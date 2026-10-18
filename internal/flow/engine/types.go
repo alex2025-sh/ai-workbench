@@ -1,7 +1,8 @@
 // Package engine 是轻量工作流引擎的执行核心：推进器、认领与租约、边传播、任务状态同步。
 //
 // 核心思想：workflow 是图数据而不是代码，运行状态直接存表，不需要确定性回放。
-// 正确性的核心是“事务外执行节点，事务内推进图”，同一个 run 的推进通过锁 wf_run 行串行化。
+// 正确性的核心是“事务外执行节点，事务内推进图”：流程状态与 job 状态（含认领）只经 update
+// 在锁住 wf_run 行的事务内修改，同一个 run 的一切修改由这把锁串行化。
 // 设计见 docs/workflow-engine.md。
 package engine
 
@@ -43,17 +44,18 @@ const (
 // Concluded 报告节点在本轮是否已有结论（成功或跳过）。
 func (s NodeStatus) Concluded() bool { return s == NodeSucceeded || s == NodeSkipped }
 
-// JobKind 是 job 的类型。所有“等待”都落成带 due_at 的 job。
+// JobKind 是 job 的类型。所有“现在不能做或要在提交之后做”的工作都落成带 due_at 的 job。
 type JobKind string
 
 const (
-	JobExecute  JobKind = "execute"
-	JobTimeout  JobKind = "timeout"
-	JobWake     JobKind = "wake"
-	JobTimer    JobKind = "timer"
-	JobSyncTask JobKind = "sync_task" // 事务外发：把节点事件投影到任务中心
-	JobEffect   JobKind = "effect"    // 事务外发：节点状态提交后才执行的外部动作，如人工节点的卡片
+	JobExecute JobKind = "execute" // 执行节点
+	JobTimer   JobKind = "timer"   // timer 节点到期，走 next
+	JobTimeout JobKind = "timeout" // human_choice 超时，走 timeout
+	JobEffect  JobKind = "effect"  // 节点状态提交之后才执行的外部动作：人工节点的卡片、任务状态同步
 )
+
+// graphJobs 是推进图的 job；run 结束或取消时撤销它们。effect 不撤销：已提交的状态仍要触达外部。
+var graphJobs = []JobKind{JobExecute, JobTimer, JobTimeout}
 
 // EffectPayload 是 effect job 的参数。
 type EffectPayload struct {
@@ -72,7 +74,7 @@ const (
 	JobPending   JobStatus = "pending"
 	JobDone      JobStatus = "done"
 	JobCancelled JobStatus = "cancelled"
-	JobFailed    JobStatus = "failed" // 毒丸 job：反复处理失败后被隔离，run 进入人工干预
+	JobFailed    JobStatus = "failed" // effect 用尽重试，或毒丸 job 被隔离
 )
 
 // Vars 是 run 的变量：触发时的任务 payload 与任务引用。
@@ -98,7 +100,7 @@ type Run struct {
 	BizKey      string    `json:"biz_key"`
 	Status      RunStatus `json:"status"`
 	Vars        Vars      `json:"vars"`
-	Version     int64     `json:"version"` // 每次推进 +1，同时作为 sync_task 的 seq
+	Version     int64     `json:"version"` // 每次改变状态的推进 +1，同时作为任务同步的 seq
 	ExecCount   int       `json:"exec_count"`
 	DryRun      bool      `json:"dry_run"`
 }
@@ -117,30 +119,25 @@ type NodeRun struct {
 	FinishedAt *time.Time      `json:"finished_at,omitempty"`
 }
 
-// Job 是一条待执行或待触发的工作单元。
+// Job 是一条待处理的 job 的引用：调度只用它找到 job，状态以 run 锁内读到的行为准。
+// Attempt 在认领成功后是这次认领的凭证。
 type Job struct {
-	ID          int64           `json:"id"`
-	RunID       int64           `json:"run_id"`
-	NodeID      string          `json:"node_id"`
-	Iteration   int             `json:"iteration"`
-	Kind        JobKind         `json:"kind"`
-	Payload     json.RawMessage `json:"payload,omitempty"`
-	DueAt       time.Time       `json:"due_at"`
-	Status      JobStatus       `json:"status"`
-	Attempt     int             `json:"attempt"` // 认领次数；(Owner, Attempt) 是一次认领的凭证
-	FailCount   int             `json:"fail_count"`
-	Owner       string          `json:"owner,omitempty"`
-	LockedUntil *time.Time      `json:"locked_until,omitempty"`
-	IdemKey     string          `json:"idem_key"`
+	ID        int64     `json:"id"`
+	RunID     int64     `json:"run_id"`
+	NodeID    string    `json:"node_id"`
+	Iteration int       `json:"iteration"`
+	Kind      JobKind   `json:"kind"`
+	DueAt     time.Time `json:"due_at"`
+	Attempt   int       `json:"attempt"`
 }
 
-// IdemKey 生成 job 与外部动作的幂等键：run_id:node_id:iteration:kind。
+// IdemKey 生成 job 的幂等键：run_id:node_id:iteration:kind。
 // 带上 iteration，退回后新一轮的同名动作不会被上一轮的幂等记录误拦。
 func IdemKey(runID int64, nodeID string, iteration int, kind JobKind) string {
 	return strconv.FormatInt(runID, 10) + ":" + nodeID + ":" + strconv.Itoa(iteration) + ":" + string(kind)
 }
 
-// SyncPayload 是 sync_task job 的参数，交给任务中心按 seq 幂等应用。
+// SyncPayload 是任务状态同步（kind 为 sync_task 的 effect）的参数，交给任务中心按 seq 幂等应用。
 type SyncPayload struct {
 	TaskID      int64      `json:"task_id"`
 	Status      string     `json:"status"`             // unassigned / pending / snoozed / solved

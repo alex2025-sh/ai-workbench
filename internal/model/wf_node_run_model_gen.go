@@ -45,7 +45,7 @@ type (
 		Status     string         `db:"status"`    // pending / ready / running / waiting / succeeded / skipped / failed
 		Port       string         `db:"port"`      // 完成时选中的输出端口
 		Output     sql.NullString `db:"output"`    // 节点输出；大输出只存引用
-		Attempt    int64          `db:"attempt"`
+		Attempt    int64          `db:"attempt"`   // 本轮的执行次数（含租约到期的执行），与重试策略的 max_attempts 比较
 		WaitUntil  sql.NullTime   `db:"wait_until"`
 		StartedAt  sql.NullTime   `db:"started_at"`
 		FinishedAt sql.NullTime   `db:"finished_at"`

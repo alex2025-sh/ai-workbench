@@ -2,6 +2,7 @@
 DataSource: root:@tcp(127.0.0.1:3306)/ai_workbench?parseTime=true&loc=UTC&charset=utf8mb4
 BizDataSource: root:@tcp(127.0.0.1:3306)/biz_mock?parseTime=true&loc=UTC&charset=utf8mb4
 RelationsFile: deploy/mock/vip_rm.yaml
+Parallelism: 4         # 一次推进（含一次 tick 的每一批）同时执行的 job 数
 
 Log:
   Encoding: plain
@@ -11,7 +12,6 @@ Log:
 Ticker:
   Mode: local          # local：进程内定时器（仅本地开发）；xxljob：注册到 xxl-job 调度中心，由 wf-ticker 触发
   Interval: 15s
-  Parallelism: 4       # 一次 tick 内并行执行的到期 job 数
   XxlJob:
     AdminAddr: http://127.0.0.1:8080/xxl-job-admin
     AppName: ai-workbench
