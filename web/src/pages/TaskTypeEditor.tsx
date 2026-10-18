@@ -355,7 +355,7 @@ export default function TaskTypeEditor() {
                     />
                   ) : (
                     <Card size="small" style={{ height: '100%' }}>
-                      <Empty description="选中节点后在这里配置；从左侧拖入新节点，从节点下方的出口拖到其他节点连线，Delete 删除。" />
+                      <Empty description="选中节点后在这里配置；从左侧拖入新节点，从节点下方的出口拖到其他节点连线；点中连线后按 Delete 或点中点的 × 删除。" />
                     </Card>
                   )}
                 </div>
