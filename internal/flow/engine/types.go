@@ -53,6 +53,10 @@ const (
 	JobTimer   JobKind = "timer"   // timer 节点到期，走 next
 	JobTimeout JobKind = "timeout" // human_choice 超时，走 timeout
 	JobEffect  JobKind = "effect"  // 节点状态提交之后才执行的外部动作：人工节点的卡片、任务状态同步
+
+	// jobLegacySyncTask 是升级前写入的任务同步 job（payload 为 SyncPayload）。新版写成 kind = effect、
+	// payload.kind = sync_task；库里尚未执行的旧 job 按 sync_task effect 执行，不再新写。
+	jobLegacySyncTask JobKind = "sync_task"
 )
 
 // graphJobs 是推进图的 job；run 结束或取消时撤销它们。effect 不撤销：已提交的状态仍要触达外部。
