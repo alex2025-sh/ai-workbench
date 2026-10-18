@@ -806,7 +806,7 @@ message TaskView {
   bytes payload_json = 12;  // 已按调用人脱敏
   int64 run_id = 13;
   int64 updated_at = 14;
-  string title = 15;     // 来自展示模板的 title / summary，建任务与同步时渲染落库，按最严格级别脱敏
+  string title = 15;     // 任务类型默认模板的 title / summary，查询时用 payload 与任务字段渲染，按 x-pii 脱敏
   string subtitle = 16;
 }
 
@@ -862,7 +862,7 @@ message ProgressStep {
 
 message TaskDetail {
   TaskView task = 1;
-  bytes rendered_json = 2;        // 按调用人受众渲染的 web 卡片；字段、标签、格式由展示模板决定
+  bytes rendered_json = 2;        // 最近一个发卡片的节点实际发出的卡片（不含按钮，按钮见 pending_action）；字段、标签、格式由展示模板决定
   PendingAction pending_action = 3;
   repeated ProgressStep progress = 4;
 }

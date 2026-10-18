@@ -5671,7 +5671,7 @@ type TaskView struct {
 	PayloadJson     []byte                 `protobuf:"bytes,12,opt,name=payload_json,json=payloadJson,proto3" json:"payload_json,omitempty"` // 已按调用人脱敏
 	RunId           int64                  `protobuf:"varint,13,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
 	UpdatedAt       int64                  `protobuf:"varint,14,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
-	Title           string                 `protobuf:"bytes,15,opt,name=title,proto3" json:"title,omitempty"` // 来自展示模板的 title / summary，建任务与同步时渲染落库，按最严格级别脱敏
+	Title           string                 `protobuf:"bytes,15,opt,name=title,proto3" json:"title,omitempty"` // 任务类型默认模板的 title / summary，查询时用 payload 与任务字段渲染，按 x-pii 脱敏
 	Subtitle        string                 `protobuf:"bytes,16,opt,name=subtitle,proto3" json:"subtitle,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
@@ -6240,7 +6240,7 @@ func (x *ProgressStep) GetStatus() string {
 type TaskDetail struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Task          *TaskView              `protobuf:"bytes,1,opt,name=task,proto3" json:"task,omitempty"`
-	RenderedJson  []byte                 `protobuf:"bytes,2,opt,name=rendered_json,json=renderedJson,proto3" json:"rendered_json,omitempty"` // 按调用人受众渲染的 web 卡片；字段、标签、格式由展示模板决定
+	RenderedJson  []byte                 `protobuf:"bytes,2,opt,name=rendered_json,json=renderedJson,proto3" json:"rendered_json,omitempty"` // 最近一个发卡片的节点实际发出的卡片（不含按钮，按钮见 pending_action）；字段、标签、格式由展示模板决定
 	PendingAction *PendingAction         `protobuf:"bytes,3,opt,name=pending_action,json=pendingAction,proto3" json:"pending_action,omitempty"`
 	Progress      []*ProgressStep        `protobuf:"bytes,4,rep,name=progress,proto3" json:"progress,omitempty"`
 	unknownFields protoimpl.UnknownFields

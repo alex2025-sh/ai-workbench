@@ -67,6 +67,8 @@
 | `timer` | `next` | `after`（如 `48h`、`7d`），可选 `anchor`（从某个时间字段开始算） |
 | `human_choice` | 每个选项的 `key`；配置 `timeout` 时另有 `timeout` | `options`、`view`、`assignment`、`form`、`timeout`、`remind`；带 `snooze` 的选项表示推迟，不产生端口 |
 | `skill_call` / `llm` / `lark_card` / `send_email` / `emit_event` | `next`、`error` | 见 schema；`error` 端口可以不连，失败时进入人工干预 |
+
+发卡片的节点把发出的卡片记在输出里：`lark_card` 的输出为 `{ to, message_id, card }`；`human_choice` 等待时为 `{ assignee, group, card }`，做出选择后为 `{ option, form, actor, assignment, card }`（`assignment` 即等待时的处理人）。Web 任务详情显示的就是这张卡片，与 Lark 上看到的一致。
 | `end` | 无 | 可选 `resolution` |
 
 除 `error` 外，每个端口都必须有连线。

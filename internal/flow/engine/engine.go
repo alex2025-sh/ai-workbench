@@ -353,8 +353,16 @@ func (s *runState) applySignal(cmd SignalCmd) SignalResult {
 	}
 	s.cancelJobs(cmd.NodeID, JobTimeout)
 	s.event(cmd.NodeID, "signal", cmd.Actor, map[string]any{"option": cmd.Option, "form": cmd.Form})
+	// 等待时的输出是处理人与发出的卡片；做出选择后处理人归入 assignment，卡片保留在顶层供任务详情显示。
 	prev, _ := expr.Decode([]byte(nullOr(r.Output)))
-	out, _ := json.Marshal(map[string]any{"option": cmd.Option, "form": cmd.Form, "actor": cmd.Actor, "assignment": prev})
+	result := map[string]any{"option": cmd.Option, "form": cmd.Form, "actor": cmd.Actor, "assignment": prev}
+	if m, ok := prev.(map[string]any); ok {
+		if card, ok := m["card"]; ok {
+			delete(m, "card")
+			result["card"] = card
+		}
+	}
+	out, _ := json.Marshal(result)
 	// 做决定的人成为任务的处理人：组任务没人认领时也能记下是谁处理的。
 	if cmd.Actor != "" {
 		s.assign(cmd.NodeID, &Assignment{Assignee: cmd.Actor})

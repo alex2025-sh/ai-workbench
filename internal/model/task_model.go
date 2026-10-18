@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/zeromicro/go-zero/core/stores/sqlx"
 )
@@ -24,6 +26,26 @@ type (
 		SetRun(ctx context.Context, id, runID uint64) error
 		// CloseUnstarted 关闭尚未启动 run、尚未完结的任务。
 		CloseUnstarted(ctx context.Context, id uint64, status int64, resolution string) error
+		// List 按优先级、截止时间（空排最后）、id 排序分页查询，键集分页。
+		List(ctx context.Context, f TaskFilter) ([]*Task, error)
+	}
+
+	// TaskFilter 是任务列表的查询条件。AssigneeID 与 Groups 至少指定一个；同时指定时取并集。
+	TaskFilter struct {
+		AssigneeID string
+		Groups     []string // 组队列中尚未分配处理人的任务
+		Statuses   []int64  // 空 = 不限
+		TaskType   string
+		Priorities []int64
+		After      *TaskCursor
+		Limit      int
+	}
+
+	// TaskCursor 是上一页最后一行的排序键。
+	TaskCursor struct {
+		Priority int64
+		DueAt    time.Time // 空截止时间按 noDueAt 参与排序
+		ID       uint64
 	}
 
 	customTaskModel struct {
@@ -70,4 +92,65 @@ func (m *customTaskModel) SetRun(ctx context.Context, id, runID uint64) error {
 	query := fmt.Sprintf("update %s set `run_id` = ? where `id` = ? and `run_id` = 0", m.table)
 	_, err := m.conn.ExecCtx(ctx, query, runID, id)
 	return err
+}
+
+// noDueAt 是空截止时间的排序值：没有截止时间的任务排在同优先级的最后。
+var noDueAt = time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC)
+
+// SortDueAt 返回截止时间的排序值，构造 TaskCursor 时使用。
+func SortDueAt(t sql.NullTime) time.Time {
+	if t.Valid {
+		return t.Time
+	}
+	return noDueAt
+}
+
+func (m *customTaskModel) List(ctx context.Context, f TaskFilter) ([]*Task, error) {
+	var who []string
+	var args []any
+	if f.AssigneeID != "" {
+		who = append(who, "`assignee_id` = ?")
+		args = append(args, f.AssigneeID)
+	}
+	if len(f.Groups) > 0 {
+		who = append(who, "(`assignee_id` = '' and `assignee_group` in ("+placeholders(len(f.Groups))+"))")
+		for _, g := range f.Groups {
+			args = append(args, g)
+		}
+	}
+	if len(who) == 0 {
+		return nil, nil
+	}
+	where := []string{"(" + strings.Join(who, " or ") + ")"}
+	if len(f.Statuses) > 0 {
+		where = append(where, "`status` in ("+placeholders(len(f.Statuses))+")")
+		for _, v := range f.Statuses {
+			args = append(args, v)
+		}
+	}
+	if f.TaskType != "" {
+		where = append(where, "`task_type` = ?")
+		args = append(args, f.TaskType)
+	}
+	if len(f.Priorities) > 0 {
+		where = append(where, "`priority` in ("+placeholders(len(f.Priorities))+")")
+		for _, v := range f.Priorities {
+			args = append(args, v)
+		}
+	}
+	const dueKey = "coalesce(`due_at`, ?)"
+	if f.After != nil {
+		where = append(where, "(`priority`, "+dueKey+", `id`) > (?, ?, ?)")
+		args = append(args, noDueAt, f.After.Priority, f.After.DueAt, f.After.ID)
+	}
+	query := fmt.Sprintf("select %s from %s where %s order by `priority`, %s, `id` limit ?",
+		taskRows, m.table, strings.Join(where, " and "), dueKey)
+	args = append(args, noDueAt, f.Limit)
+	var out []*Task
+	err := m.conn.QueryRowsCtx(ctx, &out, query, args...)
+	return out, err
+}
+
+func placeholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
 }

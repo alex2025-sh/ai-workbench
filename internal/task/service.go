@@ -28,6 +28,8 @@ type Task struct {
 	Payload         json.RawMessage // 平台层不解析，按 task_type@type_version 的 schema 校验
 	Seq             int64           // 引擎同步序号
 	Version         int64           // 乐观锁
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 // SyncStatusCmd 由引擎的 sync_task job 发出。任务中心只接受 Seq 大于当前值的写入，
