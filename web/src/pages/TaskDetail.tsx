@@ -312,7 +312,7 @@ function ActionPanel(props: { detail: Detail; syncing: boolean; onChoose: (o: Ac
                   key={o.key}
                   type={o.style === 'primary' ? 'primary' : 'default'}
                   danger={o.style === 'danger'}
-                  disabled={!p.can_signal || snooze || syncing}
+                  disabled={!p.can_signal || syncing}
                   onClick={() => onChoose(o)}
                 >
                   {o.label}
@@ -320,7 +320,7 @@ function ActionPanel(props: { detail: Detail; syncing: boolean; onChoose: (o: Ac
                 </Button>
               );
               return snooze ? (
-                <Tooltip key={o.key} title="推迟即将开放">
+                <Tooltip key={o.key} title="推迟：到期后重新提醒，期间仍可直接处理">
                   {button}
                 </Tooltip>
               ) : (

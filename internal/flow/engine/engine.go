@@ -135,7 +135,7 @@ const (
 	RejectStale          RejectCode = "stale"           // 节点或 iteration 已不是当前等待的节点
 	RejectAlreadyHandled RejectCode = "already_handled" // 该节点已被处理（如在 Lark 点过）
 	RejectInvalidForm    RejectCode = "invalid_form"    // 未知选项或必填字段缺失
-	RejectUnsupported    RejectCode = "unsupported"     // 选项暂不可用（推迟功能未上线）
+	RejectUnsupported    RejectCode = "unsupported"     // 选项暂不可用
 )
 
 // RunView 是运行状态的查询视图，供运行态画布着色。
@@ -344,15 +344,16 @@ func (s *runState) applySignal(cmd SignalCmd) SignalResult {
 	if opt == nil {
 		return reject(RejectInvalidForm, fmt.Sprintf("未知选项 %q", cmd.Option))
 	}
-	if opt.Snooze != nil {
-		return reject(RejectUnsupported, "暂不支持推迟，将在提醒功能上线后开放")
-	}
 	for _, f := range opt.RequiredFields {
 		if strings.TrimSpace(cmd.Form[f]) == "" {
 			return reject(RejectInvalidForm, fmt.Sprintf("请填写 %s", f))
 		}
 	}
-	s.cancelJobs(cmd.NodeID, JobTimeout)
+	if opt.Snooze != nil {
+		s.snooze(cmd, opt.Snooze.Std())
+		return SignalResult{Accepted: true}
+	}
+	s.cancelJobs(cmd.NodeID, JobTimeout, JobWake)
 	s.event(cmd.NodeID, "signal", cmd.Actor, map[string]any{"option": cmd.Option, "form": cmd.Form})
 	// 等待时的输出是处理人与发出的卡片；做出选择后处理人归入 assignment，卡片保留在顶层供任务详情显示。
 	prev, _ := expr.Decode([]byte(nullOr(r.Output)))

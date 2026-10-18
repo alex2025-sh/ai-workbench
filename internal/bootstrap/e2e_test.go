@@ -194,18 +194,24 @@ func TestVIPAppealAlert(t *testing.T) {
 		t.Fatalf("duplicate cards: %d → %d", before, after)
 	}
 
-	// 组长处理 A1003：推迟暂不支持，未知选项被拒绝，处理后流程结束、任务完结。
+	// 组长处理 A1003：未知选项被拒绝；推迟后任务置为已推迟、记在组长名下，节点继续等待；
+	// 推迟期间仍可直接处理，处理后流程结束、任务完结。推迟到期的重新提醒由引擎测试覆盖。
 	runID := h.task("A1003").RunID
-	for _, c := range []struct {
-		option, reason string
-		code           engine.RejectCode
-	}{{"snooze", "推迟", engine.RejectUnsupported}, {"nope", "未知选项", engine.RejectInvalidForm}} {
-		res, err := h.svc.Engine.Signal(h.ctx, engine.SignalCmd{RunID: runID, NodeID: "escalate", Option: c.option, Actor: "lead@example.com"})
-		if err != nil || res.Accepted || res.Code != c.code || !strings.Contains(res.Reason, c.reason) {
-			t.Fatalf("signal %s: %+v %v", c.option, res, err)
-		}
+	res, err := h.svc.Engine.Signal(h.ctx, engine.SignalCmd{RunID: runID, NodeID: "escalate", Option: "nope", Actor: "lead@example.com"})
+	if err != nil || res.Accepted || res.Code != engine.RejectInvalidForm {
+		t.Fatalf("signal nope: %+v %v", res, err)
 	}
-	res, err := h.svc.Engine.Signal(h.ctx, engine.SignalCmd{RunID: runID, NodeID: "escalate", Option: "handled", Actor: "lead@example.com"})
+	res, err = h.svc.Engine.Signal(h.ctx, engine.SignalCmd{RunID: runID, NodeID: "escalate", Option: "snooze", Actor: "lead@example.com"})
+	if err != nil || !res.Accepted {
+		t.Fatalf("signal snooze: %+v %v", res, err)
+	}
+	if tk := h.task("A1003"); tk.Status != task.TaskStatusSnoozed || tk.SnoozeUntil == nil || tk.AssigneeID != "lead@example.com" {
+		t.Fatalf("A1003 snoozed task = %+v", tk)
+	}
+	if n := h.node("A1003", "escalate"); n.Status != engine.NodeWaiting {
+		t.Fatalf("A1003 escalate after snooze = %s", n.Status)
+	}
+	res, err = h.svc.Engine.Signal(h.ctx, engine.SignalCmd{RunID: runID, NodeID: "escalate", Option: "handled", Actor: "lead@example.com"})
 	if err != nil || !res.Accepted {
 		t.Fatalf("signal handled: %+v %v", res, err)
 	}

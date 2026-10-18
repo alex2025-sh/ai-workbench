@@ -224,7 +224,7 @@ func (r *Runner) runCase(ctx context.Context, in Input, index int, sample json.R
 		}
 		for _, j := range pending {
 			kind := engine.JobKind(j.Kind)
-			if seen[j.Id] || j.DueAt.After(clock.Now()) || (kind != engine.JobTimer && kind != engine.JobTimeout) {
+			if seen[j.Id] || j.DueAt.After(clock.Now()) || (kind != engine.JobTimer && kind != engine.JobTimeout && kind != engine.JobWake) {
 				continue
 			}
 			seen[j.Id] = true

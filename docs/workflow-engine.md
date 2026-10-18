@@ -286,11 +286,13 @@ Camunda 记录过一个典型问题：执行时间超过锁时长的 job 会被�
 | --- | --- |
 | 节点执行 | 确定处理人、渲染卡片；节点置为 `waiting`，同事务插入发卡片的 `effect` job，配置了超时则插入 `timeout` job（从进入等待算起），配置了提醒则插入 `wake` job；提交后发送卡片 |
 | RM 点击 | API 先按任务表鉴权；事务内确认节点仍 `waiting`、轮次一致、选项合法、必填项齐全；写端口；作废该节点的 timeout / wake job；传播 |
-| 选择 snooze | 节点保持 `waiting`，作废原 wake job，按 snooze 时长插入新的 wake job，并同步任务状态为 snoozed |
-| wake 到期 | 重新发卡片（幂等键带提醒序号），按配置插入下一次 wake；若来自推迟，同步任务回迁 pending |
+| 选择 snooze | 节点保持 `waiting`，作废尚未到期的 wake job，按 snooze 时长插入新的 wake job；做推迟的人成为处理人，任务同步为 snoozed（写 `snooze_until`）。超时照常计时 |
+| wake 到期 | 节点仍在等待时重新发卡片给流程当前的处理人（幂等键带提醒后缀），按配置插入下一次 wake；若来自推迟，同步任务回迁 pending。推迟不计入提醒次数，已提醒次数记在节点输出的 `reminded` 中 |
 | timeout 到期 | 若节点仍 `waiting`，按 `timeout` 端口完成并传播 |
 
-点击与超时在同一行锁下竞争，只有先到的生效。信号语义参考 Temporal 的 Update：先校验，不通过直接拒绝并返回原因，卡片上即时提示。
+点击与超时在同一行锁下竞争，只有先到的生效。做出选择后作废该节点的 timeout 与 wake；run 暂停期间到期的 wake 作废（结束原因记为暂停作废），恢复时补回并立即提醒。
+
+重复提醒发给引擎记录的当前处理人（节点确定的处理人，或做过推迟的人）；任务中心里的认领、转派引擎不知道，一期提醒仍发给原处理人或组，接入真实 Lark 时再按任务表的处理人发送。信号语义参考 Temporal 的 Update：先校验，不通过直接拒绝并返回原因，卡片上即时提示。
 
 ### timer 节点
 
@@ -555,7 +557,7 @@ xxl-job 只通知一台机器，解决的是 ticker 不重复触发；这里防�
 
 先把并发正确性做扎实，再加能力；每一阶段都以 VIP 工单提醒作为验收用例。
 
-当前进度：阶段一已完成；阶段二除 Lark 真实接入（目前为 mock）、重复提醒与 snooze 外已完成，执行模型为事件驱动（无常驻工作池），来源支持 `close_when`；VIP 工单提醒在本地 MySQL 上端到端跑通（`internal/bootstrap` 的端到端测试）。
+当前进度：阶段一已完成；阶段二除 Lark 真实接入（目前为 mock）外已完成，执行模型为事件驱动（无常驻工作池），来源支持 `close_when`；VIP 工单提醒在本地 MySQL 上端到端跑通（`internal/bootstrap` 的端到端测试）。
 
 1. **阶段一：核心执行**。数据模型（含 `iteration` 字段，恒为 0）；编译器（拓扑排序、端口与配置校验）；认领、执行、提交、传播；`condition`、`merge`、动作节点；并发与故障注入测试。验收：手写 DSL 跑通无人工节点的流程。
 2. **阶段二：等待与时钟**。`human_choice`（超时可选、重复提醒、snooze）、`timer`；xxl-job ticker；租约回收；`wf_schedule` cron 来源与 `close_when`；Lark 回调接入信号 API；任务状态同步（sync\_task）；节点级分配、模板与编译期继承。验收：VIP 工单提醒端到端上线。

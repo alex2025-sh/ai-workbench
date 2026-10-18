@@ -98,7 +98,7 @@ func (e *Engine) SkipNode(ctx context.Context, runID int64, nodeID, port, actor,
 			}
 			s.resume(all, nodeID, actor, reason)
 		}
-		s.cancelJobs(nodeID, JobExecute, JobTimer, JobTimeout, JobEffect) // 执行中的结果提交时会因节点已完成而丢弃
+		s.cancelJobs(nodeID, JobExecute, JobTimer, JobTimeout, JobWake, JobEffect) // 执行中的结果提交时会因节点已完成而丢弃
 		s.event(nodeID, "node_skipped_manually", actor, map[string]any{"port": port, "reason": reason})
 		out, _ := json.Marshal(map[string]any{"skipped": true, "actor": actor, "reason": reason})
 		s.complete(nodeID, port, out)
@@ -148,6 +148,9 @@ func (s *runState) resume(all []*model.WfJob, except, actor, reason string) {
 				case kind == JobTimer || kind == JobTimeout:
 					// 节点仍在等待而定时已结束：到期时 run 处于暂停，定时作废了。
 					s.addJob(id, kind, j.DueAt, nil, replaces(j))
+				case kind == JobWake && j.LastError == voidedWhilePaused:
+					// 提醒正常到期后也是 done（节点仍在等待），只补回暂停期间作废的。
+					s.addJob(id, kind, j.DueAt, json.RawMessage(j.Payload.String), replaces(j))
 				case kind == JobEffect && j.Status != string(JobDone):
 					s.addJob(id, kind, s.now, json.RawMessage(j.Payload.String), replaces(j))
 				}

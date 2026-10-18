@@ -28,7 +28,7 @@ func (e *Engine) process(ctx context.Context, j *Job) (next []Job, worked bool, 
 	switch j.Kind {
 	case JobExecute:
 		return e.execute(ctx, j)
-	case JobTimer, JobTimeout:
+	case JobTimer, JobTimeout, JobWake:
 		return e.fire(ctx, j)
 	case JobEffect, jobLegacySyncTask:
 		return e.effect(ctx, j)
@@ -208,16 +208,25 @@ func (e *Engine) fail(s *runState, res NodeResult) {
 
 // ---- 定时 ----
 
-// fire 处理到期的 timer / timeout。没有外部 IO，一个事务完成，不需要认领。
+// fire 处理到期的 timer / timeout / wake。没有外部 IO，一个事务完成，不需要认领。
 func (e *Engine) fire(ctx context.Context, j *Job) ([]Job, bool, error) {
 	worked, jobs, err := update(ctx, e, j.RunID, j.ID, func(s *runState) (bool, error) {
 		job := s.job
 		if job.Status != string(JobPending) || job.DueAt.After(s.now) {
 			return false, nil
 		}
-		s.finishJob(JobDone, "")
 		if !s.waiting(job.NodeId, job.Iteration) {
-			return true, nil // 节点已被点击或已退回，定时作废
+			// 节点已被点击或已退回，定时作废；run 暂停时作废的在恢复时补回。
+			reason := ""
+			if s.run.Status == RunNeedsIntervention {
+				reason = voidedWhilePaused
+			}
+			s.finishJob(JobDone, reason)
+			return true, nil
+		}
+		s.finishJob(JobDone, "")
+		if JobKind(job.Kind) == JobWake {
+			return true, s.remind(job.NodeId, json.RawMessage(nullOr(job.Payload)))
 		}
 		port := dsl.PortNext
 		if JobKind(job.Kind) == JobTimeout {
