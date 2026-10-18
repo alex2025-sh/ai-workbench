@@ -2,6 +2,8 @@
 # 7 天后仍未完成，升级给 VIP 客服组长。
 #
 # 工单在中途审核完成时，扫描发现状态变化（close_when），立即取消 run、任务以 auto_closed 完结，不必等到下一个检查点。
+# 去重键是「工单号 + 提交时间」：被驳回后重新提交的工单是一次新的审核，会重新提醒；
+# 审核通过、拒绝等状态变化不改变提交时间，close_when 仍能按同一个键找到要关闭的任务。
 #
 # 一期没有前端，这份 YAML 由命令行转成 JSON 后调用 SaveTaskTypeDraft 发布，前端上线后提交的是同一种 JSON。
 # 结构定义见 api/schema/task_type.schema.json。
@@ -49,7 +51,7 @@ sources:
     schedule: "*/1 * * * *"
     timezone: Asia/Shanghai
     skill: appeal.scan_vip            # 内置 skill：按 (updated_at, id) 增量扫描 appeal 表（读从库）
-    input: { batch_size: 200 }
+    input: { batch_size: 200, lag_seconds: 60 }   # 只扫 60 秒前更新的行，覆盖长事务与从库延迟
     filter: record.vip_level > 0 && record.appeal_status == "COMMITED"
     close_when: record.appeal_status != "COMMITED"   # 工单离开待审核：取消提醒，任务自动完结
     mapping:
@@ -65,7 +67,7 @@ sources:
       reviewer: record.reviewer
       commit_time_ms: record.commit_time * 1000
 
-dedup_key: "{{ payload.appeal_id }}"
+dedup_key: "{{ payload.appeal_id }}:{{ payload.commit_time_ms }}"
 
 views:
   rm_card:

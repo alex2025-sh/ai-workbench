@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -26,12 +27,33 @@ type Tasks interface {
 	Create(ctx context.Context, cmd task.CreateCmd) (*task.Task, bool, error)
 	FindByDedupKey(ctx context.Context, key string) (*task.Task, error) // 不存在时返回 nil, nil
 	SetRun(ctx context.Context, id, runID int64) error
+	AutoClose(ctx context.Context, id int64, reason string) error // 关闭尚未启动 run 的任务
 }
 
 // Runs 是来源对 workflow 的操作：新数据启动 run，外部状态变化取消 run。
 type Runs interface {
 	StartRun(ctx context.Context, cmd engine.StartRunCmd) (engine.Run, bool, error)
 	Cancel(ctx context.Context, runID int64, actor, reason string) error
+}
+
+// badRecord 表示记录本身有问题（映射、校验、表达式求值失败）：跳过这条，继续扫描。
+// 其余错误（数据库、引擎）视为暂时性失败：停止本次扫描且不推进游标，下次从同一位置重扫；
+// 已处理的记录由任务去重键与 run 的 biz_key 保证不会重复。
+type badRecord struct{ err error }
+
+func (b badRecord) Error() string { return b.err.Error() }
+func (b badRecord) Unwrap() error { return b.err }
+
+func bad(err error) error {
+	if err == nil {
+		return nil
+	}
+	return badRecord{err}
+}
+
+func isBad(err error) bool {
+	var b badRecord
+	return errors.As(err, &b)
 }
 
 // CronRunner 触发到期的 cron 来源：调用查询 skill 增量扫描，对每条记录：
@@ -154,50 +176,26 @@ func (r *CronRunner) fire(ctx context.Context, s *model.WfSchedule) fireOutcome 
 			return fail(err)
 		}
 	}
-	for _, item := range scanned.Items {
+	for i, item := range scanned.Items {
 		res.Scanned++
-		rec, err := expr.Decode(item)
-		if err != nil {
+		outcome, err := r.record(ctx, def, src, filter, closeWhen, item, s.Name)
+		switch {
+		case err == nil:
+		case isBad(err):
+			// 坏数据不阻塞游标：记录日志并计数，避免一条坏数据卡住整个来源。
 			res.Invalid++
+			logx.WithContext(ctx).Errorf("ingest: %s record %d skipped: %v", s.Name, i, err)
 			continue
+		default:
+			// 暂时性失败：保留原游标，下次 tick 从同一位置重扫，不丢这条记录。
+			return fail(fmt.Errorf("record %d: %w", i, err))
 		}
-		env := expr.Env{expr.RootRecord: rec}
-		if closeWhen != nil {
-			hit, err := closeWhen.Run(env)
-			if err != nil {
-				res.Invalid++
-				continue
-			}
-			if b, _ := hit.(bool); b {
-				closed, err := r.close(ctx, def, src, env, s.Name)
-				if err != nil {
-					res.Invalid++
-					logx.WithContext(ctx).Errorf("ingest: %s close: %v", s.Name, err)
-				} else if closed {
-					res.Closed++
-				}
-				continue
-			}
-		}
-		if filter != nil {
-			ok, err := filter.Run(env)
-			if err != nil {
-				res.Invalid++
-				continue
-			}
-			if b, _ := ok.(bool); !b {
-				res.Filtered++
-				continue
-			}
-		}
-		created, err := r.ingest(ctx, def, src, env)
-		if err != nil {
-			// 单条失败不阻塞游标：记录日志并计数，避免一条坏数据卡住整个来源。
-			res.Invalid++
-			logx.WithContext(ctx).Errorf("ingest: %s record: %v", s.Name, err)
-			continue
-		}
-		if created {
+		switch outcome {
+		case outcomeClosed:
+			res.Closed++
+		case outcomeFiltered:
+			res.Filtered++
+		case outcomeCreated:
 			res.Created++
 		}
 	}
@@ -205,21 +203,71 @@ func (r *CronRunner) fire(ctx context.Context, s *model.WfSchedule) fireOutcome 
 	return res
 }
 
-// close 按记录的去重键找到未完结的任务并取消它的 run；任务由引擎同步为 solved（auto_closed）。
+type outcome int
+
+const (
+	outcomeNone outcome = iota
+	outcomeClosed
+	outcomeFiltered
+	outcomeCreated
+)
+
+// record 处理一条扫描记录：先判断 close_when，再判断 filter，最后建任务并启动 run。
+func (r *CronRunner) record(ctx context.Context, def *engine.Definition, src *spec.Source, filter, closeWhen *expr.Program, item json.RawMessage, schedule string) (outcome, error) {
+	rec, err := expr.Decode(item)
+	if err != nil {
+		return outcomeNone, bad(err)
+	}
+	env := expr.Env{expr.RootRecord: rec}
+	if closeWhen != nil {
+		hit, err := closeWhen.Run(env)
+		if err != nil {
+			return outcomeNone, bad(fmt.Errorf("close_when: %w", err))
+		}
+		if b, _ := hit.(bool); b {
+			closed, err := r.close(ctx, def, src, env, schedule)
+			if err != nil || !closed {
+				return outcomeNone, err
+			}
+			return outcomeClosed, nil
+		}
+	}
+	if filter != nil {
+		ok, err := filter.Run(env)
+		if err != nil {
+			return outcomeNone, bad(fmt.Errorf("filter: %w", err))
+		}
+		if b, _ := ok.(bool); !b {
+			return outcomeFiltered, nil
+		}
+	}
+	created, err := r.ingest(ctx, def, src, env)
+	if err != nil || !created {
+		return outcomeNone, err
+	}
+	return outcomeCreated, nil
+}
+
+// close 按记录的去重键找到未完结的任务并结束它：有 run 时取消 run，任务由引擎同步为 solved（auto_closed）；
+// run 还没启动（启动前失败）时直接关闭任务，否则任务会一直停在待分配。
 func (r *CronRunner) close(ctx context.Context, def *engine.Definition, src *spec.Source, env expr.Env, schedule string) (bool, error) {
 	payload, body, err := mapRecord(src, env)
 	if err != nil {
-		return false, err
+		return false, bad(err)
 	}
 	dedup, err := dedupKey(def.Spec, payload, body)
 	if err != nil {
-		return false, err
+		return false, bad(err)
 	}
 	t, err := r.Tasks.FindByDedupKey(ctx, def.Key+":"+dedup)
-	if err != nil || t == nil || t.Status.IsTerminal() || t.RunID == 0 {
+	if err != nil || t == nil || t.Status.IsTerminal() {
 		return false, err
 	}
-	return true, r.Runs.Cancel(ctx, t.RunID, "source:"+src.ID, "close_when matched in "+schedule)
+	reason := "close_when matched in " + schedule
+	if t.RunID == 0 {
+		return true, r.Tasks.AutoClose(ctx, t.ID, reason)
+	}
+	return true, r.Runs.Cancel(ctx, t.RunID, "source:"+src.ID, reason)
 }
 
 func mapRecord(src *spec.Source, env expr.Env) (map[string]any, []byte, error) {
@@ -246,18 +294,18 @@ func mapRecord(src *spec.Source, env expr.Env) (map[string]any, []byte, error) {
 func (r *CronRunner) ingest(ctx context.Context, def *engine.Definition, src *spec.Source, env expr.Env) (bool, error) {
 	payload, body, err := mapRecord(src, env)
 	if err != nil {
-		return false, err
+		return false, bad(err)
 	}
 	vs, err := apischema.ValidatePayload(def.Spec.Schema, body)
 	if err != nil {
-		return false, err
+		return false, bad(err)
 	}
 	if len(vs) > 0 {
-		return false, fmt.Errorf("payload does not match schema: /%s %s", strings.Join(vs[0].Location, "/"), vs[0].Message)
+		return false, bad(fmt.Errorf("payload does not match schema: /%s %s", strings.Join(vs[0].Location, "/"), vs[0].Message))
 	}
 	dedup, err := dedupKey(def.Spec, payload, body)
 	if err != nil {
-		return false, err
+		return false, bad(err)
 	}
 	t, created, err := r.Tasks.Create(ctx, task.CreateCmd{
 		TaskType: def.Key, TypeVersion: def.Version, SubjectType: def.Key, SubjectID: dedup,
@@ -269,8 +317,9 @@ func (r *CronRunner) ingest(ctx context.Context, def *engine.Definition, src *sp
 	if t.RunID != 0 || t.Status.IsTerminal() {
 		return created, nil
 	}
+	// 只提交启动，不就地推进：一次扫描可能启动很多 run，由同一次 tick 随后的 ProcessDue 并行执行。
 	run, _, err := r.Runs.StartRun(ctx, engine.StartRunCmd{
-		PlanKey: def.Key, PlanVersion: def.Version, BizKey: fmt.Sprintf("task:%d", t.ID),
+		PlanKey: def.Key, PlanVersion: def.Version, BizKey: fmt.Sprintf("task:%d", t.ID), Defer: true,
 		Vars: engine.Vars{Payload: body, Task: engine.TaskRef{ID: t.ID, Type: def.Key, Priority: def.Spec.Priority()}},
 	})
 	if err != nil {

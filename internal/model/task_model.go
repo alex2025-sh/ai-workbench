@@ -22,6 +22,8 @@ type (
 		ApplySync(ctx context.Context, id uint64, status int64, assignee, group, node, resolution string, snoozeUntil sql.NullTime, seq int64) (bool, error)
 		// SetRun 记录驱动任务的 run（只在尚未设置时写入）。
 		SetRun(ctx context.Context, id, runID uint64) error
+		// CloseUnstarted 关闭尚未启动 run、尚未完结的任务。
+		CloseUnstarted(ctx context.Context, id uint64, status int64, resolution string) error
 	}
 
 	customTaskModel struct {
@@ -56,6 +58,12 @@ func (m *customTaskModel) FindOneForUpdate(ctx context.Context, id uint64) (*Tas
 func (m *customTaskModel) ApplySync(ctx context.Context, id uint64, status int64, assignee, group, node, resolution string, snoozeUntil sql.NullTime, seq int64) (bool, error) {
 	query := fmt.Sprintf("update %s set `status` = ?, `assignee_id` = ?, `assignee_group` = ?, `current_node` = ?, `resolution` = ?, `snooze_until` = ?, `seq` = ?, `version` = `version` + 1 where `id` = ? and `seq` < ?", m.table)
 	return affected(m.conn.ExecCtx(ctx, query, status, assignee, group, node, resolution, snoozeUntil, seq, id, seq))
+}
+
+func (m *customTaskModel) CloseUnstarted(ctx context.Context, id uint64, status int64, resolution string) error {
+	query := fmt.Sprintf("update %s set `status` = ?, `resolution` = ?, `version` = `version` + 1 where `id` = ? and `run_id` = 0 and `status` < ?", m.table)
+	_, err := m.conn.ExecCtx(ctx, query, status, resolution, id, status)
+	return err
 }
 
 func (m *customTaskModel) SetRun(ctx context.Context, id, runID uint64) error {

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alex2025-sh/ai-workbench/internal/action"
@@ -23,7 +24,19 @@ type Options struct {
 	MaxExecCount int           // 单个 run 的节点执行次数上限，默认 500，超出进入人工干预
 	MaxFailCount int           // job 处理失败（加载、提交出错）的次数上限，默认 5，超出后隔离
 	MaxClaims    int           // job 的认领次数上限，默认 30（高于重试上限 20），超出后隔离，防止反复崩溃
+
+	// 就地推进的边界：一次推进最多执行 DriveBudget 个 job（默认 100），同时最多 DriveParallelism 个（默认 4）；
+	// 超出预算的 job 留在表里由 tick 接着执行。
+	DriveBudget      int
+	DriveParallelism int
+	// BackgroundLimit 是同时进行的后台推进数上限（默认 64），满了就不再起后台推进，留给 tick。
+	BackgroundLimit int
+	// BackgroundTimeout 是一次后台推进的时长上限（默认 10 分钟）。
+	BackgroundTimeout time.Duration
 }
+
+// effectPolicy 是 effect job 的重试策略：外部系统（如 Lark）短暂不可用时多等一会儿，约 30 分钟后放弃。
+var effectPolicy = dsl.RetryPolicy{InitialInterval: dsl.Duration(2 * time.Second), BackoffCoefficient: 2, MaxInterval: dsl.Duration(5 * time.Minute), MaxAttempts: 10}
 
 // 节点单次执行的超时：skill_call / llm 可在配置中覆盖，上限 MaxActionTimeout。
 const (
@@ -68,6 +81,12 @@ type Engine struct {
 	opts    Options
 
 	afterClaim func(Job) // 仅测试使用：认领成功后、处理前调用，用于构造交错
+
+	// 后台推进（见 driveLater）：有并发上限，进程退出时由 Close 等待或取消。
+	bgSem  chan struct{}
+	bgWG   sync.WaitGroup
+	bgCtx  context.Context
+	bgStop context.CancelFunc
 }
 
 // New 创建引擎。
@@ -87,7 +106,21 @@ func New(store *Store, plans PlanSource, execs Executors, actions Invoker, clock
 	if opts.MaxClaims <= 0 {
 		opts.MaxClaims = 30
 	}
-	return &Engine{store: store, plans: plans, execs: execs, actions: actions, clock: clock, opts: opts}
+	if opts.DriveBudget <= 0 {
+		opts.DriveBudget = 100
+	}
+	if opts.DriveParallelism <= 0 {
+		opts.DriveParallelism = 4
+	}
+	if opts.BackgroundLimit <= 0 {
+		opts.BackgroundLimit = 64
+	}
+	if opts.BackgroundTimeout <= 0 {
+		opts.BackgroundTimeout = 10 * time.Minute
+	}
+	bg, stop := context.WithCancel(context.Background())
+	return &Engine{store: store, plans: plans, execs: execs, actions: actions, clock: clock, opts: opts,
+		bgSem: make(chan struct{}, opts.BackgroundLimit), bgCtx: bg, bgStop: stop}
 }
 
 // Store 返回底层存储，供查询使用。
@@ -135,8 +168,9 @@ type runState struct {
 	dirty map[string]bool
 	jobs  []Job // 本事务新插入的 job，提交后派发
 
-	sync    string // 非空时提交前插入一个 sync_task job，目标状态见 Sync*
-	current string // 任务当前所处的节点
+	sync       string // 非空时提交前插入一个 sync_task job，目标状态见 Sync*
+	reassigned bool   // 本次推进明确分配了处理人（节点确定处理人，或有人做了决定）
+	current    string // 任务当前所处的节点
 }
 
 func (e *Engine) load(ctx context.Context, t *tx, runID int64) (*runState, error) {
@@ -199,6 +233,7 @@ func (s *runState) assign(nodeID string, a *Assignment) {
 		return
 	}
 	s.run.Vars.Task.Assignee, s.run.Vars.Task.Group = a.Assignee, a.Group
+	s.reassigned = true
 	if a.Assignee != "" {
 		s.run.Vars.Task.Group = ""
 		s.sync = SyncPending
@@ -297,7 +332,7 @@ func (s *runState) commit() error {
 	}
 	if s.sync != "" && s.run.Vars.Task.ID != 0 {
 		p := SyncPayload{
-			TaskID: s.run.Vars.Task.ID, Status: s.sync, Assignee: s.run.Vars.Task.Assignee, Group: s.run.Vars.Task.Group,
+			TaskID: s.run.Vars.Task.ID, Status: s.sync, Reassign: s.reassigned, Assignee: s.run.Vars.Task.Assignee, Group: s.run.Vars.Task.Group,
 			CurrentNode: s.current, Seq: s.run.Version,
 		}
 		if s.sync == SyncSolved {
@@ -380,7 +415,9 @@ func (e *Engine) StartRun(ctx context.Context, cmd StartRunCmd) (Run, bool, erro
 		}
 		return Run{}, false, err
 	}
-	e.drive(ctx, jobs)
+	if !cmd.Defer {
+		e.drive(ctx, jobs)
+	}
 	return started, true, nil
 }
 
@@ -399,6 +436,8 @@ func (e *Engine) process(ctx context.Context, job Job) ([]Job, error) {
 		return e.fire(ctx, job)
 	case JobSyncTask:
 		return nil, e.syncTask(ctx, job)
+	case JobEffect:
+		return e.effect(ctx, job)
 	default:
 		_, err := e.store.jobs.Finish(ctx, uint64(job.ID), job.Owner, int64(job.Attempt), string(JobCancelled), "unsupported job kind "+string(job.Kind))
 		return nil, err
@@ -509,6 +548,9 @@ func (e *Engine) execute(ctx context.Context, job Job) ([]Job, error) {
 		if err := t.finishJob(job, JobDone, ""); err != nil {
 			return err
 		}
+		if err := s.addEffects(job.NodeID, ec.IdemKey, ec.Run.DryRun, res.Effects); err != nil {
+			return err
+		}
 		if res.Wait != nil {
 			if err := s.wait(job.NodeID, res); err != nil {
 				return err
@@ -529,6 +571,92 @@ func (e *Engine) execute(ctx context.Context, job Job) ([]Job, error) {
 		return nil, nil
 	}
 	return jobs, err
+}
+
+// addEffects 把节点的外部动作落成 effect job，与节点结果同事务提交。
+func (s *runState) addEffects(nodeID, idemKey string, dryRun bool, effects []Effect) error {
+	for _, ef := range effects {
+		b, err := json.Marshal(EffectPayload{
+			Kind: string(ef.Kind), Config: ef.Config, Input: ef.Input, IdemKey: idemKey + ef.Key, DryRun: dryRun, WhileWaiting: ef.WhileWaiting,
+		})
+		if err != nil {
+			return err
+		}
+		if err := s.addJob(nodeID, JobEffect, s.now, b, ef.Key); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// effect 执行一个 effect job。节点已不在等待（已被点击、超时或 run 已结束）且要求 WhileWaiting 时跳过。
+// 失败按 effectPolicy 退避重试；用尽后 job 置为 failed，run 转为人工干预——处理人没收到卡片，流程不能静默等待。
+func (e *Engine) effect(ctx context.Context, job Job) ([]Job, error) {
+	var p EffectPayload
+	if err := json.Unmarshal(job.Payload, &p); err != nil {
+		return nil, fmt.Errorf("effect payload: %w", err)
+	}
+	if p.WhileWaiting {
+		v, err := e.store.GetRun(ctx, job.RunID)
+		if err != nil {
+			return nil, err
+		}
+		waiting := false
+		for _, n := range v.Nodes {
+			if n.NodeID == job.NodeID && n.Iteration == job.Iteration && n.Status == NodeWaiting {
+				waiting = true
+			}
+		}
+		if v.Run.Status != RunRunning || !waiting {
+			_, err := e.store.jobs.Finish(ctx, uint64(job.ID), job.Owner, int64(job.Attempt), string(JobCancelled), "node no longer waiting")
+			return nil, err
+		}
+	}
+	ectx, cancel := context.WithTimeout(ctx, DefaultActionTimeout)
+	res, callErr := e.actions.InvokeAction(ectx, action.Request{Kind: action.Kind(p.Kind), Config: p.Config, Input: p.Input, IdemKey: p.IdemKey, DryRun: p.DryRun})
+	cancel()
+	if callErr == nil {
+		if ok, err := e.store.jobs.Finish(ctx, uint64(job.ID), job.Owner, int64(job.Attempt), string(JobDone), ""); err != nil || !ok {
+			return nil, err
+		}
+		return nil, e.store.Tx(ctx, func(t *tx) error {
+			return t.event(job.RunID, job.NodeID, job.Iteration, "effect_done", "", map[string]any{"kind": p.Kind, "output": json.RawMessage(nullIfEmpty(res.Output))})
+		})
+	}
+	msg := callErr.Error()
+	if Retryable(effectPolicy, callErr, false) && job.Attempt < effectPolicy.MaxAttempts {
+		_, err := e.store.jobs.Release(ctx, uint64(job.ID), job.Owner, int64(job.Attempt), e.clock.Now().Add(backoff(effectPolicy, job.Attempt)), msg)
+		return nil, err
+	}
+	err := e.store.Tx(ctx, func(t *tx) error {
+		s, err := e.load(ctx, t, job.RunID)
+		if err != nil {
+			return err
+		}
+		if err := t.finishJob(job, JobFailed, msg); err != nil {
+			return err
+		}
+		if err := s.event(job.NodeID, "effect_failed", "", map[string]any{"kind": p.Kind, "error": msg, "attempt": job.Attempt}); err != nil {
+			return err
+		}
+		if s.run.Status == RunRunning {
+			if err := s.needsIntervention(job.NodeID, "effect "+p.Kind+" failed: "+msg); err != nil {
+				return err
+			}
+		}
+		return s.commit()
+	})
+	if errors.Is(err, errLostLease) {
+		return nil, nil
+	}
+	return nil, err
+}
+
+func nullIfEmpty(b json.RawMessage) json.RawMessage {
+	if len(b) == 0 {
+		return json.RawMessage("null")
+	}
+	return b
 }
 
 // wait 让节点进入等待并插入对应的定时 job。
@@ -772,6 +900,10 @@ func (e *Engine) Signal(ctx context.Context, cmd SignalCmd) (SignalResult, error
 		}
 		prev, _ := expr.Decode([]byte(nullOr(r.Output)))
 		out, _ := json.Marshal(map[string]any{"option": cmd.Option, "form": cmd.Form, "actor": cmd.Actor, "assignment": prev})
+		// 做决定的人成为任务的处理人：组任务没人认领时也能记下是谁处理的。
+		if cmd.Actor != "" {
+			s.assign(cmd.NodeID, &Assignment{Assignee: cmd.Actor})
+		}
 		if err := s.complete(cmd.NodeID, cmd.Option, out); err != nil {
 			return err
 		}
@@ -782,7 +914,11 @@ func (e *Engine) Signal(ctx context.Context, cmd SignalCmd) (SignalResult, error
 		return nil
 	})
 	if err == nil {
-		e.drive(ctx, jobs)
+		if cmd.Async {
+			e.driveLater(ctx, jobs)
+		} else {
+			e.drive(ctx, jobs)
+		}
 	}
 	return result, err
 }

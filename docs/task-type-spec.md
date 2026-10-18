@@ -71,7 +71,7 @@
 
 除 `error` 外，每个端口都必须有连线。
 
-**超时与重试**：`skill_call`、`llm` 的 `timeout` 是单次执行超时，默认分别为 30 秒、2 分钟，上限 10 分钟，超时按错误码 `timeout` 失败。节点可以配置 `retry` 覆盖默认重试策略；`non_retryable_errors` 列出不重试的错误码，平台内置 `timeout`、`unknown_skill`，skill 也可以返回自己的错误码。重试耗尽后有 `error` 端口则走它，节点输出为 `{ error, code }`，否则 run 进入人工干预。节点配置表单可以用 `wbctl node-types` 或 `CatalogService.ListNodeTypes` 拿到每种节点的独立配置 schema。
+**超时与重试**：`skill_call`、`llm` 的 `timeout` 是单次执行超时，默认分别为 30 秒、2 分钟，上限 10 分钟，超时按错误码 `timeout` 失败。节点可以配置 `retry` 覆盖默认重试策略；`non_retryable_errors` 列出不重试的错误码，平台内置 `timeout`、`unknown_skill`，skill 也可以返回自己的错误码。重试耗尽后有 `error` 端口则走它，节点输出为 `{ error, code }`，否则 run 进入人工干预。`human_choice` 的 `timeout` 从节点进入等待算起，卡片在进入等待之后发送。节点配置表单可以用 `wbctl node-types` 或 `CatalogService.ListNodeTypes` 拿到每种节点的独立配置 schema。
 
 ## 连线
 
@@ -84,9 +84,13 @@
 | `kind` | `cron`（平台按 `schedule` 调用查询 `skill` 增量扫描）/ `kafka` / `api`（生产方按标准信封投递 `event_type`） |
 | `mapping` | payload 字段 → 表达式（基于 `record`），映射结果按 `schema` 校验 |
 | `filter` | 为 true 的记录创建任务；同一 `dedup_key` 的任务已存在时跳过 |
-| `close_when` | 为 true 的记录按 `dedup_key` 找到未完结的任务，取消它的 run，任务以 `auto_closed` 完结；先于 `filter` 求值，需要配置 `dedup_key` |
+| `close_when` | 为 true 的记录按 `dedup_key` 找到未完结的任务，取消它的 run，任务以 `auto_closed` 完结（run 尚未启动时直接关闭任务）；先于 `filter` 求值，需要配置 `dedup_key` |
 
 `close_when` 让外部状态变化直接推动流程：比如工单在中途审核完成，扫描到状态变化就结束提醒，不必等到下一个定时检查点。
+
+**去重键要能区分“同一件事的不同轮次”**。同一去重键的任务已完结后，再扫描到也不会建新任务。工单被驳回后重新提交属于一次新的审核，所以 VIP 示例的去重键是 `{{ payload.appeal_id }}:{{ payload.commit_time_ms }}`；审核通过等状态变化不改变提交时间，`close_when` 仍能按同一个键找到任务。
+
+**扫描的可靠性**：单条记录映射、校验或表达式求值失败时跳过并计数；数据库等暂时性失败会停止本次扫描、保留游标，下次重扫。内置的 appeal 扫描只读取 `lag_seconds`（默认 60 秒）之前更新的行，覆盖长事务与从库延迟。
 
 ## view 与 assignment 的引用和继承
 

@@ -52,7 +52,18 @@ const (
 	JobWake     JobKind = "wake"
 	JobTimer    JobKind = "timer"
 	JobSyncTask JobKind = "sync_task" // 事务外发：把节点事件投影到任务中心
+	JobEffect   JobKind = "effect"    // 事务外发：节点状态提交后才执行的外部动作，如人工节点的卡片
 )
+
+// EffectPayload 是 effect job 的参数。
+type EffectPayload struct {
+	Kind         string          `json:"kind"`
+	Config       json.RawMessage `json:"config,omitempty"`
+	Input        json.RawMessage `json:"input,omitempty"`
+	IdemKey      string          `json:"idem_key"`
+	DryRun       bool            `json:"dry_run,omitempty"`
+	WhileWaiting bool            `json:"while_waiting,omitempty"` // 只在节点仍在等待时执行（如人工节点的卡片）
+}
 
 // JobStatus 是 job 的状态。
 type JobStatus string
@@ -132,7 +143,8 @@ func IdemKey(runID int64, nodeID string, iteration int, kind JobKind) string {
 // SyncPayload 是 sync_task job 的参数，交给任务中心按 seq 幂等应用。
 type SyncPayload struct {
 	TaskID      int64      `json:"task_id"`
-	Status      string     `json:"status"` // unassigned / pending / snoozed / solved
+	Status      string     `json:"status"`             // unassigned / pending / snoozed / solved
+	Reassign    bool       `json:"reassign,omitempty"` // 本次推进明确分配了处理人；否则任务中心保留现有处理人
 	Assignee    string     `json:"assignee,omitempty"`
 	Group       string     `json:"group,omitempty"`
 	CurrentNode string     `json:"current_node,omitempty"`

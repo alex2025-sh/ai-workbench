@@ -65,8 +65,22 @@ type NodeResult struct {
 	Output     json.RawMessage
 	Wait       *WaitSpec
 	Assignment *Assignment
+	Effects    []Effect // 节点结果提交之后才执行的外部动作
 	Err        error
 	Permanent  bool
+}
+
+// Effect 是一个要在节点结果提交之后执行的外部动作。它与节点结果在同一事务里落成 effect job，
+// 提交后立即执行，失败按退避重试。
+//
+// 人工节点的卡片走这条路：先提交 waiting，再发卡片。这样处理人看到卡片时节点一定已在等待，点击不会被误拒；
+// 发送失败也只重试发送，不会重新执行整个节点。
+type Effect struct {
+	Kind         action.Kind
+	Config       json.RawMessage
+	Input        json.RawMessage
+	Key          string // 幂等键后缀，与节点的幂等键拼成外部动作的幂等键
+	WhileWaiting bool   // 只在节点仍在等待时执行
 }
 
 // WaitSpec 描述节点进入 waiting 时需要插入的定时 job。
@@ -93,6 +107,9 @@ type StartRunCmd struct {
 	BizKey      string
 	Vars        Vars
 	DryRun      bool
+	// Defer 为 true 时只提交启动，不就地推进：新就绪的 job 由随后的 tick 并行执行。
+	// cron 来源一次扫描可能启动很多 run，逐个就地推进会把 tick 拖长。
+	Defer bool
 }
 
 // SignalCmd 是外部对等待中人工节点的输入。调用方（API 层）负责先按任务表鉴权。
@@ -103,6 +120,8 @@ type SignalCmd struct {
 	Option    string
 	Form      map[string]string
 	Actor     string
+	// Async 为 true 时信号提交后立即返回，后续推进在后台进行（Lark 回调要求 3 秒内响应）。
+	Async bool
 }
 
 // SignalResult 对应 Temporal Update 的语义：先校验，不通过直接拒绝并返回原因。
