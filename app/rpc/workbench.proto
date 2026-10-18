@@ -724,7 +724,7 @@ message RunIdReq {
 message NodeView {
   string node_id = 1;
   int32 iteration = 2;
-  string status = 3;  // pending / ready / running / waiting / succeeded / skipped / failed
+  string status = 3;  // pending / ready / running / waiting / succeeded / skipped / failed / cancelled（run 被取消时进行中的节点）
   string port = 4;
   int32 attempt = 5;
   int64 started_at = 6;

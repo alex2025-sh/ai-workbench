@@ -97,7 +97,7 @@ wf_run (
 wf_node_run (
   run_id, node_id,
   iteration INT DEFAULT 0,          -- v1 恒为 0，为受控的环预留
-  status,                           -- pending / ready / running / waiting / succeeded / skipped / failed
+  status,                           -- pending / ready / running / waiting / succeeded / skipped / failed / cancelled
   port,                             -- 节点完成时选中的输出端口
   output JSON,                      -- 大输出只存引用
   attempt INT, wait_until, started_at, finished_at,
@@ -450,7 +450,22 @@ xxl-job 只通知一台机器，解决的是 ticker 不重复触发；这里防�
 
 不可重试的错误按**错误码**匹配：动作以带错误码的错误返回（`action.Error`），平台内置 `timeout`（超过单次执行超时）与 `unknown_skill`。错误码在 `non_retryable_errors` 中、或执行器判定为确定性错误（如表达式错误）时，不再重试。节点失败的输出带 `error` 与 `code`，`error` 端口之后的节点可以按错误码分支。
 
-重试耗尽后：节点有 `error` 端口则走 `error` 端口；否则 run 进入 `needs_intervention`，运维可选择重试该节点、跳过（指定端口）或终止 run。所有人工干预写入 `wf_event`。
+重试耗尽后：节点有 `error` 端口则走 `error` 端口；否则 run 进入 `needs_intervention`，运维可选择重试该节点、跳过（指定端口）或终止 run。所有人工干预写入 `wf_event`，带操作人与原因。
+
+### 运行干预
+
+| 操作 | 条件 | 效果 |
+| --- | --- | --- |
+| 重试节点 `RetryNode` | run 为 `needs_intervention`；节点失败，或节点有失败的 job（卡片发送失败、处理出错被隔离） | 失败的节点退回就绪、执行次数清零（重试策略重新生效）；然后恢复 run |
+| 跳过节点 `SkipNode` | run 运行中或 `needs_intervention`；节点就绪、执行中、等待中或失败；端口是该节点的合法输出端口 | 撤销节点尚未执行的 job，节点以该端口完成并传播；run 暂停时同时恢复。执行中的那次结果提交时被丢弃 |
+| 取消 `Cancel` | run 未结束 | 撤销尚未执行的 job，进行中（就绪、执行中、等待中）的节点置为 `cancelled`，任务以 `auto_closed` 完结 |
+
+暂停期间 run 的其他 job 不会等待：执行 job 被判为过期撤销，定时到期时节点已不算“等待中”而作废，卡片 effect 也被撤销；正在执行的节点结果提交时被丢弃，停在 `running`。所以恢复（重试或跳过 `needs_intervention` 的 run）不只是把状态改回 `running`，而是按节点状态补回这些工作：
+
+- 就绪或执行中的节点：确保有待执行的 execute job；仍被认领的旧 job 撤销（那次执行的结果提交时因认领失效而丢弃），节点退回就绪重新执行；
+- 等待中的节点：作废的定时按原到期时间补回（已过期则立即触发），被撤销或失败的卡片 effect 立即补回。
+
+补回的是新 job，幂等键带上被替代的 job id（`:r<id>`），执行次数与认领凭证从头开始，旧 job 保持原状（`wf_job` 只插入或按主键更新）。没有锚点的定时节点如果在暂停时正执行到一半，补回后会从恢复时重新计时。
 
 ### 幂等
 

@@ -284,8 +284,9 @@ func TestCancel(t *testing.T) {
 	e.clock.Advance(2 * time.Hour)
 	e.tick(en)
 	status, nodes := nodeStatus(t, en, run.ID)
-	if status != engine.RunCancelled || nodes["done"].Status != engine.NodePending {
-		t.Fatalf("status=%s done=%s", status, nodes["done"].Status)
+	// 进行中的节点标为 cancelled；还没走到的节点保持 pending。
+	if status != engine.RunCancelled || nodes["wait"].Status != engine.NodeCancelled || nodes["done"].Status != engine.NodePending {
+		t.Fatalf("status=%s wait=%s done=%s", status, nodes["wait"].Status, nodes["done"].Status)
 	}
 }
 

@@ -57,6 +57,7 @@ export const nodeStatusLabel: Record<string, string> = {
   succeeded: '已完成',
   skipped: '已跳过',
   failed: '失败',
+  cancelled: '已取消',
 };
 
 /** 把 Unix 毫秒（int64 字符串）格式化为本地时间；0 或空为「—」。 */

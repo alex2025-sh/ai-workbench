@@ -4991,7 +4991,7 @@ type NodeView struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
 	Iteration     int32                  `protobuf:"varint,2,opt,name=iteration,proto3" json:"iteration,omitempty"`
-	Status        string                 `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"` // pending / ready / running / waiting / succeeded / skipped / failed
+	Status        string                 `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"` // pending / ready / running / waiting / succeeded / skipped / failed / cancelled（run 被取消时进行中的节点）
 	Port          string                 `protobuf:"bytes,4,opt,name=port,proto3" json:"port,omitempty"`
 	Attempt       int32                  `protobuf:"varint,5,opt,name=attempt,proto3" json:"attempt,omitempty"`
 	StartedAt     int64                  `protobuf:"varint,6,opt,name=started_at,json=startedAt,proto3" json:"started_at,omitempty"`

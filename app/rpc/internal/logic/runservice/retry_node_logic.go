@@ -7,8 +7,6 @@ import (
 	"github.com/alex2025-sh/ai-workbench/app/rpc/pb"
 
 	"github.com/zeromicro/go-zero/core/logx"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 type RetryNodeLogic struct {
@@ -27,5 +25,12 @@ func NewRetryNodeLogic(ctx context.Context, svcCtx *svc.ServiceContext) *RetryNo
 
 // 人工干预：重试节点
 func (l *RetryNodeLogic) RetryNode(in *pb.AdminNodeReq) (*pb.Empty, error) {
-	return nil, status.Error(codes.Unimplemented, "not implemented")
+	actor, err := adminActor(l.ctx, l.svcCtx, in.Reason)
+	if err != nil {
+		return nil, err
+	}
+	if err := l.svcCtx.Engine.RetryNode(l.ctx, in.RunId, in.NodeId, actor, in.Reason); err != nil {
+		return nil, interveneError(err, in.RunId)
+	}
+	return &pb.Empty{}, nil
 }

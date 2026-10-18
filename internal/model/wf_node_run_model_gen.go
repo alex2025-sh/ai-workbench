@@ -42,7 +42,7 @@ type (
 		RunId      uint64         `db:"run_id"`
 		NodeId     string         `db:"node_id"`
 		Iteration  int64          `db:"iteration"` // v1 恒为 0，为受控的环预留
-		Status     string         `db:"status"`    // pending / ready / running / waiting / succeeded / skipped / failed
+		Status     string         `db:"status"`    // pending / ready / running / waiting / succeeded / skipped / failed / cancelled
 		Port       string         `db:"port"`      // 完成时选中的输出端口
 		Output     sql.NullString `db:"output"`    // 节点输出；大输出只存引用
 		Attempt    int64          `db:"attempt"`   // 本轮的执行次数（含租约到期的执行），与重试策略的 max_attempts 比较

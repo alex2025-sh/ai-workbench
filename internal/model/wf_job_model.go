@@ -25,6 +25,8 @@ type (
 		FindDue(ctx context.Context, now time.Time, limit int) ([]*WfJob, error)
 		// FindPendingByRun 返回一个 run 中尚未结束的 job，按 id 排序。
 		FindPendingByRun(ctx context.Context, runID uint64) ([]*WfJob, error)
+		// FindByRun 返回一个 run 的全部 job（含已结束的），按 id 排序。运行干预恢复 run 时用来找回暂停期间被消耗的 job。
+		FindByRun(ctx context.Context, runID uint64) ([]*WfJob, error)
 	}
 
 	customWfJobModel struct {
@@ -72,6 +74,13 @@ func (m *customWfJobModel) FindDue(ctx context.Context, now time.Time, limit int
 
 func (m *customWfJobModel) FindPendingByRun(ctx context.Context, runID uint64) ([]*WfJob, error) {
 	query := fmt.Sprintf("select %s from %s where `run_id` = ? and `status` = 'pending' order by `id`", wfJobRows, m.table)
+	var resp []*WfJob
+	err := m.conn.QueryRowsCtx(ctx, &resp, query, runID)
+	return resp, err
+}
+
+func (m *customWfJobModel) FindByRun(ctx context.Context, runID uint64) ([]*WfJob, error) {
+	query := fmt.Sprintf("select %s from %s where `run_id` = ? order by `id`", wfJobRows, m.table)
 	var resp []*WfJob
 	err := m.conn.QueryRowsCtx(ctx, &resp, query, runID)
 	return resp, err

@@ -40,6 +40,10 @@ export const runApi = {
   get: (run_id: string) => call<RunView>('run/get', { run_id }),
   events: (run_id: string, page?: PageReq) => call<RunEventsResp>('run/events', { run_id, page }),
   cancel: (run_id: string, reason: string) => call<Record<string, never>>('run/cancel', { run_id, reason }),
+  retryNode: (run_id: string, node_id: string, reason: string) =>
+    call<Record<string, never>>('run/node/retry', { run_id, node_id, reason }),
+  skipNode: (run_id: string, node_id: string, port: string, reason: string) =>
+    call<Record<string, never>>('run/node/skip', { run_id, node_id, port, reason }),
 };
 
 export const taskTypeApi = {
