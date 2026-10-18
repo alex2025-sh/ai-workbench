@@ -47,7 +47,7 @@ CREATE TABLE `wf_node_run` (
   `run_id`      bigint unsigned NOT NULL,
   `node_id`     varchar(64)  NOT NULL,
   `iteration`   int          NOT NULL DEFAULT 0 COMMENT 'v1 恒为 0，为受控的环预留',
-  `status`      varchar(32)  NOT NULL COMMENT 'pending / ready / running / waiting / succeeded / skipped / failed',
+  `status`      varchar(32)  NOT NULL COMMENT 'pending / ready / running / waiting / succeeded / skipped / failed / cancelled',
   `port`        varchar(64)  NOT NULL DEFAULT '' COMMENT '完成时选中的输出端口',
   `output`      json         NULL COMMENT '节点输出；大输出只存引用',
   `attempt`     int          NOT NULL DEFAULT 0 COMMENT '本轮的执行次数（含租约到期的执行），与重试策略的 max_attempts 比较',

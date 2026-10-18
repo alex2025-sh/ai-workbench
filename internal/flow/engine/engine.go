@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -371,7 +372,8 @@ func (s *runState) applySignal(cmd SignalCmd) SignalResult {
 	return SignalResult{Accepted: true}
 }
 
-// Cancel 取消 run：撤销尚未执行的节点与定时，任务置为 solved（auto_closed）。已结束的 run 不受影响。
+// Cancel 取消 run：撤销尚未执行的节点与定时，进行中（就绪、执行中、等待中）的节点置为 cancelled，
+// 任务置为 solved（auto_closed）。已结束的 run 不受影响。
 func (e *Engine) Cancel(ctx context.Context, runID int64, actor, reason string) error {
 	_, jobs, err := update(ctx, e, runID, 0, func(s *runState) (struct{}, error) {
 		if s.run.Status.Terminal() {
@@ -379,6 +381,15 @@ func (e *Engine) Cancel(ctx context.Context, runID int64, actor, reason string) 
 		}
 		s.setRunStatus(RunCancelled)
 		s.cancelJobs("", graphJobs...)
+		for _, id := range s.def.Plan.Order {
+			switch NodeStatus(s.nodes[id].Status) {
+			case NodeReady, NodeRunning, NodeWaiting:
+				s.setNode(id, NodeCancelled, func(r *model.WfNodeRun) {
+					r.FinishedAt = s.at()
+					r.WaitUntil = sql.NullTime{}
+				})
+			}
+		}
 		s.sync = SyncSolved
 		s.event("", "run_cancelled", actor, map[string]any{"reason": reason})
 		return struct{}{}, nil

@@ -21,7 +21,7 @@
 | 二期 | 任务类型编辑：Monaco + JSON Schema 校验、Issue 面板、试运行、卡片预览、来源试跑；组件库；AI 生成草稿入口（草稿走同一编译器校验） |
 | 三期 | React Flow 画布：设计态与运行态；试运行路径叠加；语义化 workflow 差异 |
 
-demo 不含变更集：变更集、审批后端尚未实现，demo 也没有草稿编辑器，页面没有数据。`sla_status` 还没有更新逻辑，放在一期。一期中认领、开始处理、调整优先级、转派与取消运行已实现，重试、跳过节点待实现。
+demo 不含变更集：变更集、审批后端尚未实现，demo 也没有草稿编辑器，页面没有数据。`sla_status` 还没有更新逻辑，放在一期。一期中认领、开始处理、调整优先级、转派与运行干预（取消运行、重试节点、跳过节点）已实现。
 
 ### demo 的运行方式
 
@@ -153,7 +153,11 @@ demo 不含变更集：变更集、审批后端尚未实现，demo 也没有草�
 | 列表 | `ListRuns({task_id, biz_key, status, task_type_key, created_after, created_before, page})` |
 | 详情 | `GetRun`（`nodes[]`、`graph_json`） |
 | 事件时间线 | `GetRunEvents` |
-| 重试、跳过、取消 | `RetryNode`、`SkipNode`（选端口并填原因）、`CancelRun`；均需二次确认 + 必填原因 |
+| 重试、跳过、取消 | `RetryNode`、`SkipNode`（选端口并填原因）、`CancelRun`；均需 `run.admin`，二次确认 + 必填原因 |
+
+- 重试：run 为「需人工介入」时，失败的节点，以及卡片发送失败而仍在等待的人工节点显示「重试」。
+- 跳过：就绪、执行中、等待中或失败的节点显示「跳过」，出口取自 `graph_json` 中从该节点连出的边。
+- 取消后进行中的节点状态为 `cancelled`，显示「已取消」。语义见 `docs/workflow-engine.md`「运行干预」。
 
 - 列表顶部放「需人工介入」快捷过滤和数量角标：`needs_intervention` 目前不同步到任务中心，不看这里没人会发现。
 - 一期详情是节点状态表加时间线；三期换成运行态画布，按 `NodeView.status` 着色。

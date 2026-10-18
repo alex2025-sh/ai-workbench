@@ -39,6 +39,7 @@ const (
 	NodeSucceeded NodeStatus = "succeeded"
 	NodeSkipped   NodeStatus = "skipped"
 	NodeFailed    NodeStatus = "failed"
+	NodeCancelled NodeStatus = "cancelled" // run 被取消时尚未完成（就绪、执行中、等待中）的节点
 )
 
 // Concluded 报告节点在本轮是否已有结论（成功或跳过）。
