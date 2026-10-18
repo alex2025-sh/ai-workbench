@@ -31,7 +31,10 @@ demo 不含变更集：变更集、审批后端尚未实现，demo 也没有草�
 - 把请求头 `X-Dev-User` 写入 gRPC metadata，模拟 gateway 的身份注入。
 - 前端顶部放「切换身份」下拉（RM、候选组成员、运维、管理员），身份取自 `deploy/mock` 的人员关系；BSP 选人与姓名解析在 demo 中也读这份 mock。
 
-gateway 接入后 devgw 不再使用，前端只换 base URL。
+- 错误返回 `{"code": "<gRPC 状态码名>", "message": "..."}`，HTTP 状态码与 grpc-gateway 的默认映射一致（如 `NotFound` → 404、`Unauthenticated` → 401、`Unimplemented` → 501）；`Signal` 被拒绝不是错误，HTTP 200 + `accepted=false`。
+- 开发专用的 `GET /dev/users` 列出 mock 中的人员、角色与所属组，供「切换身份」使用。
+
+启动：`go run ./app/rpc -f app/rpc/etc/workbench.yaml` 与 `go run ./cmd/devgw`（默认 `127.0.0.1:8088`）。gateway 接入后 devgw 不再使用，前端只换 base URL。
 
 ## 二、路由
 
@@ -241,6 +244,7 @@ Issue 面板（底部抽屉，各页共用）：
 
 API 客户端层统一处理，业务代码不接触原始编码。以下按 proto3 标准 JSON 映射（protojson，devgw 即按此实现）编写，**公司 gateway 的实际行为待确认**；如有差异只改客户端层：
 
+- 字段名为 proto 中的 snake_case（`run_id`、`pending_action`），零值字段也会输出（devgw 使用 `UseProtoNames`、`EmitUnpopulated`）。
 - `bytes` 字段在 JSON 中是 base64，客户端封装 `decodeJson`、`encodeJson`；金额等字段保持字符串，解析用 `json-bigint` 或保留字符串，不转 number。
 - `int64`（`id`、`run_id`、`revision`、所有时间戳）在 JSON 中是**字符串**，前端一律按字符串处理和比较；时间戳是 Unix 毫秒。
 - 枚举用名字（`TASK_STATUS_PENDING`），不要使用数字；`TaskStatus` 的数值与存储值偏移 2，前端不依赖。

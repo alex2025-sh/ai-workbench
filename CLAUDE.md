@@ -19,7 +19,7 @@
   - 调用者身份由 gateway 写入 gRPC metadata（key 见 `app/rpc/internal/identity`），请求消息里不放 actor / viewer 字段。
   - 业务 JSON 字段用 `bytes`（UTF-8 JSON）承载，不用 `google.protobuf.Struct`，避免数字变 double 丢精度。
   - proto 的 `TaskStatus` 比存储值偏移 2（首值必须为 0），转换统一用 `internal/task` 的 `StatusToProto` / `StatusFromProto`。
-- **没有 HTTP 服务**：Lark 卡片回调与审批平台回调由 gateway 原样透传 raw body 与 headers，落到 gRPC 方法（`CallbackService.LarkCardCallback`、`ChangeSetService.OnApprovalResult`），在服务内验签。
+- **没有 HTTP 服务**：Lark 卡片回调与审批平台回调由 gateway 原样透传 raw body 与 headers，落到 gRPC 方法（`CallbackService.LarkCardCallback`、`ChangeSetService.OnApprovalResult`），在服务内验签。本地开发用的 `cmd/devgw` 模拟 gateway 的 HTTP 转换与身份注入，不部署。
 - 数据访问层由 `goctl model`（固定 v1.10.2）从 `deploy/sql/*.sql` 生成到 `internal/model`，生成结果已提交，CI 校验与 SQL 一致。
   - `*_gen.go` 每次生成都会覆盖，**不要手工修改**；自定义查询写在对应的 `*_model.go`（`WithSession` 已导出，供事务内使用）。
   - 改表结构或接口时先改 `.sql` / `.proto`，再 `make gen`。
@@ -31,6 +31,7 @@
 ```text
 api/schema/       task_type.schema.json：任务类型 JSON 的结构契约（前端、YAML、AI 生成共用），嵌入到 Go 中校验
 cmd/wbctl/        命令行：校验 YAML / JSON、导出 body_json 与执行计划、节点类型目录
+cmd/devgw/        仅本地开发：HTTP POST + JSON → gRPC，按 proto 行尾注释的路径路由，X-Dev-User 写入 metadata
 examples/         任务类型示例（vip_appeal_alert.yaml），测试保证它们始终能通过校验
 app/rpc/          go-zero zrpc 服务：对外 gRPC 接口（workbench.proto；生成后含 pb/server/logic/svc/etc）
 app/worker/       引擎进程（main + etc/worker.yaml）：ticker（本地定时器或 xxl-job），触发 cron 来源与到期 job；无常驻工作池
@@ -84,6 +85,7 @@ make gen     # 生成 rpc 与 model，然后 go mod tidy
 make check   # go vet + go test + go build
 make validate  # 用 wbctl 校验 examples/ 下的任务类型
 go run ./app/rpc -f app/rpc/etc/workbench.yaml   # 本地启动 gRPC 服务（127.0.0.1:9090，dev 模式开启 reflection）；试运行需要独立的 ai_workbench_dryrun 库（同样执行 deploy/sql）
+go run ./cmd/devgw     # 本地 HTTP 网关（127.0.0.1:8088 → 9090），前端开发用；GET /dev/users 列出 mock 身份
 ```
 
 集成测试（引擎、端到端）需要 MySQL 8.0 或 TiDB，设置 `WB_TEST_MYSQL=root:@tcp(127.0.0.1:3306)/` 后运行 `go test ./...`；未设置时这些测试跳过。CI 中用 MySQL 服务容器运行。
