@@ -32,6 +32,7 @@
 api/schema/       task_type.schema.json：任务类型 JSON 的结构契约（前端、YAML、AI 生成共用），嵌入到 Go 中校验
 cmd/wbctl/        命令行：校验 YAML / JSON、导出 body_json 与执行计划、节点类型目录
 cmd/devgw/        仅本地开发：HTTP POST + JSON → gRPC，按 proto 行尾注释的路径路由，X-Dev-User 写入 metadata
+web/              前端 demo（React + Vite + TypeScript + Ant Design），运行方式见 web/README.md
 examples/         任务类型示例（vip_appeal_alert.yaml），测试保证它们始终能通过校验
 app/rpc/          go-zero zrpc 服务：对外 gRPC 接口（workbench.proto；生成后含 pb/server/logic/svc/etc）
 app/worker/       引擎进程（main + etc/worker.yaml）：ticker（本地定时器或 xxl-job），触发 cron 来源与到期 job；无常驻工作池
@@ -86,6 +87,7 @@ make check   # go vet + go test + go build
 make validate  # 用 wbctl 校验 examples/ 下的任务类型
 go run ./app/rpc -f app/rpc/etc/workbench.yaml   # 本地启动 gRPC 服务（127.0.0.1:9090，dev 模式开启 reflection）；试运行需要独立的 ai_workbench_dryrun 库（同样执行 deploy/sql）
 go run ./cmd/devgw     # 本地 HTTP 网关（127.0.0.1:8088 → 9090），前端开发用；GET /dev/users 列出 mock 身份
+cd web && npm run dev  # 前端 demo（127.0.0.1:5173，代理到 devgw）
 ```
 
 集成测试（引擎、端到端）需要 MySQL 8.0 或 TiDB，设置 `WB_TEST_MYSQL=root:@tcp(127.0.0.1:3306)/` 后运行 `go test ./...`；未设置时这些测试跳过。CI 中用 MySQL 服务容器运行。
@@ -94,5 +96,5 @@ go run ./cmd/devgw     # 本地 HTTP 网关（127.0.0.1:8088 → 9090），前�
 
 ## 当前进度
 
-- 已完成：任务类型 JSON 契约与编译器；引擎阶段一与阶段二的主体（事件驱动的推进器、重试与防护、timer、human_choice 的等待 / 信号 / 超时、cron 来源与 `close_when`、任务状态同步、xxl-job ticker）；VIP 工单提醒在本地端到端跑通。
-- 未完成：Lark 真实接入与卡片回调、重复提醒与 snooze、受控的环（rework）运行期、共享组件（`key@version`）解析、gRPC 服务实现、变更集与审批。
+- 已完成：任务类型 JSON 契约与编译器；引擎阶段一与阶段二的主体（事件驱动的推进器、重试与防护、timer、human_choice 的等待 / 信号 / 超时、cron 来源与 `close_when`、任务状态同步、xxl-job ticker）；VIP 工单提醒在本地端到端跑通。gRPC 服务的 demo 范围：任务查询与详情、按任务表鉴权的 Signal、运行监控只读、任务类型只读与试运行（独立试运行库）；`cmd/devgw` 与 `web/` 前端 demo。
+- 未完成：任务中心写操作（认领、开始处理、调整优先级、转派）、运行干预（重试、跳过、取消）、草稿与组件库、Lark 真实接入与卡片回调、重复提醒与 snooze、受控的环（rework）运行期、共享组件（`key@version`）解析、变更集与审批；其余 gRPC 方法返回 Unimplemented。
