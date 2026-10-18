@@ -39,7 +39,7 @@ service TaskTypeService {
   // 对草稿及其依赖闭包完整编译校验
   rpc ValidateTaskTypeDraft(TaskTypeKeyReq) returns (ValidateResp); // POST /byai_platform/api/v1/task_type/draft/validate
 
-  // 试运行：动作节点只记录不执行，虚拟时钟
+  // 试运行：动作节点只记录不执行，虚拟时钟。草稿尚未实现时，对最新发布版本试运行
   rpc DryRunTaskTypeDraft(DryRunTaskTypeDraftReq) returns (DryRunResp); // POST /byai_platform/api/v1/task_type/draft/dry_run
 
   // 按 schema 生成或从历史任务取样例 payload
@@ -378,7 +378,7 @@ message DryRunSend {
 // 虚拟时钟上的时间点（相对于起点的偏移，不含系统时间）。
 message DryRunTimePoint {
   string node_id = 1;
-  string kind = 2;          // timeout / escalation / snooze_wakeup / reminder
+  string kind = 2;          // timer（定时器到期）/ timeout（人工节点超时）
   int64 offset_ms = 3;
 }
 
@@ -806,7 +806,7 @@ message TaskView {
   bytes payload_json = 12;  // 已按调用人脱敏
   int64 run_id = 13;
   int64 updated_at = 14;
-  string title = 15;     // 来自展示模板的 title / summary，建任务与同步时渲染落库，按最严格级别脱敏
+  string title = 15;     // 当前显示的卡片（同 TaskDetail.rendered_json）的 title / summary，已按 x-pii 脱敏
   string subtitle = 16;
 }
 
@@ -862,7 +862,7 @@ message ProgressStep {
 
 message TaskDetail {
   TaskView task = 1;
-  bytes rendered_json = 2;        // 按调用人受众渲染的 web 卡片；字段、标签、格式由展示模板决定
+  bytes rendered_json = 2;        // 最近一个发卡片的节点实际发出的卡片（不含按钮，按钮见 pending_action）；字段、标签、格式由展示模板决定
   PendingAction pending_action = 3;
   repeated ProgressStep progress = 4;
 }

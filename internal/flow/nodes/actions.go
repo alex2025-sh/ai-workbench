@@ -80,13 +80,15 @@ func renderString(s string, env expr.Env) (string, error) {
 }
 
 // maskedEnv 返回出口使用的环境：payload 按 schema 的 x-pii 脱敏。
-func maskedEnv(ec engine.ExecContext) expr.Env {
+func maskedEnv(ec engine.ExecContext) expr.Env { return maskEnv(ec.Def, ec.Env) }
+
+func maskEnv(def *engine.Definition, src expr.Env) expr.Env {
 	env := expr.Env{}
-	for k, v := range ec.Env {
+	for k, v := range src {
 		env[k] = v
 	}
-	if p, ok := ec.Env[expr.RootPayload].(map[string]any); ok {
-		env[expr.RootPayload] = schema.Mask(ec.Def.Spec.Schema, p)
+	if p, ok := src[expr.RootPayload].(map[string]any); ok {
+		env[expr.RootPayload] = schema.Mask(def.Spec.Schema, p)
 	}
 	return env
 }
@@ -95,8 +97,9 @@ func maskedEnv(ec engine.ExecContext) expr.Env {
 
 var singleField = regexp.MustCompile(`^\{\{\s*payload\.([A-Za-z0-9_]+)\s*\}\}$`)
 
-// template 解析卡片模板名：本地模板取任务类型的 views；共享组件 key@version 暂未接入组件库。
-func template(ec engine.ExecContext, b *dsl.ViewBinding) (*view.Template, error) {
+// Template 解析卡片模板名：本地模板取任务类型的 views；共享组件 key@version 暂未接入组件库。
+// 发送卡片与 Web 任务详情共用同一套解析。
+func Template(def *engine.Definition, b *dsl.ViewBinding) (*view.Template, error) {
 	if b == nil {
 		return nil, fmt.Errorf("no view configured")
 	}
@@ -104,7 +107,7 @@ func template(ec engine.ExecContext, b *dsl.ViewBinding) (*view.Template, error)
 	if strings.Contains(name, "@") {
 		return nil, fmt.Errorf("shared view %q is not supported yet", name)
 	}
-	v, ok := ec.Def.Spec.Views[name]
+	v, ok := def.Spec.Views[name]
 	if !ok || v.Inline == nil {
 		if ok && v.Ref != "" {
 			return nil, fmt.Errorf("shared view %q is not supported yet", v.Ref)
@@ -114,10 +117,11 @@ func template(ec engine.ExecContext, b *dsl.ViewBinding) (*view.Template, error)
 	return v.Inline, nil
 }
 
-// renderCard 把模板渲染成与渠道无关的卡片；字段缺省标签取 schema 中的 title。
-func renderCard(ec engine.ExecContext, tpl *view.Template) (action.Card, error) {
-	env := maskedEnv(ec)
-	titles := fieldTitles(ec.Def.Spec.Schema)
+// RenderCard 把模板渲染成与渠道无关的卡片：payload 先按 schema 的 x-pii 脱敏，字段缺省标签取 schema 中的 title。
+// 发送卡片与 Web 任务详情共用，env 为引擎构造的表达式环境。
+func RenderCard(def *engine.Definition, tpl *view.Template, src expr.Env) (action.Card, error) {
+	env := maskEnv(def, src)
+	titles := fieldTitles(def.Spec.Schema)
 	var c action.Card
 	var err error
 	if c.Title, err = renderString(tpl.Title, env); err != nil {
@@ -226,11 +230,11 @@ func (larkCard) Execute(ctx context.Context, ec engine.ExecContext) engine.NodeR
 	if ec.Binding == nil {
 		return permanent("no resolved view / recipient")
 	}
-	tpl, err := template(ec, ec.Binding.View)
+	tpl, err := Template(ec.Def, ec.Binding.View)
 	if err != nil {
 		return permanent("%v", err)
 	}
-	card, err := renderCard(ec, tpl)
+	card, err := RenderCard(ec.Def, tpl, ec.Env)
 	if err != nil {
 		return permanent("render: %v", err)
 	}
@@ -243,8 +247,9 @@ func (larkCard) Execute(ctx context.Context, ec engine.ExecContext) engine.NodeR
 		return engine.NodeResult{Err: err}
 	}
 	return engine.NodeResult{
-		Port:       dsl.PortNext,
-		Output:     output(map[string]any{"to": to, "message_id": sent.MessageID}),
+		Port: dsl.PortNext,
+		// 输出带上发出的卡片：Web 任务详情显示的就是这张卡片，不按之后变化的环境重新渲染。
+		Output:     output(map[string]any{"to": to, "message_id": sent.MessageID, "card": card}),
 		Assignment: assignment(to),
 	}
 }
@@ -259,11 +264,11 @@ func (humanChoice) Execute(ctx context.Context, ec engine.ExecContext) engine.No
 	if ec.Binding == nil {
 		return permanent("no resolved view / assignment")
 	}
-	tpl, err := template(ec, ec.Binding.View)
+	tpl, err := Template(ec.Def, ec.Binding.View)
 	if err != nil {
 		return permanent("%v", err)
 	}
-	card, err := renderCard(ec, tpl)
+	card, err := RenderCard(ec.Def, tpl, ec.Env)
 	if err != nil {
 		return permanent("render: %v", err)
 	}
@@ -282,7 +287,7 @@ func (humanChoice) Execute(ctx context.Context, ec engine.ExecContext) engine.No
 	}
 	return engine.NodeResult{
 		Wait:       wait,
-		Output:     output(map[string]any{"assignee": who.Assignee, "group": who.Group}),
+		Output:     output(map[string]any{"assignee": who.Assignee, "group": who.Group, "card": card}),
 		Assignment: assignment(who),
 		Effects: []engine.Effect{{
 			Kind: action.KindLarkCard, Input: output(action.LarkCardInput{To: who, Card: card}), Key: ":card", WhileWaiting: true,
@@ -316,11 +321,11 @@ func (sendEmail) Execute(ctx context.Context, ec engine.ExecContext) engine.Node
 		return permanent("subject: %v", err)
 	}
 	if cfg.View != "" {
-		tpl, err := template(ec, &dsl.ViewBinding{Default: cfg.View})
+		tpl, err := Template(ec.Def, &dsl.ViewBinding{Default: cfg.View})
 		if err != nil {
 			return permanent("%v", err)
 		}
-		card, err := renderCard(ec, tpl)
+		card, err := RenderCard(ec.Def, tpl, ec.Env)
 		if err != nil {
 			return permanent("render: %v", err)
 		}

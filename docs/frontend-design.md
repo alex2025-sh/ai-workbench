@@ -31,7 +31,10 @@ demo 不含变更集：变更集、审批后端尚未实现，demo 也没有草�
 - 把请求头 `X-Dev-User` 写入 gRPC metadata，模拟 gateway 的身份注入。
 - 前端顶部放「切换身份」下拉（RM、候选组成员、运维、管理员），身份取自 `deploy/mock` 的人员关系；BSP 选人与姓名解析在 demo 中也读这份 mock。
 
-gateway 接入后 devgw 不再使用，前端只换 base URL。
+- 错误返回 `{"code": "<gRPC 状态码名>", "message": "..."}`，HTTP 状态码与 grpc-gateway 的默认映射一致（如 `NotFound` → 404、`Unauthenticated` → 401、`Unimplemented` → 501）；`Signal` 被拒绝不是错误，HTTP 200 + `accepted=false`。
+- 开发专用的 `GET /dev/users` 列出 mock 中的人员、角色与所属组，供「切换身份」使用。
+
+启动：`go run ./app/rpc -f app/rpc/etc/workbench.yaml` 与 `go run ./cmd/devgw`（默认 `127.0.0.1:8088`）。gateway 接入后 devgw 不再使用，前端只换 base URL。
 
 ## 二、路由
 
@@ -71,7 +74,7 @@ gateway 接入后 devgw 不再使用，前端只换 base URL。
 | 「可认领」Tab | `ListClaimableTasks({task_type_key, priorities, page})` |
 | 认领 | `ClaimTask`，成功后行移到「我的任务」 |
 
-- 返回 `TaskSummary`，标题与副标题来自展示模板的 `title` / `summary`，在建任务和同步时渲染落库（列表不区分查看人，按最严格级别脱敏），列表不解析 payload、不现场渲染。
+- 返回 `TaskSummary`，标题与副标题取任务当前显示的卡片（与详情页的 `rendered_json` 是同一张，如升级后显示升级卡片）的 `title` / `summary`，已按 `x-pii` 脱敏，前端不解析 payload。
 - 后端按优先级、`due_at` 排序，前端**平铺**显示并用左侧色条区分 P0 到 P3，不做分组折叠：游标分页下各组计数不准，P0 可能出现在第二页。要看某一优先级用筛选。
 - SLA：`on_track` 绿、`at_risk` 黄、`breached` 红；后端更新 `sla_status` 之前（一期）不显示该列。
 - `assignee_id` 经 BSP 批量解析成姓名并缓存。
@@ -102,7 +105,7 @@ gateway 接入后 devgw 不再使用，前端只换 base URL。
 
 要点：
 
-- **任务卡片不写死字段。** 前端只渲染 `rendered_json`，与配置端 `PreviewView(channel=web)` 共用同一个渲染组件。脱敏值由后端处理，前端不判断。
+- **任务卡片不写死字段。** 前端只渲染 `rendered_json`，与配置端 `PreviewView(channel=web)` 共用同一个渲染组件。脱敏值由后端处理，前端不判断。`rendered_json` 是最近一个发卡片的节点**实际发出的那张卡片**（记在节点输出里），与 Lark 上看到的一致，不按之后变化的状态重新渲染。
 - **流程操作按钮由 `pending_action.options` 生成。** `can_signal=false` 时只读展示。`can_signal` 为真的条件：调用人是处理人，或任务未分配且调用人在候选人 / 候选组内。**组任务不需要先认领就能做决定**，做决定的人成为处理人；认领只是「先占住、避免别人重复处理」。
 - **表单与 DSL 一一对应。** 表单字段在节点上、所有选项共用（`pending_action.form_fields`，类型为 text、textarea、select 等）；每个选项只声明 `required_fields`。前端用一个固定的小表单组件渲染，点击某个选项时校验它的必填字段，填写值作为 `form`（字符串 map）提交。不需要 JSON Schema 表单库。
 - **推迟。** `snooze_ms` 非 0 的选项是推迟，时长由配置决定，用户不可选。引擎目前拒绝推迟，demo 中这类按钮置灰并提示「即将开放」。
@@ -241,6 +244,7 @@ Issue 面板（底部抽屉，各页共用）：
 
 API 客户端层统一处理，业务代码不接触原始编码。以下按 proto3 标准 JSON 映射（protojson，devgw 即按此实现）编写，**公司 gateway 的实际行为待确认**；如有差异只改客户端层：
 
+- 字段名为 proto 中的 snake_case（`run_id`、`pending_action`），零值字段也会输出（devgw 使用 `UseProtoNames`、`EmitUnpopulated`）。
 - `bytes` 字段在 JSON 中是 base64，客户端封装 `decodeJson`、`encodeJson`；金额等字段保持字符串，解析用 `json-bigint` 或保留字符串，不转 number。
 - `int64`（`id`、`run_id`、`revision`、所有时间戳）在 JSON 中是**字符串**，前端一律按字符串处理和比较；时间戳是 Unix 毫秒。
 - 枚举用名字（`TASK_STATUS_PENDING`），不要使用数字；`TaskStatus` 的数值与存储值偏移 2，前端不依赖。
@@ -295,6 +299,6 @@ run 的状态之一（`running / succeeded / failed / needs_intervention / cance
 | `cmd/devgw` | 开发用 HTTP 到 gRPC 的转发与身份注入（见「demo 的运行方式」） |
 | `RunService.Signal` 鉴权 | 按任务表鉴权后调引擎；鉴权函数与 `LarkCardCallback` 共用 |
 | 引擎返回结构化拒绝原因 | `SignalResult` 目前只有中文 `reason`，增加 `code`（`already_handled`、`stale`、`not_waiting`、`invalid_form`、`unsupported`） |
-| 任务表 `title`、`subtitle` | 建任务与 `sync_task` 时用展示模板渲染并落库 |
+| 列表标题 | 查询时用默认模板渲染，不落库（已实现） |
 | 草稿 `content_hash` | 去掉 `ui` 后计算；试运行记录该哈希，变更集据此判定 `dry_run_passed` |
 | 编译器禁止并行人工节点 | `pending_action` 为单值的前提；目前没有这条校验 |

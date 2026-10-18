@@ -16,10 +16,10 @@
 - Go 1.24，工具库为 [go-zero](https://github.com/zeromicro/go-zero)。
 - **对外接口只有 gRPC**：协议写在 `app/rpc/workbench.proto`（TaskTypeService、ComponentService、ChangeSetService、CatalogService、IngestService、RunService、TaskService、CallbackService），由 `goctl rpc protoc -m` 生成 zrpc 服务。
   - 前端经公司 gateway 访问，路径约定 `/byai_platform/api/v1/<资源>/<动作>`，一律 POST。一期不引入 gateway 注解，路径写在每个方法的行尾注释里；接入 gateway 时再改为 `option (bgw.v1.method_options)`。
-  - 调用者身份由 gateway 写入 gRPC metadata，请求消息里不放 actor / viewer 字段。
+  - 调用者身份由 gateway 写入 gRPC metadata（key 见 `app/rpc/internal/identity`），请求消息里不放 actor / viewer 字段。
   - 业务 JSON 字段用 `bytes`（UTF-8 JSON）承载，不用 `google.protobuf.Struct`，避免数字变 double 丢精度。
   - proto 的 `TaskStatus` 比存储值偏移 2（首值必须为 0），转换统一用 `internal/task` 的 `StatusToProto` / `StatusFromProto`。
-- **没有 HTTP 服务**：Lark 卡片回调与审批平台回调由 gateway 原样透传 raw body 与 headers，落到 gRPC 方法（`CallbackService.LarkCardCallback`、`ChangeSetService.OnApprovalResult`），在服务内验签。
+- **没有 HTTP 服务**：Lark 卡片回调与审批平台回调由 gateway 原样透传 raw body 与 headers，落到 gRPC 方法（`CallbackService.LarkCardCallback`、`ChangeSetService.OnApprovalResult`），在服务内验签。本地开发用的 `cmd/devgw` 模拟 gateway 的 HTTP 转换与身份注入，不部署。
 - 数据访问层由 `goctl model`（固定 v1.10.2）从 `deploy/sql/*.sql` 生成到 `internal/model`，生成结果已提交，CI 校验与 SQL 一致。
   - `*_gen.go` 每次生成都会覆盖，**不要手工修改**；自定义查询写在对应的 `*_model.go`（`WithSession` 已导出，供事务内使用）。
   - 改表结构或接口时先改 `.sql` / `.proto`，再 `make gen`。
@@ -31,6 +31,8 @@
 ```text
 api/schema/       task_type.schema.json：任务类型 JSON 的结构契约（前端、YAML、AI 生成共用），嵌入到 Go 中校验
 cmd/wbctl/        命令行：校验 YAML / JSON、导出 body_json 与执行计划、节点类型目录
+cmd/devgw/        仅本地开发：HTTP POST + JSON → gRPC，按 proto 行尾注释的路径路由，X-Dev-User 写入 metadata
+web/              前端 demo（React + Vite + TypeScript + Ant Design），运行方式见 web/README.md
 examples/         任务类型示例（vip_appeal_alert.yaml），测试保证它们始终能通过校验
 app/rpc/          go-zero zrpc 服务：对外 gRPC 接口（workbench.proto；生成后含 pb/server/logic/svc/etc）
 app/worker/       引擎进程（main + etc/worker.yaml）：ticker（本地定时器或 xxl-job），触发 cron 来源与到期 job；无常驻工作池
@@ -83,13 +85,16 @@ internal/event/ subscription/ mcp/
 make gen     # 生成 rpc 与 model，然后 go mod tidy
 make check   # go vet + go test + go build
 make validate  # 用 wbctl 校验 examples/ 下的任务类型
+go run ./app/rpc -f app/rpc/etc/workbench.yaml   # 本地启动 gRPC 服务（127.0.0.1:9090，dev 模式开启 reflection）；试运行需要独立的 ai_workbench_dryrun 库（同样执行 deploy/sql）
+go run ./cmd/devgw     # 本地 HTTP 网关（127.0.0.1:8088 → 9090），前端开发用；GET /dev/users 列出 mock 身份
+cd web && npm run dev  # 前端 demo（127.0.0.1:5173，代理到 devgw）
 ```
 
 集成测试（引擎、端到端）需要 MySQL 8.0 或 TiDB，设置 `WB_TEST_MYSQL=root:@tcp(127.0.0.1:3306)/` 后运行 `go test ./...`；未设置时这些测试跳过。CI 中用 MySQL 服务容器运行。
 
-外部系统目前都是本地实现：Lark 为 `internal/lark` 的 Mock（卡片打到日志），分配服务为 `assign.Local`（关系表读 `deploy/mock/vip_rm.yaml`），邮件、事件、LLM 为 `action.Logger`。
+外部系统目前都是本地实现：Lark 为 `internal/lark` 的 Mock（卡片打到日志），分配服务为 `assign.Local`（关系表读 `deploy/mock/vip_rm.yaml`），用户组为 `directory.StaticGroups`（读 `deploy/mock/groups.yaml`），邮件、事件、LLM 为 `action.Logger`。
 
 ## 当前进度
 
-- 已完成：任务类型 JSON 契约与编译器；引擎阶段一与阶段二的主体（事件驱动的推进器、重试与防护、timer、human_choice 的等待 / 信号 / 超时、cron 来源与 `close_when`、任务状态同步、xxl-job ticker）；VIP 工单提醒在本地端到端跑通。
-- 未完成：Lark 真实接入与卡片回调、重复提醒与 snooze、受控的环（rework）运行期、共享组件（`key@version`）解析、gRPC 服务实现、变更集与审批。
+- 已完成：任务类型 JSON 契约与编译器；引擎阶段一与阶段二的主体（事件驱动的推进器、重试与防护、timer、human_choice 的等待 / 信号 / 超时、cron 来源与 `close_when`、任务状态同步、xxl-job ticker）；VIP 工单提醒在本地端到端跑通。gRPC 服务的 demo 范围：任务查询与详情、按任务表鉴权的 Signal、运行监控只读、任务类型只读与试运行（独立试运行库）；`cmd/devgw` 与 `web/` 前端 demo。
+- 未完成：任务中心写操作（认领、开始处理、调整优先级、转派）、运行干预（重试、跳过、取消）、草稿与组件库、Lark 真实接入与卡片回调、重复提醒与 snooze、受控的环（rework）运行期、共享组件（`key@version`）解析、变更集与审批；其余 gRPC 方法返回 Unimplemented。

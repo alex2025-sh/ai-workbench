@@ -217,6 +217,7 @@ func fromRow(r *model.Task) Task {
 		Status: TaskStatus(r.Status), Priority: TaskPriority(r.Priority), AssigneeID: r.AssigneeId, AssigneeGroup: r.AssigneeGroup,
 		CurrentNode: r.CurrentNode, RunID: int64(r.RunId), Resolution: Resolution(r.Resolution), SLAStatus: SLAStatus(r.SlaStatus),
 		EscalationLevel: int(r.EscalationLevel), DedupKey: r.DedupKey, Payload: json.RawMessage(r.Payload), Seq: r.Seq, Version: r.Version,
+		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
 	if r.SnoozeUntil.Valid {
 		v := r.SnoozeUntil.Time

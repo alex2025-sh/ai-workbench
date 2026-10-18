@@ -196,9 +196,12 @@ func TestVIPAppealAlert(t *testing.T) {
 
 	// 组长处理 A1003：推迟暂不支持，未知选项被拒绝，处理后流程结束、任务完结。
 	runID := h.task("A1003").RunID
-	for _, c := range []struct{ option, reason string }{{"snooze", "推迟"}, {"nope", "未知选项"}} {
+	for _, c := range []struct {
+		option, reason string
+		code           engine.RejectCode
+	}{{"snooze", "推迟", engine.RejectUnsupported}, {"nope", "未知选项", engine.RejectInvalidForm}} {
 		res, err := h.svc.Engine.Signal(h.ctx, engine.SignalCmd{RunID: runID, NodeID: "escalate", Option: c.option, Actor: "lead@example.com"})
-		if err != nil || res.Accepted || !strings.Contains(res.Reason, c.reason) {
+		if err != nil || res.Accepted || res.Code != c.code || !strings.Contains(res.Reason, c.reason) {
 			t.Fatalf("signal %s: %+v %v", c.option, res, err)
 		}
 	}
@@ -207,8 +210,8 @@ func TestVIPAppealAlert(t *testing.T) {
 		t.Fatalf("signal handled: %+v %v", res, err)
 	}
 	res, _ = h.svc.Engine.Signal(h.ctx, engine.SignalCmd{RunID: runID, NodeID: "escalate", Option: "handled", Actor: "lead@example.com"})
-	if res.Accepted {
-		t.Fatal("second click must be rejected")
+	if res.Accepted || res.Code != engine.RejectNotWaiting {
+		t.Fatalf("second click must be rejected as not_waiting: %+v", res)
 	}
 	// 人工操作是事件：Signal 返回时流程已经推进到结束，不需要等 tick。
 	if v := h.run("A1003"); v.Run.Status != engine.RunSucceeded {
