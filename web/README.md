@@ -2,7 +2,7 @@
 
 React 18 + Vite + TypeScript + Ant Design 5。页面与交互约定见 [docs/frontend-design.md](../docs/frontend-design.md)。
 
-范围：我的任务、可认领、任务详情（卡片、流程操作、认领 / 开始处理 / 调整优先级 / 转派、进度、事件）、运行监控（取消运行、重试节点、跳过节点）、任务类型只读查看与试运行。
+范围：我的任务、可认领、任务详情（卡片、流程操作、认领 / 开始处理 / 调整优先级 / 转派、进度、事件）、运行监控（取消运行、重试节点、跳过节点）、任务类型（新建、草稿编辑与 workflow 画布、校验、试运行、开发环境发布）。
 
 ## 本地运行
 
@@ -39,8 +39,10 @@ Vite 把 `/byai_platform` 与 `/dev` 代理到 devgw（默认 `http://127.0.0.1:
 src/api/client.ts     接口客户端：POST + JSON、bytes 字段的 base64 编解码、错误、身份请求头
 src/api/types.ts      proto 消息的 JSON 形态（snake_case，int64 为字符串）
 src/api/services.ts   各 service 的调用封装
-src/components/       TaskCard：渲染后端给出的卡片（与 Lark 同一份内容）
-src/pages/            MyTasks、TaskDetail、Runs、RunDetail、TaskTypes、TaskTypeDetail
+src/components/       TaskCard（后端渲染的卡片）、DryRunPanel（试运行）、JsonEditor（CodeMirror）
+src/components/canvas/       workflow 画布：model（端口、默认配置、自动排版）、WorkflowCanvas、FlowNode、NodeConfigPanel
+src/components/schemaform/   按 JSON Schema 生成节点配置表单；labels.ts 为字段的中文标签
+src/pages/            MyTasks、TaskDetail、Runs、RunDetail、TaskTypes、TaskTypeDetail、TaskTypeEditor
 ```
 
 `npm run typecheck` 做类型检查，`npm run build` 产出 `dist/`。

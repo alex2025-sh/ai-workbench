@@ -1,17 +1,20 @@
-// 任务类型列表（只读）：草稿与变更集尚未实现，列出已发布的最新版本。
-import { Alert, Input, Table } from 'antd';
+// 任务类型列表：已发布的与新建尚未发布的；新建后进入编辑页（草稿与画布）。
+import { PlusOutlined } from '@ant-design/icons';
+import { Alert, Button, Input, Space, Table, Tag } from 'antd';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { taskTypeApi } from '../api/services';
 import type { TaskTypeSummary } from '../api/types';
 import { fmtTime } from '../format';
+import { CreateTaskTypeModal } from './TaskTypeEditor';
 
 export default function TaskTypes() {
   const [keyword, setKeyword] = useState('');
   const [items, setItems] = useState<TaskTypeSummary[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>();
+  const [creating, setCreating] = useState(false);
 
   useEffect(() => {
     setLoading(true);
@@ -27,7 +30,13 @@ export default function TaskTypes() {
 
   return (
     <>
-      <Input.Search placeholder="按 key 或名称搜索" allowClear style={{ width: 280, marginBottom: 16 }} onSearch={(v) => setKeyword(v.trim())} />
+      <Space style={{ marginBottom: 16, width: '100%', justifyContent: 'space-between' }}>
+        <Input.Search placeholder="按 key 或名称搜索" allowClear style={{ width: 280 }} onSearch={(v) => setKeyword(v.trim())} />
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreating(true)}>
+          新建任务类型
+        </Button>
+      </Space>
+      <CreateTaskTypeModal open={creating} onClose={() => setCreating(false)} />
       {error && <Alert type="error" showIcon message={error} style={{ marginBottom: 16 }} />}
       <Table<TaskTypeSummary>
         rowKey="key"
@@ -35,11 +44,24 @@ export default function TaskTypes() {
         dataSource={items}
         pagination={false}
         columns={[
-          { title: 'Key', dataIndex: 'key', render: (k: string) => <Link to={`/config/task-types/${k}`}>{k}</Link> },
+          {
+            title: 'Key',
+            dataIndex: 'key',
+            render: (k: string, t) => <Link to={t.latest_version > 0 ? `/config/task-types/${k}` : `/config/task-types/${k}/edit`}>{k}</Link>,
+          },
           { title: '名称', dataIndex: 'name' },
           { title: 'Namespace', dataIndex: 'namespace' },
-          { title: '最新版本', dataIndex: 'latest_version', render: (v: number) => `v${v}` },
-          { title: '发布时间', dataIndex: 'updated_at', render: (v: string) => fmtTime(v, 'YYYY-MM-DD HH:mm') },
+          {
+            title: '最新版本',
+            render: (_, t) => (
+              <Space>
+                {t.latest_version > 0 ? `v${t.latest_version}` : <Tag>未发布</Tag>}
+                {t.has_draft && <Tag color="gold">草稿</Tag>}
+              </Space>
+            ),
+          },
+          { title: '更新时间', dataIndex: 'updated_at', render: (v: string) => fmtTime(v, 'YYYY-MM-DD HH:mm') },
+          { title: '', render: (_, t) => <Link to={`/config/task-types/${t.key}/edit`}>{t.has_draft ? '继续编辑' : '编辑'}</Link> },
         ]}
       />
     </>

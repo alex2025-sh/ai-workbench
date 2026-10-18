@@ -41,5 +41,8 @@ func (l *GetTaskTypeLogic) GetTaskType(in *pb.GetTaskTypeReq) (*pb.GetTaskTypeRe
 	if err != nil {
 		return nil, err
 	}
+	if _, err := l.svcCtx.TaskTypes.Find(l.ctx, in.Key); err == nil {
+		sum.HasDraft = true
+	}
 	return &pb.GetTaskTypeResp{Summary: sum, Version: versionInfo(row), BodyJson: []byte(row.Dsl)}, nil
 }

@@ -233,7 +233,7 @@ Issue 面板（底部抽屉，各页共用）：
 
 画布交互：
 
-- 从左侧面板（`ListNodeTypes`，按 `category` 分组）拖入节点，自动生成 id（如 `timer_2`）；id 可在配置面板修改，引用它的连线随之更新。
+- 从左侧面板（`ListNodeTypes`，按 `category` 分组）拖入节点，或点击加在当前视野中央，自动生成 id（如 `timer_2`）；id 可在配置面板修改，引用它的连线随之更新。
 - 端口由节点类型与配置决定（规则同 `dsl.Ports`）：条件分支每个分支一个、外加 `default`；人工选择每个非推迟选项一个，配置超时另有 `timeout`；其他为固定的 `next` / `error`。改配置后端口随之变化，已连线的端口被删掉时该连线标红。
 - 从端口拖到节点即连线，同一端口可连多个节点（并行）；Delete 删除选中的节点或连线。
 - 坐标存在任务类型 JSON 的 `ui.canvas`（编译器忽略）；没有坐标时（如 YAML 发布的示例）首次打开自动排版（dagre）。
@@ -242,8 +242,9 @@ Issue 面板（底部抽屉，各页共用）：
 
 节点配置表单：
 
-- 后端 `ListNodeTypes` 返回每种节点的配置 schema 与界面提示（`ui_schema_json`：中文标题、字段顺序、控件），前端用自研的渲染器生成表单。schema 用 `if/then` 区分类型（如处理人解析器），很多字段没有中文标题，部分字段要从当前任务类型里选值，通用 JSON Schema 表单库处理不好。
-- 特殊控件：时长（`48h`，带格式校验）、表达式（等宽，提示 `payload.*` / `nodes.*` / `task.*`）、卡片模板下拉（当前任务类型的 views）、skill 下拉（`ListSkills`）、处理人（先选解析器类型，再出对应字段）。
+- 后端 `ListNodeTypes` 返回每种节点的配置 schema（与校验用的是同一份 `task_type.schema.json`），前端用自研的渲染器生成表单：schema 用 `if/then` 区分类型（如处理人解析器），部分字段要从当前任务类型里选值，通用 JSON Schema 表单库处理不好。
+- 控件按 `$ref` 的定义名选择：时长 `duration`（`48h`，带格式校验）、表达式 `expression`（等宽）、模板 `template`、卡片模板 `view_binding`（当前任务类型的 views）、skill `skill_name`（`ListSkills`）、处理人 `assignment_binding`（先选解析器类型，再出对应字段）、参数映射 `template_map`（键值对）。
+- 中文标签按字段名取（`web/src/components/schemaform/labels.ts`），字段说明用 schema 的 `description`；标签属于展示层，不写进 schema。`ui_schema_json` 暂为空。
 - 每个节点都可以切到 JSON 编辑，改的是同一份数据。
 
 保存、校验、试运行、发布：

@@ -7,6 +7,7 @@ import RunDetail from './pages/RunDetail';
 import Runs from './pages/Runs';
 import TaskDetail from './pages/TaskDetail';
 import TaskTypeDetail from './pages/TaskTypeDetail';
+import TaskTypeEditor from './pages/TaskTypeEditor';
 import TaskTypes from './pages/TaskTypes';
 
 const menu = [
@@ -54,6 +55,7 @@ export default function App() {
           <Route path="/runs/:id" element={<RunDetail />} />
           <Route path="/config/task-types" element={<TaskTypes />} />
           <Route path="/config/task-types/:key" element={<TaskTypeDetail />} />
+          <Route path="/config/task-types/:key/edit" element={<TaskTypeEditor />} />
           <Route path="*" element={<Navigate to="/tasks" replace />} />
         </Routes>
       </Layout.Content>
