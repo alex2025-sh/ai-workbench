@@ -30,7 +30,7 @@ func (e *Engine) process(ctx context.Context, j *Job) (next []Job, worked bool, 
 		return e.execute(ctx, j)
 	case JobTimer, JobTimeout:
 		return e.fire(ctx, j)
-	case JobEffect:
+	case JobEffect, jobLegacySyncTask:
 		return e.effect(ctx, j)
 	default:
 		return nil, true, fmt.Errorf("unsupported job kind %q", j.Kind)
@@ -93,10 +93,11 @@ func (e *Engine) startExecution(s *runState) (claimed[execution], error) {
 	}
 	n, cfg := s.def.node(id)
 	if s.leaseExpired() {
-		// 上一次执行的租约到期仍没有结果（进程崩溃或卡住），按一次超时失败计入重试次数。
+		// 上一次执行的租约到期仍没有结果（进程崩溃或卡住）：按一次 timeout 失败计入，与正常失败用同一套规则判断
+		// 能否重试（次数上限、non_retryable_errors）。能重试就立即重新执行——租约本身已经等过了。
 		s.event(id, "node_lease_expired", "", map[string]any{"attempt": r.Attempt, "owner": j.Owner})
-		if int(r.Attempt) >= RetryPolicyFor(n).MaxAttempts {
-			err := &action.Error{Code: action.CodeTimeout, Err: fmt.Errorf("node %s: no result after %d attempts (lease expired)", id, r.Attempt)}
+		err := &action.Error{Code: action.CodeTimeout, Err: fmt.Errorf("node %s: no result after attempt %d (lease expired)", id, r.Attempt)}
+		if policy := RetryPolicyFor(n); !Retryable(policy, err, false) || int(r.Attempt) >= policy.MaxAttempts {
 			e.fail(s, NodeResult{Err: err})
 			return done, nil
 		}
@@ -245,9 +246,9 @@ func (e *Engine) effect(ctx context.Context, j *Job) ([]Job, bool, error) {
 			return claimed[claim]{}, nil
 		}
 		done := claimed[claim]{worked: true}
-		var p EffectPayload
-		if err := json.Unmarshal([]byte(nullOr(job.Payload)), &p); err != nil {
-			return done, fmt.Errorf("effect payload: %w", err)
+		p, err := effectPayload(job)
+		if err != nil {
+			return done, err
 		}
 		if p.WhileWaiting && !s.waiting(job.NodeId, job.Iteration) {
 			s.finishJob(JobCancelled, "node no longer waiting")
@@ -293,6 +294,18 @@ func (e *Engine) effect(ctx context.Context, j *Job) ([]Job, bool, error) {
 	return jobs, true, err
 }
 
+// effectPayload 解码 effect job 的参数；升级前写入的任务同步 job 转成同样的形式。
+func effectPayload(job *model.WfJob) (EffectPayload, error) {
+	if JobKind(job.Kind) == jobLegacySyncTask {
+		return EffectPayload{Kind: string(action.KindSyncTask), Input: json.RawMessage(nullOr(job.Payload)), IdemKey: job.IdemKey}, nil
+	}
+	var p EffectPayload
+	if err := json.Unmarshal([]byte(nullOr(job.Payload)), &p); err != nil {
+		return p, fmt.Errorf("effect payload: %w", err)
+	}
+	return p, nil
+}
+
 func (s *runState) effectFailed(p EffectPayload, msg string) {
 	id := s.job.NodeId
 	s.finishJob(JobFailed, msg)
@@ -326,8 +339,10 @@ func (e *Engine) failed(ctx context.Context, j Job, cause error) {
 		if err != nil {
 			return struct{}{}, err
 		}
-		if job.Status != string(JobPending) || int(job.Attempt) != j.Attempt {
-			return struct{}{}, nil // 已被别人处理
+		// 已被别人处理，或这一轮的失败已经记过：记失败会推后 due_at，同一批候选中后到的失败看到的 due_at
+		// 与取出时不同，不再计数，避免并发的几次失败绕过退避、把一次短暂故障放大成隔离。
+		if job.Status != string(JobPending) || int(job.Attempt) != j.Attempt || !job.DueAt.Equal(j.DueAt) {
+			return struct{}{}, nil
 		}
 		job.FailCount++
 		if int(job.FailCount) < e.opts.MaxFailCount {

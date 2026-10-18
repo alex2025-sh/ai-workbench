@@ -269,7 +269,7 @@ func (s *runState) addJob(nodeID string, kind JobKind, due time.Time, payload js
 	iter := s.iteration(nodeID)
 	s.inserts = append(s.inserts, &model.WfJob{
 		RunId: uint64(s.run.ID), NodeId: nodeID, Iteration: iter, Kind: string(kind), Payload: nullJSON(payload),
-		DueAt: due, Status: string(JobPending), IdemKey: IdemKey(s.run.ID, nodeID, int(iter), kind) + keySuffix,
+		DueAt: due.Truncate(time.Millisecond), Status: string(JobPending), IdemKey: IdemKey(s.run.ID, nodeID, int(iter), kind) + keySuffix,
 	})
 }
 

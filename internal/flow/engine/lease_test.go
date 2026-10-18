@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -244,6 +245,22 @@ func TestPoisonJobQuarantined(t *testing.T) {
 	}
 }
 
+// TestConcurrentFailuresCountOnce：几个 tick 取到了同一个 job，处理时都在加载定义时失败。
+// 第一次失败记数并推后 due_at，同一批候选中后到的失败不再计数，不能绕过退避把一次故障放大成隔离。
+func TestConcurrentFailuresCountOnce(t *testing.T) {
+	e := newEnv(t)
+	e.publish(linear)
+	en := e.engine("w1")
+	runID, jobID := e.poisonRun("biz-poison-concurrent")
+	candidate := engine.Job{ID: jobID, RunID: runID, NodeID: "s", Kind: engine.JobExecute, DueAt: e.clock.Now()}
+	for i := 0; i < 3; i++ {
+		en.StepForTest(e.ctx, candidate)
+	}
+	if status, fails, _ := e.jobState(jobID); status != "pending" || fails != 1 {
+		t.Fatalf("status=%s fail_count=%d, want one failure recorded", status, fails)
+	}
+}
+
 // crash 让 run 停在“s 已被某个进程认领、执行到一半进程崩溃”的状态：s 已执行 attempt 次，租约已过期。
 func (e *env) crash(runID int64, attempt int) {
 	e.t.Helper()
@@ -292,6 +309,56 @@ func TestLeaseExpiryCountsAsAttempt(t *testing.T) {
 	_ = json.Unmarshal(nodes["s"].Output, &out)
 	if status != engine.RunNeedsIntervention || nodes["s"].Status != engine.NodeFailed || out.Code != action.CodeTimeout || calls.Load() != 1 {
 		t.Fatalf("run=%s s=%s output=%s calls=%d", status, nodes["s"].Status, nodes["s"].Output, calls.Load())
+	}
+}
+
+// TestLeaseExpiryRespectsNonRetryable：租约到期按 timeout 失败处理，timeout 在 non_retryable_errors 中时不再执行。
+func TestLeaseExpiryRespectsNonRetryable(t *testing.T) {
+	e := newEnv(t)
+	e.publish(`
+  nodes:
+    - { id: start, type: trigger }
+    - { id: s, type: skill_call, config: { skill: test.step }, retry: { max_attempts: 5, non_retryable_errors: [timeout] } }
+    - { id: done, type: end }
+  edges:
+    - { id: e1, from: start, port: next, to: s }
+    - { id: e2, from: s, port: next, to: done }
+`)
+	var calls atomic.Int32
+	e.skills.Builtin["test.step"] = func(ctx context.Context, in json.RawMessage) (any, error) {
+		calls.Add(1)
+		return echo(ctx, in)
+	}
+	en := e.engine("w1")
+	run, _, err := en.StartRun(e.ctx, engine.StartRunCmd{PlanKey: "flow", PlanVersion: 1, BizKey: "biz-crash-nonretry", Vars: engine.Vars{Payload: json.RawMessage(`{"uid":"u1"}`)}, Defer: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.crash(run.ID, 1)
+	e.tick(en)
+	status, nodes := nodeStatus(t, en, run.ID)
+	if status != engine.RunNeedsIntervention || nodes["s"].Status != engine.NodeFailed || calls.Load() != 0 {
+		t.Fatalf("run=%s s=%s calls=%d", status, nodes["s"].Status, calls.Load())
+	}
+}
+
+// TestLegacySyncTaskJob：升级前写入的任务同步 job（kind = sync_task，payload 是 SyncPayload）按 sync_task effect 执行，
+// 不因 kind 不认识被隔离。
+func TestLegacySyncTaskJob(t *testing.T) {
+	e := newEnv(t)
+	e.publish(linear)
+	e.skills.Builtin["test.step"] = echo
+	en := e.engine("w1")
+	run := e.start(en, "biz-legacy-sync", 1)
+	res, err := e.conn.ExecCtx(e.ctx, "insert into wf_job (run_id, node_id, iteration, kind, payload, due_at, status, idem_key) values (?, '', 0, 'sync_task', ?, ?, 'pending', ?)",
+		run.ID, `{"task_id":7,"status":"solved","seq":3}`, e.clock.Now(), fmt.Sprintf("%d::0:sync_task:3", run.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID, _ := res.LastInsertId()
+	e.tick(en)
+	if status, fails, lastErr := e.jobState(jobID); status != "done" || fails != 0 {
+		t.Fatalf("legacy job status=%s fail_count=%d last_error=%q", status, fails, lastErr)
 	}
 }
 
