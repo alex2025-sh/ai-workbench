@@ -138,7 +138,8 @@ service RunService {
   // 启动运行（按 biz_key 幂等）
   rpc StartRun(StartRunReq) returns (StartRunResp); // POST /byai_platform/api/v1/run/start
 
-  // 向等待中的人工节点发送选择（按任务表鉴权）
+  // 向等待中的人工节点发送选择。按任务表鉴权，与 Lark 卡片回调共用同一套鉴权：调用人须是任务处理人，
+  // 或任务未分配且调用人在候选人 / 候选组内（无需先认领，做决定的人成为处理人）
   rpc Signal(SignalReq) returns (SignalResp); // POST /byai_platform/api/v1/run/signal
 
   // 取消运行
@@ -162,11 +163,14 @@ service RunService {
 
 // 任务处理
 service TaskService {
-  // 任务详情（按调用人脱敏）
-  rpc GetTask(TaskIdReq) returns (TaskView); // POST /byai_platform/api/v1/task/get
+  // 任务详情：任务数据、按调用人受众渲染的 web 卡片、当前可执行的流程操作与简化进度（均已按调用人脱敏）
+  rpc GetTask(TaskIdReq) returns (TaskDetail); // POST /byai_platform/api/v1/task/get
 
-  // 我的任务，按优先级、截止时间排序
+  // 我的任务，按优先级、截止时间排序；返回轻量摘要，不含 payload
   rpc ListMyTasks(ListMyTasksReq) returns (ListMyTasksResp); // POST /byai_platform/api/v1/task/my/list
+
+  // 可认领的任务池（unassigned，调用人在候选人或候选组内），排序同上
+  rpc ListClaimableTasks(ListClaimableTasksReq) returns (ListMyTasksResp); // POST /byai_platform/api/v1/task/claimable/list
 
   // 任务事件时间线
   rpc GetTaskEvents(GetTaskEventsReq) returns (GetTaskEventsResp); // POST /byai_platform/api/v1/task/events
@@ -252,6 +256,7 @@ message Draft {
   int64 locked_by_change_set = 4;  // 非 0 = 审批中，不可编辑
   string updated_by = 5;
   int64 updated_at = 6;
+  string content_hash = 7;         // 去掉 ui 字段后的内容哈希；只改画布坐标时不变
 }
 
 message VersionInfo {
@@ -352,9 +357,48 @@ message DryRunTaskTypeDraftReq {
   repeated bytes sample_json = 2;   // 历史事件样本或手工构造的 payload
   map<string, string> choices = 3;  // 人工节点预设选择：node_id -> option
 }
+
+// 试运行经过的一步，画布据此高亮路径。
+message DryRunStep {
+  string node_id = 1;
+  int32 iteration = 2;
+  string port = 3;    // 节点完成时走的出口
+  string status = 4;  // succeeded / skipped / failed / waiting
+}
+
+// 试运行中“会发出去”的一次外部动作（不真正执行）。
+message DryRunSend {
+  string node_id = 1;
+  string kind = 2;     // lark_card / send_email / emit_event / skill_call
+  string target = 3;   // 接收人或目标
+  string summary = 4;
+  bytes rendered_json = 5;  // 渲染后的卡片或邮件内容
+}
+
+// 虚拟时钟上的时间点（相对于起点的偏移，不含系统时间）。
+message DryRunTimePoint {
+  string node_id = 1;
+  string kind = 2;          // timeout / escalation / snooze_wakeup / reminder
+  int64 offset_ms = 3;
+}
+
+// 每个样本一份报告。
+message DryRunCase {
+  int32 sample_index = 1;
+  repeated DryRunStep path = 2;
+  string assignee_id = 3;
+  repeated DryRunSend sends = 4;
+  repeated DryRunTimePoint timeline = 5;
+  string end_status = 6;  // 流程结束状态；等待中则为 waiting
+  repeated Issue issues = 7;
+}
+
 message DryRunResp {
-  bytes report_json = 1;  // 路径、处理人、渲染后的卡片、模拟发送清单、超时与升级时间点
-  repeated Issue issues = 2;
+  int64 revision = 1;  // 本次试运行针对的草稿 revision
+  string content_hash = 5;  // 本次试运行针对的内容哈希；与草稿当前 content_hash 不同说明结果已过期
+  bool passed = 2;     // 无 error 级问题且流程按预期走完
+  repeated DryRunCase cases = 3;
+  repeated Issue issues = 4;  // 与具体样本无关的问题
 }
 
 message GenerateSamplePayloadReq {
@@ -490,6 +534,9 @@ message ChangeSetItem {
   int32 base_version = 3;
   int32 target_version = 4;
   string reason = 5;  // edit / dependent_upgrade
+  bool dry_run_required = 6;  // 任务类型需要试运行，共享组件不需要
+  bool dry_run_passed = 7;    // 最近一次通过的试运行，其 content_hash 与当前草稿一致；只改 ui 坐标不影响
+  int64 dry_run_at = 8;
 }
 
 message ChangeSet {
@@ -539,6 +586,7 @@ message ItemDiff {
   int32 base_version = 2;
   bytes base_json = 3;
   bytes target_json = 4;
+  int32 target_version = 5;
 }
 message DiffChangeSetResp {
   repeated ItemDiff items = 1;
@@ -649,11 +697,19 @@ message SignalReq {
   string node_id = 2;
   int32 iteration = 3;
   string option = 4;
-  bytes form_json = 5;  // 必填项、备注、snooze 时长等
+  map<string, string> form = 5;  // 人工节点表单的填写值，key 为表单字段 key
 }
 message SignalResp {
   bool accepted = 1;
-  string reason = 2;  // 被拒绝时的原因，卡片上即时提示
+  string reason = 2;  // 被拒绝时的原因，卡片与页面上即时提示
+  // 被拒绝的原因分类，前端据此决定处理方式：
+  //   already_handled：该节点已被处理（如在 Lark 点过），刷新页面
+  //   stale：node_id / iteration 已不是当前等待的节点，刷新页面
+  //   invalid_form：未知选项或必填字段缺失，留在表单中提示
+  //   unsupported：选项暂不可用（如推迟功能未上线）
+  //   forbidden：调用人不是处理人，也不在候选范围内
+  //   not_waiting：流程不在等待状态（已结束或已取消）
+  string code = 3;
 }
 
 message CancelRunReq {
@@ -689,6 +745,9 @@ message ListRunsReq {
   string biz_key = 2;
   string status = 3;
   PageReq page = 4;
+  string task_type_key = 5;
+  int64 created_after = 6;   // Unix 毫秒，0 = 不限
+  int64 created_before = 7;
 }
 message RunSummary {
   int64 run_id = 1;
@@ -747,19 +806,85 @@ message TaskView {
   bytes payload_json = 12;  // 已按调用人脱敏
   int64 run_id = 13;
   int64 updated_at = 14;
+  string title = 15;     // 来自展示模板的 title / summary，建任务与同步时渲染落库，按最严格级别脱敏
+  string subtitle = 16;
+}
+
+// 列表用的轻量摘要，不含 payload。
+message TaskSummary {
+  int64 id = 1;
+  string task_type_key = 2;
+  string title = 3;
+  string subtitle = 4;
+  TaskStatus status = 5;
+  TaskPriority priority = 6;
+  string assignee_id = 7;
+  string sla_status = 8;
+  int64 snooze_until = 9;
+  int64 due_at = 10;
+  int64 updated_at = 11;
+}
+
+// 人工节点上的一个可选操作，对应 DSL 的 human_choice.options。
+message ActionOption {
+  string key = 1;                         // 即 SignalReq.option
+  string label = 2;
+  string style = 3;                       // primary / default / danger
+  repeated string required_fields = 4;    // 选择该项时必填的表单字段 key
+  int64 snooze_ms = 5;                    // 非 0 = 推迟选项，时长由配置决定，用户不可选
+}
+
+// 人工节点的表单字段，对应 DSL 的 human_choice.form.fields，所有选项共用。
+message FormField {
+  string key = 1;
+  string label = 2;
+  string type = 3;                // text / textarea / select ...
+  repeated string options = 4;    // select 的可选值
+}
+
+// 流程当前在等待的人工节点。没有等待中的人工节点时为空。
+// 同一任务同一时刻至多一个：多人参与时人工节点串联（单人决策）。
+message PendingAction {
+  string node_id = 1;
+  int32 iteration = 2;
+  bool can_signal = 3;            // 调用人可做决定：是处理人，或任务未分配且调用人在候选范围内；false 时只读展示
+  repeated ActionOption options = 4;
+  int64 deadline_at = 5;          // 节点超时时间，0 = 无
+  repeated FormField form_fields = 6;
+}
+
+// 任务详情页上的简化进度，不暴露 attempt、重试等引擎细节。
+message ProgressStep {
+  string node_id = 1;
+  string display_name = 2;
+  string status = 3;  // pending / running / waiting / succeeded / skipped / failed
+}
+
+message TaskDetail {
+  TaskView task = 1;
+  bytes rendered_json = 2;        // 按调用人受众渲染的 web 卡片；字段、标签、格式由展示模板决定
+  PendingAction pending_action = 3;
+  repeated ProgressStep progress = 4;
 }
 
 message TaskIdReq {
   int64 id = 1;
 }
 
+
 message ListMyTasksReq {
   repeated TaskStatus statuses = 1;
   string task_type_key = 2;
   PageReq page = 3;
+  repeated TaskPriority priorities = 4;  // 空 = 全部
+}
+message ListClaimableTasksReq {
+  string task_type_key = 1;
+  repeated TaskPriority priorities = 2;
+  PageReq page = 3;
 }
 message ListMyTasksResp {
-  repeated TaskView items = 1;
+  repeated TaskSummary items = 1;
   string next_cursor = 2;
 }
 
