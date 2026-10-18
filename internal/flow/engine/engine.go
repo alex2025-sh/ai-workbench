@@ -3,22 +3,17 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/alex2025-sh/ai-workbench/internal/action"
 	"github.com/alex2025-sh/ai-workbench/internal/flow/compiler"
 	"github.com/alex2025-sh/ai-workbench/internal/flow/dsl"
+	"github.com/alex2025-sh/ai-workbench/internal/model"
 	"github.com/alex2025-sh/ai-workbench/internal/pkg/expr"
-	"github.com/alex2025-sh/ai-workbench/internal/spec"
 )
-
-// Definition 是一个已发布的任务类型版本：完整定义与编译后的执行计划。发布后不可变。
-type Definition struct {
-	Key     string
-	Version int
-	Spec    *spec.TaskType
-	Plan    *compiler.Plan
-}
 
 // PlanSource 按 (任务类型, 版本) 加载已发布的定义。
 type PlanSource interface {
@@ -40,10 +35,10 @@ type ExecContext struct {
 	Run       Run
 	Def       *Definition
 	Node      dsl.Node
-	Config    any                       // dsl.DecodeConfig 解码后的配置
+	Config    any                       // dsl.DecodeConfig 解码后的配置，只读
 	Binding   *compiler.ResolvedBinding // human_choice / lark_card 的模板与分配策略
 	Iteration int
-	Attempt   int
+	Attempt   int    // 本轮第几次执行，从 1 开始
 	IdemKey   string // 外部动作的幂等键 run_id:node_id:iteration
 	Env       expr.Env
 	Now       time.Time
@@ -107,7 +102,7 @@ type StartRunCmd struct {
 	BizKey      string
 	Vars        Vars
 	DryRun      bool
-	// Defer 为 true 时只提交启动，不就地推进：新就绪的 job 由随后的 tick 并行执行。
+	// Defer 为 true 时只提交启动，不就地推进：新就绪的 job 由随后的 tick 执行。
 	// cron 来源一次扫描可能启动很多 run，逐个就地推进会把 tick 拖长。
 	Defer bool
 }
@@ -134,4 +129,242 @@ type SignalResult struct {
 type RunView struct {
 	Run   Run       `json:"run"`
 	Nodes []NodeRun `json:"nodes"`
+}
+
+// Options 是引擎的运行参数。
+type Options struct {
+	Owner        string // 本进程标识，写入 wf_job.owner，只用于排查
+	MaxExecCount int    // 单个 run 的节点执行次数上限，默认 500，超出进入人工干预
+	MaxFailCount int    // job 处理出错（加载、提交出错）的次数上限，默认 5，超出后隔离
+
+	// 推进的边界：一次推进最多执行 DriveBudget 个 job（默认 100），同时最多 DriveParallelism 个（默认 4）；
+	// 超出预算的 job 留在表里由 tick 接着执行。
+	DriveBudget      int
+	DriveParallelism int
+	// BackgroundLimit 是同时进行的后台推进数上限（默认 64），满了就不再起后台推进，留给 tick。
+	BackgroundLimit int
+	// BackgroundTimeout 是一次后台推进的时长上限（默认 10 分钟）。
+	BackgroundTimeout time.Duration
+}
+
+// 单次执行的超时：skill_call / llm 可在配置中覆盖，上限 MaxActionTimeout。
+// 认领时租约设为“超时 + leaseMargin”，执行期间不会被重复认领；进程崩溃时租约到期后由 tick 接手。
+const (
+	DefaultActionTimeout = 30 * time.Second
+	DefaultLLMTimeout    = 2 * time.Minute
+	MaxActionTimeout     = 10 * time.Minute
+	leaseMargin          = 30 * time.Second // 超时之后租约再保留的余量，覆盖提交结果的时间
+	commitTimeout        = 10 * time.Second // 提交执行结果的时长上限，不受调用方取消的影响
+)
+
+// ExecTimeout 返回节点单次执行的超时。
+func ExecTimeout(cfg any) time.Duration {
+	d := DefaultActionTimeout
+	switch c := cfg.(type) {
+	case *dsl.SkillCallConfig:
+		if c.Timeout != nil && *c.Timeout > 0 {
+			d = c.Timeout.Std()
+		}
+	case *dsl.LLMConfig:
+		d = DefaultLLMTimeout
+		if c.Timeout != nil && *c.Timeout > 0 {
+			d = c.Timeout.Std()
+		}
+	}
+	if d > MaxActionTimeout {
+		d = MaxActionTimeout
+	}
+	return d
+}
+
+// Engine 是引擎对外的 API，同时是唯一修改流程状态的组件。
+//
+// 所有状态修改都经 update 在锁住 run 行的事务内完成，包括 job 的认领与结束；外部 IO 只在事务之间执行。
+// 引擎是事件驱动的：StartRun（来源产生新数据）、Signal（人工操作）、Cancel（外部状态变化）
+// 与 ProcessDue（xxl-job 的 tick）是仅有的入口，每个入口提交后就地执行新就绪的 job（见 drive.go）。
+type Engine struct {
+	store   *Store
+	plans   PlanSource
+	execs   Executors
+	actions Invoker
+	clock   Clock
+	opts    Options
+
+	// 后台推进（见 driveLater）：有并发上限，进程退出时由 Close 等待或取消。
+	bgSem  chan struct{}
+	bgWG   sync.WaitGroup
+	bgCtx  context.Context
+	bgStop context.CancelFunc
+}
+
+// New 创建引擎。
+func New(store *Store, plans PlanSource, execs Executors, actions Invoker, clock Clock, opts Options) *Engine {
+	if opts.Owner == "" {
+		opts.Owner = "engine"
+	}
+	if opts.MaxExecCount <= 0 {
+		opts.MaxExecCount = 500
+	}
+	if opts.MaxFailCount <= 0 {
+		opts.MaxFailCount = 5
+	}
+	if opts.DriveBudget <= 0 {
+		opts.DriveBudget = 100
+	}
+	if opts.DriveParallelism <= 0 {
+		opts.DriveParallelism = 4
+	}
+	if opts.BackgroundLimit <= 0 {
+		opts.BackgroundLimit = 64
+	}
+	if opts.BackgroundTimeout <= 0 {
+		opts.BackgroundTimeout = 10 * time.Minute
+	}
+	bg, stop := context.WithCancel(context.Background())
+	return &Engine{store: store, plans: plans, execs: execs, actions: actions, clock: clock, opts: opts,
+		bgSem: make(chan struct{}, opts.BackgroundLimit), bgCtx: bg, bgStop: stop}
+}
+
+// Store 返回底层存储，供查询使用。
+func (e *Engine) Store() *Store { return e.store }
+
+// GetRun 返回 run 及其节点状态。
+func (e *Engine) GetRun(ctx context.Context, runID int64) (*RunView, error) {
+	return e.store.GetRun(ctx, runID)
+}
+
+// StartRun 启动一次运行：插入 run 与全部节点，完成 trigger 并传播。BizKey 相同的 run 已存在时直接返回它。
+func (e *Engine) StartRun(ctx context.Context, cmd StartRunCmd) (Run, bool, error) {
+	if existing, err := e.store.findRunByBizKey(ctx, cmd.BizKey); err != nil || existing != nil {
+		if existing != nil {
+			return *existing, false, nil
+		}
+		return Run{}, false, err
+	}
+	def, err := e.plans.Load(ctx, cmd.PlanKey, cmd.PlanVersion)
+	if err != nil {
+		return Run{}, false, err
+	}
+	type started struct {
+		run  Run
+		jobs []Job
+	}
+	out, err := transact(ctx, e.store, func(t *tx) (started, error) {
+		run := Run{PlanKey: cmd.PlanKey, PlanVersion: cmd.PlanVersion, BizKey: cmd.BizKey, Status: RunRunning, Vars: cmd.Vars, DryRun: cmd.DryRun}
+		row, err := runToRow(run)
+		if err != nil {
+			return started{}, err
+		}
+		res, err := t.runs.Insert(t.ctx, row)
+		if err != nil {
+			return started{}, err
+		}
+		if run.ID, err = res.LastInsertId(); err != nil {
+			return started{}, err
+		}
+		s := newRunState(t, run, def, e.clock.Now())
+		for _, id := range def.Plan.Order {
+			s.nodes[id] = &model.WfNodeRun{RunId: uint64(run.ID), NodeId: id, Status: string(NodePending)}
+		}
+		s.event("", "run_started", "", map[string]any{"plan": cmd.PlanKey, "version": cmd.PlanVersion, "biz_key": cmd.BizKey})
+		s.setNode(def.Plan.Entry, NodeRunning, func(r *model.WfNodeRun) { r.StartedAt = s.at() })
+		s.complete(def.Plan.Entry, dsl.PortNext, nil)
+		jobs, err := s.flush()
+		return started{run: s.run, jobs: jobs}, err
+	})
+	if err != nil {
+		if isDuplicate(err) {
+			existing, ferr := e.store.findRunByBizKey(ctx, cmd.BizKey)
+			if ferr == nil && existing != nil {
+				return *existing, false, nil
+			}
+		}
+		return Run{}, false, err
+	}
+	if !cmd.Defer {
+		e.drive(ctx, out.jobs)
+	}
+	return out.run, true, nil
+}
+
+func isDuplicate(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "Duplicate entry")
+}
+
+// Signal 在事务内校验并应用人工选择。点击与超时在同一行锁下竞争，只有先到的生效。
+func (e *Engine) Signal(ctx context.Context, cmd SignalCmd) (SignalResult, error) {
+	res, jobs, err := update(ctx, e, cmd.RunID, 0, func(s *runState) (SignalResult, error) {
+		return s.applySignal(cmd), nil
+	})
+	if err != nil {
+		return SignalResult{}, err
+	}
+	if cmd.Async {
+		e.driveLater(ctx, jobs)
+	} else {
+		e.drive(ctx, jobs)
+	}
+	return res, nil
+}
+
+// applySignal 校验选择；通过时完成人工节点并传播，不通过时不做任何修改。
+func (s *runState) applySignal(cmd SignalCmd) SignalResult {
+	reject := func(reason string) SignalResult { return SignalResult{Reason: reason} }
+	r := s.nodes[cmd.NodeID]
+	n, cfg := s.def.node(cmd.NodeID)
+	switch {
+	case s.run.Status != RunRunning:
+		return reject("流程已结束")
+	case r == nil || n.Type != dsl.NodeHumanChoice:
+		return reject("节点不存在或不是人工选择节点")
+	case NodeStatus(r.Status) != NodeWaiting:
+		return reject("该节点已处理")
+	case int(r.Iteration) != cmd.Iteration:
+		return reject("卡片已过期，请查看最新卡片")
+	}
+	var opt *dsl.Option
+	for i, o := range cfg.(*dsl.HumanChoiceConfig).Options {
+		if o.Key == cmd.Option {
+			opt = &cfg.(*dsl.HumanChoiceConfig).Options[i]
+		}
+	}
+	if opt == nil {
+		return reject(fmt.Sprintf("未知选项 %q", cmd.Option))
+	}
+	if opt.Snooze != nil {
+		return reject("暂不支持推迟，将在提醒功能上线后开放")
+	}
+	for _, f := range opt.RequiredFields {
+		if strings.TrimSpace(cmd.Form[f]) == "" {
+			return reject(fmt.Sprintf("请填写 %s", f))
+		}
+	}
+	s.cancelJobs(cmd.NodeID, JobTimeout)
+	s.event(cmd.NodeID, "signal", cmd.Actor, map[string]any{"option": cmd.Option, "form": cmd.Form})
+	prev, _ := expr.Decode([]byte(nullOr(r.Output)))
+	out, _ := json.Marshal(map[string]any{"option": cmd.Option, "form": cmd.Form, "actor": cmd.Actor, "assignment": prev})
+	// 做决定的人成为任务的处理人：组任务没人认领时也能记下是谁处理的。
+	if cmd.Actor != "" {
+		s.assign(cmd.NodeID, &Assignment{Assignee: cmd.Actor})
+	}
+	s.complete(cmd.NodeID, cmd.Option, out)
+	return SignalResult{Accepted: true}
+}
+
+// Cancel 取消 run：撤销尚未执行的节点与定时，任务置为 solved（auto_closed）。已结束的 run 不受影响。
+func (e *Engine) Cancel(ctx context.Context, runID int64, actor, reason string) error {
+	_, jobs, err := update(ctx, e, runID, 0, func(s *runState) (struct{}, error) {
+		if s.run.Status.Terminal() {
+			return struct{}{}, nil
+		}
+		s.setRunStatus(RunCancelled)
+		s.cancelJobs("", graphJobs...)
+		s.sync = SyncSolved
+		s.event("", "run_cancelled", actor, map[string]any{"reason": reason})
+		return struct{}{}, nil
+	})
+	if err == nil {
+		e.drive(ctx, jobs) // 执行任务同步
+	}
+	return err
 }

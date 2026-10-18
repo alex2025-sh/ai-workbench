@@ -36,7 +36,7 @@ func newHarness(t *testing.T) *harness {
 	testdb.Exec(t, biz, "UPDATE appeal SET updated_at = updated_at - INTERVAL 5 MINUTE")
 
 	clock := engine.NewFakeClock(time.Now())
-	svc, err := Build(Config{DataSource: platform, BizDataSource: biz, RelationsFile: repoFile(t, "deploy/mock/vip_rm.yaml"), Owner: "test", Lease: time.Minute}, clock)
+	svc, err := Build(Config{DataSource: platform, BizDataSource: biz, RelationsFile: repoFile(t, "deploy/mock/vip_rm.yaml"), Owner: "test"}, clock)
 	if err != nil {
 		t.Fatal(err)
 	}

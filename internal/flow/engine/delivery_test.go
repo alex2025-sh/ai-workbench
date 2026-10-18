@@ -14,9 +14,6 @@ import (
 
 func (e *env) engineWith(owner string, opts engine.Options) *engine.Engine {
 	opts.Owner = owner
-	if opts.Lease == 0 {
-		opts.Lease = time.Minute
-	}
 	return engine.New(engine.NewStore(e.conn), e.plans, e.execs, e.rt, e.clock, opts)
 }
 
@@ -52,9 +49,19 @@ func TestCardSentAfterWaiting(t *testing.T) {
 	if sent := e.lark.Sent(); len(sent) != 1 || sent[0].IdemKey == "" {
 		t.Fatalf("cards = %+v", sent)
 	}
-	if e.eventCount(run.ID, "effect_done") != 1 {
+	if e.effectEvents(run.ID, "effect_done", "lark_card") != 1 {
 		t.Fatal("missing effect_done event")
 	}
+}
+
+// effectEvents 统计某种 effect 的事件数（任务同步也是 effect，会写同类事件）。
+func (e *env) effectEvents(runID int64, typ, kind string) int {
+	e.t.Helper()
+	var n int
+	if err := e.conn.QueryRowCtx(e.ctx, &n, "select count(*) from wf_event where run_id = ? and type = ? and json_unquote(json_extract(payload, '$.kind')) = ?", runID, typ, kind); err != nil {
+		e.t.Fatal(err)
+	}
+	return n
 }
 
 // TestCardDeliveryRetriesThenIntervention：发卡片失败只重试发送；一直失败约 30 分钟后 run 转为人工干预。

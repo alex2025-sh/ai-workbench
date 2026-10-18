@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -74,61 +73,6 @@ func TestSameOwnerReclaim(t *testing.T) {
 	}
 }
 
-// TestPauseBeforeExecuteIsFenced：A 认领后、开始执行前停顿超过租约，B 重新认领并开始执行；
-// A 恢复后发现认领已失效，不执行、不改写节点的 attempt，也不取消 B 持有的 job。
-func TestPauseBeforeExecuteIsFenced(t *testing.T) {
-	e := newEnv(t)
-	e.publish(linear)
-	releaseB := make(chan struct{})
-	var releaseOnce sync.Once
-	release := func() { releaseOnce.Do(func() { close(releaseB) }) }
-	defer release() // 回归时 A 也会卡在 skill 里，保证测试退出
-	var calls atomic.Int32
-	e.skills.Builtin["test.step"] = func(ctx context.Context, in json.RawMessage) (any, error) {
-		calls.Add(1)
-		<-releaseB
-		return echo(ctx, in)
-	}
-	enA, enB := e.engine("A"), e.engine("B")
-	paused, resumeA := make(chan struct{}), make(chan struct{})
-	var once atomic.Bool
-	engine.SetAfterClaim(enA, func(j engine.Job) {
-		if j.Kind == engine.JobExecute && j.NodeID == "s" && once.CompareAndSwap(false, true) {
-			close(paused)
-			<-resumeA
-		}
-	})
-	doneA := make(chan error, 1)
-	go func() { _, err := e.startRun(enA, "biz-pause", 99); doneA <- err }()
-	<-paused
-	runID := e.runID("biz-pause")
-
-	e.clock.Advance(2 * time.Minute)
-	doneB := make(chan struct{})
-	go func() { e.tick(enB); close(doneB) }()
-	waitFor(t, func() bool { return calls.Load() == 1 }) // B 正在执行
-
-	close(resumeA)
-	select {
-	case err := <-doneA:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatalf("A executed the node after losing its claim (calls=%d)", calls.Load())
-	}
-	if _, nodes := nodeStatus(t, enA, runID); nodes["s"].Attempt != 2 || nodes["s"].Status != engine.NodeRunning {
-		t.Fatalf("A must not touch the node: s=%s attempt=%d", nodes["s"].Status, nodes["s"].Attempt)
-	}
-	release()
-	<-doneB
-
-	status, nodes := nodeStatus(t, enB, runID)
-	if status != engine.RunSucceeded || nodes["s"].Attempt != 2 || calls.Load() != 1 {
-		t.Fatalf("run=%s s.attempt=%d calls=%d", status, nodes["s"].Attempt, calls.Load())
-	}
-}
-
 // TestActionTimeout：skill_call 的 timeout 生效，超时按 timeout 错误码失败。
 func TestActionTimeout(t *testing.T) {
 	e := newEnv(t)
@@ -159,7 +103,7 @@ func TestActionTimeout(t *testing.T) {
 	}
 }
 
-// TestLeaseCoversTimeout：节点超时长于默认租约时，开始执行会把租约延长到超时之后，执行期间不会被重复认领。
+// TestLeaseCoversTimeout：认领时租约设为节点超时之后，慢节点执行期间不会被重复认领。
 func TestLeaseCoversTimeout(t *testing.T) {
 	e := newEnv(t)
 	e.publish(`
@@ -183,7 +127,7 @@ func TestLeaseCoversTimeout(t *testing.T) {
 	go func() { _, err := e.startRun(enA, "biz-slow", 1); doneA <- err }()
 	waitFor(t, func() bool { return calls.Load() == 1 })
 
-	e.clock.Advance(2 * time.Minute) // 超过 1 分钟的默认租约，但仍在 5 分钟超时之内
+	e.clock.Advance(2 * time.Minute) // 超过默认动作超时的租约，但仍在 5 分钟超时之内
 	n, err := enB.ProcessDue(e.ctx, engine.TickOptions{})
 	if err != nil || n != 0 {
 		t.Fatalf("B must not reclaim a job within its timeout: n=%d err=%v", n, err)
@@ -227,15 +171,15 @@ func TestNonRetryableErrors(t *testing.T) {
 }
 
 // poisonRun 插入一个引用了不存在定义版本的 run 及其 job：每次处理都会在加载定义时失败。
-func (e *env) poisonRun(biz string, attempt int) (runID, jobID int64) {
+func (e *env) poisonRun(biz string) (runID, jobID int64) {
 	e.t.Helper()
 	res, err := e.conn.ExecCtx(e.ctx, "insert into wf_run (plan_id, plan_version, biz_key, status, vars, version) values ('flow', 99, ?, 'running', '{\"payload\":{}}', 1)", biz)
 	if err != nil {
 		e.t.Fatal(err)
 	}
 	runID, _ = res.LastInsertId()
-	res, err = e.conn.ExecCtx(e.ctx, "insert into wf_job (run_id, node_id, iteration, kind, due_at, status, attempt, idem_key) values (?, 's', 0, 'execute', ?, 'pending', ?, ?)",
-		runID, e.clock.Now(), attempt, biz+":s")
+	res, err = e.conn.ExecCtx(e.ctx, "insert into wf_job (run_id, node_id, iteration, kind, due_at, status, idem_key) values (?, 's', 0, 'execute', ?, 'pending', ?)",
+		runID, e.clock.Now(), biz+":s")
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -270,7 +214,7 @@ func TestPoisonJobQuarantined(t *testing.T) {
 	e := newEnv(t)
 	e.publish(linear)
 	en := e.engine("w1")
-	runID, jobID := e.poisonRun("biz-poison", 0)
+	runID, jobID := e.poisonRun("biz-poison")
 	for i := 1; i <= 4; i++ {
 		e.tick(en)
 		if status, fails, _ := e.jobState(jobID); status != "pending" || fails != i {
@@ -300,17 +244,97 @@ func TestPoisonJobQuarantined(t *testing.T) {
 	}
 }
 
-// TestClaimCap：反复认领却从未完成（如处理时进程崩溃）的 job 超过认领上限后被隔离，不再执行。
-func TestClaimCap(t *testing.T) {
-	e := newEnv(t)
-	e.publish(linear)
-	en := e.engine("w1")
-	runID, jobID := e.poisonRun("biz-crashloop", 30)
-	e.tick(en)
-	if status, fails, _ := e.jobState(jobID); status != "failed" || fails != 0 {
-		t.Fatalf("job status=%s fail_count=%d", status, fails)
+// crash 让 run 停在“s 已被某个进程认领、执行到一半进程崩溃”的状态：s 已执行 attempt 次，租约已过期。
+func (e *env) crash(runID int64, attempt int) {
+	e.t.Helper()
+	if _, err := e.conn.ExecCtx(e.ctx, "update wf_node_run set status = 'running', attempt = ? where run_id = ? and node_id = 's'", attempt, runID); err != nil {
+		e.t.Fatal(err)
 	}
-	if e.eventCount(runID, "job_quarantined") != 1 {
-		t.Fatal("missing quarantine event")
+	if _, err := e.conn.ExecCtx(e.ctx, "update wf_job set owner = 'dead', attempt = ?, locked_until = ? where run_id = ? and node_id = 's' and kind = 'execute'",
+		attempt, e.clock.Now().Add(-time.Second), runID); err != nil {
+		e.t.Fatal(err)
+	}
+}
+
+// TestLeaseExpiryCountsAsAttempt：执行中进程崩溃，租约到期后由 tick 接手并重新执行，崩溃的那次计入执行次数；
+// 次数用尽时按超时失败处理，不再执行。
+func TestLeaseExpiryCountsAsAttempt(t *testing.T) {
+	e := newEnv(t)
+	e.publish(linear) // s 是 skill_call，默认最多 5 次
+	var calls atomic.Int32
+	e.skills.Builtin["test.step"] = func(ctx context.Context, in json.RawMessage) (any, error) {
+		calls.Add(1)
+		return echo(ctx, in)
+	}
+	en := e.engine("w1")
+	start := func(biz string) int64 {
+		payload, _ := json.Marshal(map[string]any{"uid": "u1", "n": 1})
+		run, _, err := en.StartRun(e.ctx, engine.StartRunCmd{PlanKey: "flow", PlanVersion: 1, BizKey: biz, Vars: engine.Vars{Payload: payload}, Defer: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return run.ID
+	}
+
+	resumed := start("biz-crash-once")
+	e.crash(resumed, 1)
+	e.tick(en)
+	status, nodes := nodeStatus(t, en, resumed)
+	if status != engine.RunSucceeded || nodes["s"].Attempt != 2 || calls.Load() != 1 || e.eventCount(resumed, "node_lease_expired") != 1 {
+		t.Fatalf("run=%s s.attempt=%d calls=%d", status, nodes["s"].Attempt, calls.Load())
+	}
+
+	exhausted := start("biz-crash-loop")
+	e.crash(exhausted, 5)
+	e.tick(en)
+	status, nodes = nodeStatus(t, en, exhausted)
+	var out struct{ Code string }
+	_ = json.Unmarshal(nodes["s"].Output, &out)
+	if status != engine.RunNeedsIntervention || nodes["s"].Status != engine.NodeFailed || out.Code != action.CodeTimeout || calls.Load() != 1 {
+		t.Fatalf("run=%s s=%s output=%s calls=%d", status, nodes["s"].Status, nodes["s"].Output, calls.Load())
+	}
+}
+
+// TestInterruptedExecutionIsRequeued：进程退出打断了正在执行的节点（调用方 ctx 取消），
+// 结果仍会提交：job 放回队列、不计执行次数，下一次 tick 立即接手。
+func TestInterruptedExecutionIsRequeued(t *testing.T) {
+	e := newEnv(t)
+	e.publish(`
+  nodes:
+    - { id: start, type: trigger }
+    - { id: s, type: skill_call, config: { skill: test.step }, retry: { max_attempts: 1 } }
+    - { id: done, type: end }
+  edges:
+    - { id: e1, from: start, port: next, to: s }
+    - { id: e2, from: s, port: next, to: done }
+`)
+	var calls atomic.Int32
+	e.skills.Builtin["test.step"] = func(ctx context.Context, in json.RawMessage) (any, error) {
+		if calls.Add(1) == 1 {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		return echo(ctx, in)
+	}
+	en := e.engine("w1")
+	ctx, cancel := context.WithCancel(e.ctx)
+	done := make(chan error, 1)
+	go func() {
+		payload, _ := json.Marshal(map[string]any{"uid": "u1", "n": 1})
+		_, _, err := en.StartRun(ctx, engine.StartRunCmd{PlanKey: "flow", PlanVersion: 1, BizKey: "biz-interrupt", Vars: engine.Vars{Payload: payload}})
+		done <- err
+	}()
+	waitFor(t, func() bool { return calls.Load() == 1 })
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	runID := e.runID("biz-interrupt")
+	if status, nodes := nodeStatus(t, en, runID); status != engine.RunRunning || nodes["s"].Status != engine.NodeReady || nodes["s"].Attempt != 0 {
+		t.Fatalf("after interrupt run=%s s=%s attempt=%d", status, nodes["s"].Status, nodes["s"].Attempt)
+	}
+	e.tick(en)
+	if status, nodes := nodeStatus(t, en, runID); status != engine.RunSucceeded || nodes["s"].Attempt != 1 {
+		t.Fatalf("after tick run=%s s.attempt=%d", status, nodes["s"].Attempt)
 	}
 }

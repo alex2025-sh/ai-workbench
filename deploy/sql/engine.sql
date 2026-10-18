@@ -50,7 +50,7 @@ CREATE TABLE `wf_node_run` (
   `status`      varchar(32)  NOT NULL COMMENT 'pending / ready / running / waiting / succeeded / skipped / failed',
   `port`        varchar(64)  NOT NULL DEFAULT '' COMMENT '完成时选中的输出端口',
   `output`      json         NULL COMMENT '节点输出；大输出只存引用',
-  `attempt`     int          NOT NULL DEFAULT 0,
+  `attempt`     int          NOT NULL DEFAULT 0 COMMENT '本轮的执行次数（含租约到期的执行），与重试策略的 max_attempts 比较',
   `wait_until`  datetime(3)  NULL,
   `started_at`  datetime(3)  NULL,
   `finished_at` datetime(3)  NULL,
@@ -77,22 +77,22 @@ CREATE TABLE `wf_node_run_history` (
   UNIQUE KEY `uk_run_node_iter` (`run_id`, `node_id`, `iteration`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin /*T! SHARD_ROW_ID_BITS=4 */ COMMENT='节点历史轮次';
 
--- 统一任务表：立即执行、超时、唤醒、定时器、任务状态同步都是 job
+-- 统一任务表：节点执行、定时器、超时，以及状态提交后才执行的外部动作（effect，含任务状态同步）都是 job
 CREATE TABLE `wf_job` (
   `id`           bigint unsigned NOT NULL AUTO_INCREMENT,
   `run_id`       bigint unsigned NOT NULL,
   `node_id`      varchar(64)  NOT NULL DEFAULT '',
   `iteration`    int          NOT NULL DEFAULT 0,
-  `kind`         varchar(16)  NOT NULL COMMENT 'execute / timeout / wake / timer / sync_task',
-  `payload`      json         NULL COMMENT 'sync_task 等 job 的参数',
+  `kind`         varchar(16)  NOT NULL COMMENT 'execute / timer / timeout / effect',
+  `payload`      json         NULL COMMENT 'effect 的参数',
   `due_at`       datetime(3)  NOT NULL,
   `status`       varchar(16)  NOT NULL COMMENT 'pending / done / cancelled / failed（隔离的毒丸 job）',
-  `attempt`      int          NOT NULL DEFAULT 0 COMMENT '认领次数；(owner, attempt) 是一次认领的凭证',
-  `fail_count`   int          NOT NULL DEFAULT 0 COMMENT '处理失败次数（加载或提交失败，不含节点重试），超限后隔离',
+  `attempt`      int          NOT NULL DEFAULT 0 COMMENT '认领次数；每次认领加 1，是这次认领的凭证',
+  `fail_count`   int          NOT NULL DEFAULT 0 COMMENT '处理失败次数（加载或提交出错，不含节点重试），超限后隔离',
   `owner`        varchar(64)  NOT NULL DEFAULT '' COMMENT '租约持有者，空 = 未认领',
   `locked_until` datetime(3)  NULL COMMENT '租约到期时间',
   `last_error`   varchar(1024) NOT NULL DEFAULT '',
-  `idem_key`     varchar(191) NOT NULL COMMENT 'run_id:node_id:iteration:kind[:seq]',
+  `idem_key`     varchar(191) NOT NULL COMMENT 'run_id:node_id:iteration:kind[:后缀]',
   `created_at`   datetime(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   `updated_at`   datetime(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   PRIMARY KEY (`id`) /*T![clustered_index] NONCLUSTERED */,

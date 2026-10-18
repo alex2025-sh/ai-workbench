@@ -17,8 +17,6 @@ type (
 		WithSession(session sqlx.Session) WfRunModel
 		// FindOneForUpdate 在事务内锁住 run 行，串行化同一 run 的推进。
 		FindOneForUpdate(ctx context.Context, id uint64) (*WfRun, error)
-		// UpdateState 更新状态、版本与执行计数，变量不变。
-		UpdateState(ctx context.Context, id uint64, status string, version, execCount int64) error
 	}
 
 	customWfRunModel struct {
@@ -48,10 +46,4 @@ func (m *customWfRunModel) FindOneForUpdate(ctx context.Context, id uint64) (*Wf
 	default:
 		return nil, err
 	}
-}
-
-func (m *customWfRunModel) UpdateState(ctx context.Context, id uint64, status string, version, execCount int64) error {
-	query := fmt.Sprintf("update %s set `status` = ?, `version` = ?, `exec_count` = ? where `id` = ?", m.table)
-	_, err := m.conn.ExecCtx(ctx, query, status, version, execCount, id)
-	return err
 }
