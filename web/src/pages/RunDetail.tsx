@@ -1,12 +1,15 @@
-// 运行详情：节点状态表与事件时间线。运行干预（取消运行、重试节点、跳过节点）需要 run.admin，原因必填，写入 run 事件。
-// 三期换成运行态画布。
+// 运行详情：运行态画布（节点按状态着色、走过的连线高亮）、选中节点的详情与干预、可读的事件时间线。
+// 运行干预（取消运行、重试节点、跳过节点）需要 run.admin，原因必填，写入 run 事件。
 import { ArrowLeftOutlined, ReloadOutlined } from '@ant-design/icons';
-import { App as AntApp, Button, Card, Descriptions, Form, Input, Modal, Result, Select, Space, Spin, Table, Tag, Typography } from 'antd';
+import { Alert, App as AntApp, Button, Card, Descriptions, Empty, Form, Input, Modal, Result, Select, Space, Spin, Table, Tag, Typography } from 'antd';
+import dayjs from 'dayjs';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ApiError, decodeJson } from '../api/client';
-import { runApi } from '../api/services';
-import type { NodeView, RunEvent, RunView } from '../api/types';
+import { catalogApi, runApi } from '../api/services';
+import type { NodeTypeInfo, NodeView, RunEvent, RunView } from '../api/types';
+import { RunCanvas } from '../components/canvas/RunCanvas';
+import type { Positions, Workflow } from '../components/canvas/model';
 import { fmtTime, nodeStatusLabel, runStatusColor, runStatusLabel } from '../format';
 import { useIdentity } from '../identity';
 
@@ -26,20 +29,24 @@ export default function RunDetail() {
   const { id = '' } = useParams();
   const [run, setRun] = useState<RunView>();
   const [events, setEvents] = useState<RunEvent[]>([]);
+  const [catalog, setCatalog] = useState<NodeTypeInfo[]>([]);
   const [error, setError] = useState<Error>();
   const [cancelling, setCancelling] = useState(false);
   const [intervening, setIntervening] = useState<Intervention>();
+  const [selected, setSelected] = useState<string>();
   const { can } = useIdentity();
+
+  const workflow = useMemo(() => decodeJson<Workflow>(run?.graph_json) ?? { nodes: [], edges: [] }, [run?.graph_json]);
+  const positions = useMemo(() => decodeJson<{ canvas?: { positions?: Positions } }>(run?.ui_json)?.canvas?.positions, [run?.ui_json]);
 
   // 节点的出口取自 workflow 图中从它连出的边（跳过时选择沿哪个出口继续）。
   const ports = useMemo(() => {
-    const graph = decodeJson<{ edges?: { from: string; port: string }[] }>(run?.graph_json);
     const out: Record<string, string[]> = {};
-    for (const e of graph?.edges ?? []) {
+    for (const e of workflow.edges) {
       out[e.from] = Array.from(new Set([...(out[e.from] ?? []), e.port]));
     }
     return out;
-  }, [run?.graph_json]);
+  }, [workflow]);
 
   const load = useCallback(async () => {
     try {
@@ -54,7 +61,16 @@ export default function RunDetail() {
 
   useEffect(() => {
     void load();
+    catalogApi
+      .nodeTypes()
+      .then((r) => setCatalog(r.items))
+      .catch(() => setCatalog([]));
   }, [load]);
+
+  // 首次加载时默认选中卡住的节点。
+  useEffect(() => {
+    if (run?.blocked_node) setSelected((cur) => cur ?? run.blocked_node);
+  }, [run?.blocked_node]);
 
   // 运行中的 run 每 5 秒刷新一次。
   useEffect(() => {
@@ -68,6 +84,31 @@ export default function RunDetail() {
     return <Result status={notFound ? '404' : 'error'} title={notFound ? 'Run 不存在' : '加载失败'} subTitle={error.message} extra={<Link to="/runs">返回运行监控</Link>} />;
   }
   if (!run) return <Spin style={{ display: 'block', marginTop: 80 }} />;
+
+  const admin = can('run.admin') && (run.status === 'running' || run.status === 'needs_intervention');
+  // 重试：run 暂停时，失败的节点或卡片发送失败而仍在等待的节点；跳过：进行中或失败、且有出口的节点。
+  const actionsFor = (n?: NodeView) => {
+    if (!admin || !n) return null;
+    const retry = run.status === 'needs_intervention' && (n.status === 'failed' || n.status === 'waiting');
+    const skip = ['ready', 'running', 'waiting', 'failed'].includes(n.status) && (ports[n.node_id] ?? []).length > 0;
+    if (!retry && !skip) return null;
+    return (
+      <Space size="small">
+        {retry && (
+          <Button size="small" type="primary" onClick={() => setIntervening({ kind: 'retry', node: n.node_id })}>
+            重试
+          </Button>
+        )}
+        {skip && (
+          <Button size="small" danger onClick={() => setIntervening({ kind: 'skip', node: n.node_id })}>
+            跳过
+          </Button>
+        )}
+      </Space>
+    );
+  };
+  const nodeById = (nid?: string) => run.nodes.find((n) => n.node_id === nid);
+  const blocked = nodeById(run.blocked_node);
 
   return (
     <>
@@ -85,7 +126,7 @@ export default function RunDetail() {
         }
         extra={
           <Space>
-            {can('run.admin') && (run.status === 'running' || run.status === 'needs_intervention') && (
+            {admin && (
               <Button danger onClick={() => setCancelling(true)}>
                 取消运行
               </Button>
@@ -104,6 +145,23 @@ export default function RunDetail() {
             </Link>
           </Descriptions.Item>
         </Descriptions>
+        {run.status === 'needs_intervention' && (
+          <Alert
+            type="error"
+            showIcon
+            style={{ marginTop: 12 }}
+            message={
+              <Space>
+                卡在节点
+                <Typography.Link code onClick={() => setSelected(run.blocked_node)}>
+                  {run.blocked_node || '—'}
+                </Typography.Link>
+              </Space>
+            }
+            description={run.blocked_reason || '原因未知，见下方事件'}
+            action={actionsFor(blocked)}
+          />
+        )}
       </Card>
       {cancelling && (
         <CancelModal
@@ -115,49 +173,22 @@ export default function RunDetail() {
           }}
         />
       )}
-      <Card title="节点" size="small" style={{ marginBottom: 16 }}>
-        <Table<NodeView>
-          rowKey={(n) => `${n.node_id}:${n.iteration}`}
-          size="small"
-          pagination={false}
-          dataSource={run.nodes}
-          columns={[
-            { title: '节点', dataIndex: 'node_id', render: (v: string) => <Typography.Text code>{v}</Typography.Text> },
-            { title: '轮次', dataIndex: 'iteration' },
-            { title: '状态', dataIndex: 'status', render: (s: string) => <Tag color={nodeColor[s]}>{nodeStatusLabel[s] ?? s}</Tag> },
-            { title: '出口', dataIndex: 'port', render: (v: string) => v || '—' },
-            { title: '执行次数', dataIndex: 'attempt' },
-            { title: '开始', dataIndex: 'started_at', render: (v: string) => fmtTime(v, 'MM-DD HH:mm:ss') },
-            { title: '结束', dataIndex: 'finished_at', render: (v: string) => fmtTime(v, 'MM-DD HH:mm:ss') },
-            ...(can('run.admin') && (run.status === 'running' || run.status === 'needs_intervention')
-              ? [
-                  {
-                    title: '干预',
-                    render: (_: unknown, n: NodeView) => {
-                      // 重试：run 暂停时，失败的节点或卡片发送失败而仍在等待的节点；跳过：进行中或失败的节点。
-                      const retry = run.status === 'needs_intervention' && (n.status === 'failed' || n.status === 'waiting');
-                      const skip = ['ready', 'running', 'waiting', 'failed'].includes(n.status) && (ports[n.node_id] ?? []).length > 0;
-                      return (
-                        <Space size="small">
-                          {retry && (
-                            <Button size="small" onClick={() => setIntervening({ kind: 'retry', node: n.node_id })}>
-                              重试
-                            </Button>
-                          )}
-                          {skip && (
-                            <Button size="small" danger onClick={() => setIntervening({ kind: 'skip', node: n.node_id })}>
-                              跳过
-                            </Button>
-                          )}
-                        </Space>
-                      );
-                    },
-                  },
-                ]
-              : []),
-          ]}
-        />
-      </Card>
+      <div style={{ display: 'flex', gap: 16, marginBottom: 16, height: 520 }}>
+        <Card size="small" title="流程" style={{ flex: 1, minWidth: 0 }} styles={{ body: { height: 'calc(100% - 38px)', padding: 0 } }}>
+          {catalog.length > 0 && (
+            <RunCanvas
+              workflow={workflow}
+              positions={positions}
+              nodes={run.nodes}
+              catalog={catalog}
+              selected={selected}
+              focus={run.blocked_node || run.nodes.find((n) => ['failed', 'waiting', 'running', 'ready'].includes(n.status))?.node_id}
+              onSelect={setSelected}
+            />
+          )}
+        </Card>
+        <NodePanel node={nodeById(selected)} nodeId={selected} workflow={workflow} actions={actionsFor(nodeById(selected))} />
+      </div>
       {intervening && (
         <InterveneModal
           runId={run.run_id}
@@ -181,15 +212,112 @@ export default function RunDetail() {
             expandedRowRender: (e) => <pre style={{ margin: 0, fontSize: 12 }}>{JSON.stringify(decodeJson(e.payload_json), null, 2)}</pre>,
           }}
           columns={[
-            { title: '时间', dataIndex: 'created_at', render: (v: string) => fmtTime(v, 'MM-DD HH:mm:ss.SSS') },
-            { title: '节点', dataIndex: 'node_id', render: (v: string) => v || '—' },
-            { title: '事件', dataIndex: 'type' },
-            { title: '操作人', dataIndex: 'actor', render: (v: string) => v || 'system' },
+            { title: '时间', dataIndex: 'created_at', width: 150, render: (v: string) => fmtTime(v, 'MM-DD HH:mm:ss.SSS') },
+            {
+              title: '节点',
+              dataIndex: 'node_id',
+              width: 140,
+              render: (v: string) => (v ? <Typography.Link onClick={() => setSelected(v)}>{v}</Typography.Link> : '—'),
+            },
+            {
+              title: '事件',
+              render: (_, e) => {
+                const { text, bad } = describeEvent(e);
+                return <Typography.Text type={bad ? 'danger' : undefined}>{text}</Typography.Text>;
+              },
+            },
+            { title: '操作人', dataIndex: 'actor', width: 160, render: (v: string) => v || 'system' },
           ]}
         />
       </Card>
     </>
   );
+}
+
+// 选中节点的详情：状态、出口、执行次数、起止时间、最近一次错误与干预按钮。
+function NodePanel(props: { node?: NodeView; nodeId?: string; workflow: Workflow; actions: React.ReactNode }) {
+  const { node: n, nodeId } = props;
+  const def = props.workflow.nodes.find((x) => x.id === nodeId);
+  return (
+    <Card size="small" title={def ? def.name || def.id : '节点详情'} style={{ width: 340, overflow: 'auto' }} extra={props.actions}>
+      {!def ? (
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="点击流程图中的节点查看详情" />
+      ) : (
+        <>
+          <Descriptions size="small" column={1}>
+            <Descriptions.Item label="节点">
+              <Typography.Text code>{def.id}</Typography.Text>
+              <Typography.Text type="secondary" style={{ marginLeft: 4 }}>
+                {def.type}
+              </Typography.Text>
+            </Descriptions.Item>
+            <Descriptions.Item label="状态">{n ? <Tag color={nodeColor[n.status]}>{nodeStatusLabel[n.status] ?? n.status}</Tag> : <Tag>未到达</Tag>}</Descriptions.Item>
+            {n?.port && <Descriptions.Item label="出口">{n.port}</Descriptions.Item>}
+            {n && n.attempt > 0 && <Descriptions.Item label="执行次数">{n.attempt}</Descriptions.Item>}
+            {n && <Descriptions.Item label="开始">{fmtTime(n.started_at, 'MM-DD HH:mm:ss')}</Descriptions.Item>}
+            {n && <Descriptions.Item label="结束">{fmtTime(n.finished_at, 'MM-DD HH:mm:ss')}</Descriptions.Item>}
+          </Descriptions>
+          {n?.last_error && (
+            <Alert
+              type={n.status === 'failed' ? 'error' : 'warning'}
+              message={n.status === 'failed' ? '错误' : '最近一次失败（之后已重试）'}
+              description={<Typography.Text style={{ fontSize: 12, wordBreak: 'break-all' }}>{n.last_error}</Typography.Text>}
+            />
+          )}
+        </>
+      )}
+    </Card>
+  );
+}
+
+const effectLabel: Record<string, string> = { sync_task: '同步任务状态', lark_card: '发送 Lark 卡片', send_email: '发送邮件', emit_event: '发出事件' };
+
+/** 把事件翻译成一句话；bad 表示失败类事件。原始 payload 可在展开行中查看。 */
+function describeEvent(e: RunEvent): { text: string; bad?: boolean } {
+  const p = (decodeJson<Record<string, any>>(e.payload_json) ?? {}) as Record<string, any>;
+  const at = (v?: string) => (v ? dayjs(v).format('MM-DD HH:mm:ss') : '');
+  switch (e.type) {
+    case 'run_started':
+      return { text: '流程启动' };
+    case 'node_started':
+      return { text: p.attempt > 1 ? `开始执行（第 ${p.attempt} 次）` : '开始执行' };
+    case 'node_completed':
+      return { text: p.port && p.port !== 'next' ? `完成，走出口 ${p.port}` : '完成' };
+    case 'node_skipped':
+      return { text: '未走到的分支，跳过' };
+    case 'node_waiting':
+      return { text: p.until ? `等待到 ${at(p.until)}` : '等待人工处理' };
+    case 'node_retry':
+      return { text: `第 ${p.attempt} 次执行失败，${at(p.next_at)} 重试：${p.error}`, bad: true };
+    case 'node_failed':
+      return { text: `执行失败（共 ${p.attempt} 次）：${p.error}`, bad: true };
+    case 'node_lease_expired':
+      return { text: `第 ${p.attempt} 次执行超时未返回`, bad: true };
+    case 'signal':
+      return { text: `做出选择：${p.option}` };
+    case 'effect_done':
+      return { text: `${effectLabel[p.kind] ?? p.kind}：完成` };
+    case 'effect_failed':
+      return { text: `${effectLabel[p.kind] ?? p.kind}：失败（第 ${p.attempt} 次）：${p.error}`, bad: true };
+    case 'run_needs_intervention':
+      return { text: `需要人工介入：${p.reason}`, bad: true };
+    case 'job_quarantined':
+      return { text: `内部任务多次处理失败，已隔离：${p.reason}`, bad: true };
+    case 'node_retried':
+      return { text: `人工重试：${p.reason}` };
+    case 'node_skipped_manually':
+      return { text: `人工跳过，走出口 ${p.port}：${p.reason}` };
+    case 'run_resumed':
+      return { text: `恢复运行：${p.reason}` };
+    case 'run_cancelled':
+      return { text: `取消运行：${p.reason}` };
+    default:
+      if (e.type.startsWith('run_')) {
+        const status = e.type.slice(4);
+        return { text: `流程结束：${runStatusLabel[status] ?? status}${p.resolution ? `（${p.resolution}）` : ''}`, bad: status === 'failed' };
+      }
+      return { text: e.type };
+  }
 }
 
 // 取消运行：撤销尚未执行的节点与定时，任务置为已完成（auto_closed）。原因必填，写入 run 事件。

@@ -67,10 +67,14 @@ func (l *ListRunsLogic) ListRuns(in *pb.ListRunsReq) (*pb.ListRunsResp, error) {
 	}
 	out := &pb.ListRunsResp{NextCursor: next}
 	for _, r := range runs {
-		out.Items = append(out.Items, &pb.RunSummary{
+		item := &pb.RunSummary{
 			RunId: r.Run.ID, TaskTypeKey: r.Run.PlanKey, TaskTypeVersion: int32(r.Run.PlanVersion), Status: string(r.Run.Status),
 			CreatedAt: r.CreatedAt.UnixMilli(), UpdatedAt: r.UpdatedAt.UnixMilli(),
-		})
+		}
+		if b := r.Blocked; b != nil {
+			item.BlockedNode, item.BlockedReason = b.NodeID, b.Reason
+		}
+		out.Items = append(out.Items, item)
 	}
 	return out, nil
 }

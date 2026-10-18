@@ -1,4 +1,5 @@
 // 画布上的节点卡片：上方一个入口，下方每个输出端口一个出口（端口名标在下面）。
+// 运行态（run 不为空）按节点状态着色，未到达的节点淡化。
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { Typography } from 'antd';
 import { NODE_HEIGHT, NODE_WIDTH } from './model';
@@ -12,14 +13,27 @@ export interface FlowNodeData extends Record<string, unknown> {
   category: string;
   hasIssue: boolean;
   isEntry: boolean;
+  run?: { status?: string; label: string; detail?: string }; // 运行态：status 为空表示未到达
 }
+
+// 运行态的节点状态颜色。
+export const runNodeColor: Record<string, string> = {
+  succeeded: '#52c41a',
+  waiting: '#1677ff',
+  running: '#1677ff',
+  ready: '#1677ff',
+  failed: '#ff4d4f',
+  skipped: '#8c8c8c',
+  cancelled: '#8c8c8c',
+};
 
 const accent: Record<string, string> = { native: '#1677ff', action: '#13a8a8' };
 
 export function FlowNode({ data, selected }: NodeProps) {
   const d = data as FlowNodeData;
-  const border = d.hasIssue ? '#ff4d4f' : selected ? '#1677ff' : '#d9d9d9';
-  const width = selected || d.hasIssue ? 2 : 1;
+  const runColor = d.run?.status ? (runNodeColor[d.run.status] ?? '#d9d9d9') : undefined;
+  const border = d.hasIssue ? '#ff4d4f' : selected ? '#1677ff' : (runColor ?? '#d9d9d9');
+  const width = selected || d.hasIssue || runColor ? 2 : 1;
   return (
     <div
       style={{
@@ -32,13 +46,14 @@ export function FlowNode({ data, selected }: NodeProps) {
         borderRightWidth: width,
         borderBottomWidth: width,
         borderLeftWidth: width,
-        borderTopColor: d.hasIssue ? '#ff4d4f' : (accent[d.category] ?? '#8c8c8c'),
+        borderTopColor: d.hasIssue ? '#ff4d4f' : (runColor ?? accent[d.category] ?? '#8c8c8c'),
         borderRightColor: border,
         borderBottomColor: border,
         borderLeftColor: border,
         borderRadius: 6,
         padding: '6px 10px 14px',
         boxShadow: selected ? '0 2px 8px rgba(22,119,255,0.25)' : undefined,
+        opacity: d.run && !d.run.status ? 0.45 : 1,
       }}
     >
       {!d.isEntry && <Handle type="target" position={Position.Top} id="in" />}
@@ -55,7 +70,13 @@ export function FlowNode({ data, selected }: NodeProps) {
           {d.id}
         </Typography.Text>
       )}
-      {d.summary && (
+      {d.run && (
+        <div style={{ fontSize: 12, color: runColor ?? '#8c8c8c' }}>
+          {d.run.label}
+          {d.run.detail && <span style={{ color: '#8c8c8c' }}> · {d.run.detail}</span>}
+        </div>
+      )}
+      {!d.run && d.summary && (
         <div>
           <Typography.Text type="secondary" ellipsis style={{ fontSize: 12, maxWidth: NODE_WIDTH - 20 }}>
             {d.summary}

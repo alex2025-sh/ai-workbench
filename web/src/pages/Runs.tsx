@@ -1,6 +1,6 @@
 // 运行监控列表：按状态、任务类型过滤；needs_intervention 不同步到任务中心，在这里置顶提醒。
 import { ReloadOutlined, WarningOutlined } from '@ant-design/icons';
-import { Alert, Badge, Button, Input, Select, Space, Table, Tag } from 'antd';
+import { Alert, Badge, Button, Input, Select, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ApiError } from '../api/client';
@@ -93,6 +93,20 @@ export default function Runs() {
           { title: 'Run', dataIndex: 'run_id', render: (v: string) => <Link to={`/runs/${v}`}>#{v}</Link> },
           { title: '任务类型', render: (_, r) => `${r.task_type_key}@${r.task_type_version}` },
           { title: '状态', dataIndex: 'status', render: (s: string) => <Tag color={runStatusColor[s]}>{runStatusLabel[s] ?? s}</Tag> },
+          {
+            title: '卡在',
+            render: (_, r) =>
+              r.blocked_node ? (
+                <Tooltip title={r.blocked_reason}>
+                  <Typography.Text code>{r.blocked_node}</Typography.Text>
+                  <Typography.Text type="danger" ellipsis style={{ maxWidth: 320, marginLeft: 4, verticalAlign: 'bottom' }}>
+                    {r.blocked_reason}
+                  </Typography.Text>
+                </Tooltip>
+              ) : (
+                '—'
+              ),
+          },
           { title: '创建', dataIndex: 'created_at', render: (v: string) => fmtTime(v, 'MM-DD HH:mm:ss') },
           { title: '更新', dataIndex: 'updated_at', render: (v: string) => fmtTime(v, 'MM-DD HH:mm:ss') },
         ]}

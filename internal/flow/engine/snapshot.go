@@ -14,6 +14,10 @@ type Snapshot struct {
 	Run   Run
 	Def   *Definition
 	Nodes []NodeRun // 按 Def.Plan.Order 排列
+	// Errors 是每个节点最近一次执行失败的错误（之后重试成功的也保留），取自事件日志。
+	Errors map[string]string
+	// Blocked 是 run 需要人工介入时卡住的节点与原因；其余状态为 nil。
+	Blocked *Blocked
 
 	rows map[string]*model.WfNodeRun
 }
@@ -44,6 +48,19 @@ func (e *Engine) Snapshot(ctx context.Context, runID int64) (*Snapshot, error) {
 		if row := s.rows[id]; row != nil {
 			s.Nodes = append(s.Nodes, nodeFromRow(row))
 		}
+	}
+	evts, err := model.NewWfEventModel(e.store.conn).ListByTypes(ctx, []uint64{uint64(runID)}, diagnosticEvents)
+	if err != nil {
+		return nil, err
+	}
+	s.Errors = make(map[string]string)
+	for _, ev := range evts {
+		if msg := eventError(ev); msg != "" && ev.NodeId != "" && ev.Type != eventNeedsIntervention {
+			s.Errors[ev.NodeId] = msg
+		}
+	}
+	if run.Status == RunNeedsIntervention {
+		s.Blocked = blockedBy(evts)[runID]
 	}
 	return s, nil
 }
