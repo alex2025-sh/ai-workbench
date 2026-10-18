@@ -65,7 +65,7 @@ func (s *TaskTypeServiceServer) ValidateTaskTypeDraft(ctx context.Context, in *p
 	return l.ValidateTaskTypeDraft(in)
 }
 
-// 试运行：动作节点只记录不执行，虚拟时钟。草稿尚未实现时，对最新发布版本试运行
+// 试运行：动作节点只记录不执行，虚拟时钟。有草稿时试运行草稿，否则试运行最新发布版本
 func (s *TaskTypeServiceServer) DryRunTaskTypeDraft(ctx context.Context, in *pb.DryRunTaskTypeDraftReq) (*pb.DryRunResp, error) {
 	l := tasktypeservicelogic.NewDryRunTaskTypeDraftLogic(ctx, s.svcCtx)
 	return l.DryRunTaskTypeDraft(in)
@@ -93,4 +93,10 @@ func (s *TaskTypeServiceServer) TrialSource(ctx context.Context, in *pb.TrialSou
 func (s *TaskTypeServiceServer) ListTaskTypeVersions(ctx context.Context, in *pb.TaskTypeKeyReq) (*pb.ListVersionsResp, error) {
 	l := tasktypeservicelogic.NewListTaskTypeVersionsLogic(ctx, s.svcCtx)
 	return l.ListTaskTypeVersions(in)
+}
+
+// 仅开发环境：把草稿直接发布为新版本，跳过变更集与审批（正式发布走 ChangeSetService）。
+func (s *TaskTypeServiceServer) PublishTaskTypeDraft(ctx context.Context, in *pb.PublishTaskTypeDraftReq) (*pb.PublishTaskTypeDraftResp, error) {
+	l := tasktypeservicelogic.NewPublishTaskTypeDraftLogic(ctx, s.svcCtx)
+	return l.PublishTaskTypeDraft(in)
 }

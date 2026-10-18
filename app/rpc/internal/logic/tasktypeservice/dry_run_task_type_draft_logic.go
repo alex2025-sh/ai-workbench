@@ -2,12 +2,16 @@ package tasktypeservicelogic
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/identity"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/svc"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/pb"
 	"github.com/alex2025-sh/ai-workbench/internal/dryrun"
+	"github.com/alex2025-sh/ai-workbench/internal/flow/engine"
+	"github.com/alex2025-sh/ai-workbench/internal/registry"
+	"github.com/alex2025-sh/ai-workbench/internal/spec"
 
 	"github.com/zeromicro/go-zero/core/logx"
 	"google.golang.org/grpc/codes"
@@ -39,14 +43,32 @@ func (l *DryRunTaskTypeDraftLogic) DryRunTaskTypeDraft(in *pb.DryRunTaskTypeDraf
 	if len(in.SampleJson) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "at least one sample is required")
 	}
-	// 草稿尚未实现：对最新发布版本试运行。接入草稿后改为编译草稿内容，并返回草稿的 revision 与 content_hash。
-	row, err := findPlan(l.ctx, l.svcCtx, in.Key, 0)
-	if err != nil {
-		return nil, err
-	}
-	def, err := l.svcCtx.Plans.Load(l.ctx, row.PlanId, int(row.Version))
-	if err != nil {
-		return nil, err
+	// 有草稿时试运行草稿（编译后用版本号 0 的临时定义），否则试运行最新发布版本。
+	var def *engine.Definition
+	out := &pb.DryRunResp{Passed: true}
+	d, err := l.svcCtx.TaskTypes.Find(l.ctx, in.Key)
+	switch {
+	case err == nil:
+		out.Revision, out.ContentHash = d.Revision, d.ContentHash
+		res := spec.Check(d.Body)
+		if !res.OK() {
+			out.Passed, out.Issues = false, toIssues(res.Issues)
+			return out, nil
+		}
+		if def, err = engine.NewDefinition(in.Key, 0, res.Spec, res.Plan); err != nil {
+			return nil, err
+		}
+	case errors.Is(err, registry.ErrNoDraft):
+		row, err := findPlan(l.ctx, l.svcCtx, in.Key, 0)
+		if err != nil {
+			return nil, err
+		}
+		if def, err = l.svcCtx.Plans.Load(l.ctx, row.PlanId, int(row.Version)); err != nil {
+			return nil, err
+		}
+		out.ContentHash = row.Checksum
+	default:
+		return nil, draftError(err)
 	}
 	in2 := dryrun.Input{Def: def, Choices: in.Choices, Now: time.Now()}
 	for _, s := range in.SampleJson {
@@ -56,7 +78,6 @@ func (l *DryRunTaskTypeDraftLogic) DryRunTaskTypeDraft(in *pb.DryRunTaskTypeDraf
 	if err != nil {
 		return nil, err
 	}
-	out := &pb.DryRunResp{ContentHash: row.Checksum, Passed: true}
 	for _, c := range report.Cases {
 		pc := &pb.DryRunCase{SampleIndex: int32(c.Index), AssigneeId: c.Assignee, EndStatus: c.EndStatus}
 		for _, st := range c.Path {

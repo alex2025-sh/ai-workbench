@@ -30,26 +30,24 @@ func (l *ListTaskTypesLogic) ListTaskTypes(in *pb.ListTaskTypesReq) (*pb.ListTas
 	if _, err := identity.Require(l.ctx); err != nil {
 		return nil, err
 	}
-	rows, err := plans(l.svcCtx).Latest(l.ctx)
+	entries, err := l.svcCtx.TaskTypes.List(l.ctx)
 	if err != nil {
 		return nil, err
 	}
 	// 任务类型数量有限，按 namespace 与关键词在内存中过滤，一次返回全部（next_cursor 为空）。
 	out := &pb.ListTaskTypesResp{}
 	kw := strings.ToLower(in.Keyword)
-	for _, row := range rows {
-		sum, err := summary(row)
-		if err != nil {
-			l.Errorf("list task types: %v", err)
+	for _, e := range entries {
+		if in.Namespace != "" && e.Namespace != in.Namespace {
 			continue
 		}
-		if in.Namespace != "" && sum.Namespace != in.Namespace {
+		if kw != "" && !strings.Contains(strings.ToLower(e.Key), kw) && !strings.Contains(strings.ToLower(e.Name), kw) {
 			continue
 		}
-		if kw != "" && !strings.Contains(strings.ToLower(sum.Key), kw) && !strings.Contains(strings.ToLower(sum.Name), kw) {
-			continue
-		}
-		out.Items = append(out.Items, sum)
+		out.Items = append(out.Items, &pb.TaskTypeSummary{
+			Key: e.Key, Name: e.Name, Namespace: e.Namespace, LatestVersion: int32(e.LatestVersion), HasDraft: e.HasDraft,
+			Status: "active", UpdatedAt: e.UpdatedAt.UnixMilli(),
+		})
 	}
 	return out, nil
 }

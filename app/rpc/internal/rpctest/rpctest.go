@@ -67,7 +67,9 @@ func New(t *testing.T) *Env {
 	if err := s.Ticker.Tick(context.Background(), struct{ Index, Total int }{0, 1}); err != nil {
 		t.Fatal(err)
 	}
-	return &Env{Svc: &svc.ServiceContext{Services: s}, Clock: clock, Platform: platform, DryRun: dry}
+	svcCtx := &svc.ServiceContext{Services: s, TaskTypes: registry.NewTaskTypes(s.Conn)}
+	svcCtx.Config.AllowDirectPublish = true
+	return &Env{Svc: svcCtx, Clock: clock, Platform: platform, DryRun: dry}
 }
 
 // TaskID 返回工单最新任务的 id 与 run id。

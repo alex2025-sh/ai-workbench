@@ -10,7 +10,9 @@ import (
 
 	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/svc"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/pb"
+	"github.com/alex2025-sh/ai-workbench/internal/flow/compiler"
 	"github.com/alex2025-sh/ai-workbench/internal/model"
+	"github.com/alex2025-sh/ai-workbench/internal/registry"
 	"github.com/alex2025-sh/ai-workbench/internal/spec"
 )
 
@@ -56,4 +58,35 @@ func findPlan(ctx context.Context, s *svc.ServiceContext, key string, version in
 		return nil, status.Errorf(codes.NotFound, "task type %s@%d not found", key, version)
 	}
 	return row, err
+}
+
+func toIssues(in []compiler.Issue) []*pb.Issue {
+	out := make([]*pb.Issue, 0, len(in))
+	for _, i := range in {
+		out = append(out, &pb.Issue{Code: string(i.Code), Severity: string(i.Severity), Path: i.Path, NodeId: i.NodeID, EdgeId: i.EdgeID, Message: i.Message})
+	}
+	return out
+}
+
+func toDraft(d *registry.TaskTypeDraft) *pb.Draft {
+	return &pb.Draft{BaseVersion: int32(d.BaseVersion), Revision: d.Revision, BodyJson: d.Body, UpdatedBy: d.UpdatedBy,
+		UpdatedAt: d.UpdatedAt.UnixMilli(), ContentHash: d.ContentHash}
+}
+
+// draftError 把草稿操作的错误映射为 gRPC 状态码。
+func draftError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, registry.ErrNoTaskType), errors.Is(err, registry.ErrNoDraft):
+		return status.Error(codes.NotFound, err.Error())
+	case errors.Is(err, registry.ErrExists):
+		return status.Error(codes.AlreadyExists, err.Error())
+	case errors.Is(err, registry.ErrConflict):
+		return status.Error(codes.Aborted, err.Error()) // 前端据此提示「草稿已被修改」
+	case errors.Is(err, registry.ErrKeyChanged), errors.Is(err, registry.ErrDraftInvalid):
+		return status.Error(codes.InvalidArgument, err.Error())
+	default:
+		return err
+	}
 }

@@ -3,12 +3,12 @@ package tasktypeservicelogic
 import (
 	"context"
 
+	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/identity"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/svc"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/pb"
+	"github.com/alex2025-sh/ai-workbench/internal/flow/compiler"
 
 	"github.com/zeromicro/go-zero/core/logx"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 type ValidateTaskTypeDraftLogic struct {
@@ -27,5 +27,12 @@ func NewValidateTaskTypeDraftLogic(ctx context.Context, svcCtx *svc.ServiceConte
 
 // 对草稿及其依赖闭包完整编译校验
 func (l *ValidateTaskTypeDraftLogic) ValidateTaskTypeDraft(in *pb.TaskTypeKeyReq) (*pb.ValidateResp, error) {
-	return nil, status.Error(codes.Unimplemented, "not implemented")
+	if _, err := identity.Require(l.ctx); err != nil {
+		return nil, err
+	}
+	issues, err := l.svcCtx.TaskTypes.Validate(l.ctx, in.Key)
+	if err != nil {
+		return nil, draftError(err)
+	}
+	return &pb.ValidateResp{Ok: !compiler.HasErrors(issues), Issues: toIssues(issues)}, nil
 }

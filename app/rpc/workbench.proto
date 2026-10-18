@@ -39,7 +39,7 @@ service TaskTypeService {
   // 对草稿及其依赖闭包完整编译校验
   rpc ValidateTaskTypeDraft(TaskTypeKeyReq) returns (ValidateResp); // POST /byai_platform/api/v1/task_type/draft/validate
 
-  // 试运行：动作节点只记录不执行，虚拟时钟。草稿尚未实现时，对最新发布版本试运行
+  // 试运行：动作节点只记录不执行，虚拟时钟。有草稿时试运行草稿，否则试运行最新发布版本
   rpc DryRunTaskTypeDraft(DryRunTaskTypeDraftReq) returns (DryRunResp); // POST /byai_platform/api/v1/task_type/draft/dry_run
 
   // 按 schema 生成或从历史任务取样例 payload
@@ -53,6 +53,10 @@ service TaskTypeService {
 
   // 版本历史
   rpc ListTaskTypeVersions(TaskTypeKeyReq) returns (ListVersionsResp); // POST /byai_platform/api/v1/task_type/versions
+
+  // 仅开发环境：把草稿直接发布为新版本，跳过变更集与审批（正式发布走 ChangeSetService）。
+  // 需要配置开启 AllowDirectPublish，调用人需有 task_type.publish 权限；草稿有 error 级问题时不发布。
+  rpc PublishTaskTypeDraft(PublishTaskTypeDraftReq) returns (PublishTaskTypeDraftResp); // POST /byai_platform/api/v1/task_type/draft/publish
 }
 
 // 共享组件：卡片模板、分配策略、跨部门协议、提示词模板
@@ -439,6 +443,15 @@ message TrialSourceResp {
 
 message ListVersionsResp {
   repeated VersionInfo items = 1;
+}
+
+message PublishTaskTypeDraftReq {
+  string key = 1;
+  int64 revision = 2;  // 必须等于当前草稿的 revision，避免发布别人刚改过、自己没看到的内容
+}
+message PublishTaskTypeDraftResp {
+  int32 version = 1;          // 发布出的版本；有 error 级问题时为 0
+  repeated Issue issues = 2;
 }
 
 // ===========================================================================
