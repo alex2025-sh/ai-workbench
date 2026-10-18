@@ -10,6 +10,7 @@ import (
 
 	"github.com/alex2025-sh/ai-workbench/internal/action"
 	"github.com/alex2025-sh/ai-workbench/internal/assign"
+	"github.com/alex2025-sh/ai-workbench/internal/directory"
 	"github.com/alex2025-sh/ai-workbench/internal/flow/engine"
 	"github.com/alex2025-sh/ai-workbench/internal/flow/nodes"
 	"github.com/alex2025-sh/ai-workbench/internal/ingest"
@@ -24,6 +25,7 @@ type Config struct {
 	DataSource    string // 平台库（wf_*、task*、cfg_*），需要 parseTime=true&loc=UTC
 	BizDataSource string `json:",optional"`  // 业务库只读连接，供内置 skill 使用；为空时不注册 appeal skill
 	RelationsFile string `json:",optional"`  // 本地关系表（如 deploy/mock/vip_rm.yaml）
+	GroupsFile    string `json:",optional"`  // 本地用户组（如 deploy/mock/groups.yaml），供组任务的决策鉴权与可认领列表使用
 	Owner         string `json:",optional"`  // 进程标识，默认 worker-<随机数>，只用于排查
 	Parallelism   int    `json:",default=4"` // 一次推进（含一次 tick 的每一批）同时执行的 job 数
 }
@@ -51,6 +53,7 @@ type Services struct {
 	Tasks   *task.Store
 	Actions *action.Runtime
 	Lark    *lark.Mock
+	Groups  directory.Groups
 	Cron    *ingest.CronRunner
 	Ticker  *ticker.Ticker
 }
@@ -64,6 +67,14 @@ func Build(c Config, clock engine.Clock) (*Services, error) {
 	conn := sqlx.NewMysql(ReadCommitted(c.DataSource))
 	s := &Services{Conn: conn, Store: engine.NewStore(conn), Plans: engine.NewPlans(conn), Tasks: task.NewStore(conn), Lark: lark.NewMock()}
 
+	s.Groups = directory.StaticGroups{}
+	if c.GroupsFile != "" {
+		g, err := directory.LoadGroups(c.GroupsFile)
+		if err != nil {
+			return nil, err
+		}
+		s.Groups = g
+	}
 	var relations assign.RelationSource = &assign.StaticRelations{}
 	if c.RelationsFile != "" {
 		r, err := assign.LoadRelations(c.RelationsFile)

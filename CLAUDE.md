@@ -16,7 +16,7 @@
 - Go 1.24，工具库为 [go-zero](https://github.com/zeromicro/go-zero)。
 - **对外接口只有 gRPC**：协议写在 `app/rpc/workbench.proto`（TaskTypeService、ComponentService、ChangeSetService、CatalogService、IngestService、RunService、TaskService、CallbackService），由 `goctl rpc protoc -m` 生成 zrpc 服务。
   - 前端经公司 gateway 访问，路径约定 `/byai_platform/api/v1/<资源>/<动作>`，一律 POST。一期不引入 gateway 注解，路径写在每个方法的行尾注释里；接入 gateway 时再改为 `option (bgw.v1.method_options)`。
-  - 调用者身份由 gateway 写入 gRPC metadata，请求消息里不放 actor / viewer 字段。
+  - 调用者身份由 gateway 写入 gRPC metadata（key 见 `app/rpc/internal/identity`），请求消息里不放 actor / viewer 字段。
   - 业务 JSON 字段用 `bytes`（UTF-8 JSON）承载，不用 `google.protobuf.Struct`，避免数字变 double 丢精度。
   - proto 的 `TaskStatus` 比存储值偏移 2（首值必须为 0），转换统一用 `internal/task` 的 `StatusToProto` / `StatusFromProto`。
 - **没有 HTTP 服务**：Lark 卡片回调与审批平台回调由 gateway 原样透传 raw body 与 headers，落到 gRPC 方法（`CallbackService.LarkCardCallback`、`ChangeSetService.OnApprovalResult`），在服务内验签。
@@ -83,11 +83,12 @@ internal/event/ subscription/ mcp/
 make gen     # 生成 rpc 与 model，然后 go mod tidy
 make check   # go vet + go test + go build
 make validate  # 用 wbctl 校验 examples/ 下的任务类型
+go run ./app/rpc -f app/rpc/etc/workbench.yaml   # 本地启动 gRPC 服务（127.0.0.1:9090，dev 模式开启 reflection）
 ```
 
 集成测试（引擎、端到端）需要 MySQL 8.0 或 TiDB，设置 `WB_TEST_MYSQL=root:@tcp(127.0.0.1:3306)/` 后运行 `go test ./...`；未设置时这些测试跳过。CI 中用 MySQL 服务容器运行。
 
-外部系统目前都是本地实现：Lark 为 `internal/lark` 的 Mock（卡片打到日志），分配服务为 `assign.Local`（关系表读 `deploy/mock/vip_rm.yaml`），邮件、事件、LLM 为 `action.Logger`。
+外部系统目前都是本地实现：Lark 为 `internal/lark` 的 Mock（卡片打到日志），分配服务为 `assign.Local`（关系表读 `deploy/mock/vip_rm.yaml`），用户组为 `directory.StaticGroups`（读 `deploy/mock/groups.yaml`），邮件、事件、LLM 为 `action.Logger`。
 
 ## 当前进度
 

@@ -121,9 +121,21 @@ type SignalCmd struct {
 
 // SignalResult 对应 Temporal Update 的语义：先校验，不通过直接拒绝并返回原因。
 type SignalResult struct {
-	Accepted bool   `json:"accepted"`
-	Reason   string `json:"reason,omitempty"`
+	Accepted bool       `json:"accepted"`
+	Code     RejectCode `json:"code,omitempty"`   // 拒绝原因分类，调用方据此决定刷新还是留在表单
+	Reason   string     `json:"reason,omitempty"` // 给人看的原因，卡片与页面上即时提示
 }
+
+// RejectCode 是 Signal 被拒绝的原因分类，与 SignalResp.code 一致。
+type RejectCode string
+
+const (
+	RejectNotWaiting     RejectCode = "not_waiting"     // 流程已结束或已取消
+	RejectStale          RejectCode = "stale"           // 节点或 iteration 已不是当前等待的节点
+	RejectAlreadyHandled RejectCode = "already_handled" // 该节点已被处理（如在 Lark 点过）
+	RejectInvalidForm    RejectCode = "invalid_form"    // 未知选项或必填字段缺失
+	RejectUnsupported    RejectCode = "unsupported"     // 选项暂不可用（推迟功能未上线）
+)
 
 // RunView 是运行状态的查询视图，供运行态画布着色。
 type RunView struct {
@@ -309,18 +321,18 @@ func (e *Engine) Signal(ctx context.Context, cmd SignalCmd) (SignalResult, error
 
 // applySignal 校验选择；通过时完成人工节点并传播，不通过时不做任何修改。
 func (s *runState) applySignal(cmd SignalCmd) SignalResult {
-	reject := func(reason string) SignalResult { return SignalResult{Reason: reason} }
+	reject := func(code RejectCode, reason string) SignalResult { return SignalResult{Code: code, Reason: reason} }
 	r := s.nodes[cmd.NodeID]
 	n, cfg := s.def.node(cmd.NodeID)
 	switch {
 	case s.run.Status != RunRunning:
-		return reject("流程已结束")
+		return reject(RejectNotWaiting, "流程已结束")
 	case r == nil || n.Type != dsl.NodeHumanChoice:
-		return reject("节点不存在或不是人工选择节点")
+		return reject(RejectStale, "节点不存在或不是人工选择节点")
 	case NodeStatus(r.Status) != NodeWaiting:
-		return reject("该节点已处理")
+		return reject(RejectAlreadyHandled, "该节点已处理")
 	case int(r.Iteration) != cmd.Iteration:
-		return reject("卡片已过期，请查看最新卡片")
+		return reject(RejectStale, "卡片已过期，请查看最新卡片")
 	}
 	var opt *dsl.Option
 	for i, o := range cfg.(*dsl.HumanChoiceConfig).Options {
@@ -329,14 +341,14 @@ func (s *runState) applySignal(cmd SignalCmd) SignalResult {
 		}
 	}
 	if opt == nil {
-		return reject(fmt.Sprintf("未知选项 %q", cmd.Option))
+		return reject(RejectInvalidForm, fmt.Sprintf("未知选项 %q", cmd.Option))
 	}
 	if opt.Snooze != nil {
-		return reject("暂不支持推迟，将在提醒功能上线后开放")
+		return reject(RejectUnsupported, "暂不支持推迟，将在提醒功能上线后开放")
 	}
 	for _, f := range opt.RequiredFields {
 		if strings.TrimSpace(cmd.Form[f]) == "" {
-			return reject(fmt.Sprintf("请填写 %s", f))
+			return reject(RejectInvalidForm, fmt.Sprintf("请填写 %s", f))
 		}
 	}
 	s.cancelJobs(cmd.NodeID, JobTimeout)
