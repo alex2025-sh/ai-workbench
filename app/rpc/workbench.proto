@@ -39,7 +39,7 @@ service TaskTypeService {
   // 对草稿及其依赖闭包完整编译校验
   rpc ValidateTaskTypeDraft(TaskTypeKeyReq) returns (ValidateResp); // POST /byai_platform/api/v1/task_type/draft/validate
 
-  // 试运行：动作节点只记录不执行，虚拟时钟
+  // 试运行：动作节点只记录不执行，虚拟时钟。草稿尚未实现时，对最新发布版本试运行
   rpc DryRunTaskTypeDraft(DryRunTaskTypeDraftReq) returns (DryRunResp); // POST /byai_platform/api/v1/task_type/draft/dry_run
 
   // 按 schema 生成或从历史任务取样例 payload
@@ -378,7 +378,7 @@ message DryRunSend {
 // 虚拟时钟上的时间点（相对于起点的偏移，不含系统时间）。
 message DryRunTimePoint {
   string node_id = 1;
-  string kind = 2;          // timeout / escalation / snooze_wakeup / reminder
+  string kind = 2;          // timer（定时器到期）/ timeout（人工节点超时）
   int64 offset_ms = 3;
 }
 

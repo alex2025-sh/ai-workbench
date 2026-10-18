@@ -65,7 +65,7 @@ func (s *TaskTypeServiceServer) ValidateTaskTypeDraft(ctx context.Context, in *p
 	return l.ValidateTaskTypeDraft(in)
 }
 
-// 试运行：动作节点只记录不执行，虚拟时钟
+// 试运行：动作节点只记录不执行，虚拟时钟。草稿尚未实现时，对最新发布版本试运行
 func (s *TaskTypeServiceServer) DryRunTaskTypeDraft(ctx context.Context, in *pb.DryRunTaskTypeDraftReq) (*pb.DryRunResp, error) {
 	l := tasktypeservicelogic.NewDryRunTaskTypeDraftLogic(ctx, s.svcCtx)
 	return l.DryRunTaskTypeDraft(in)

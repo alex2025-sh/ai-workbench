@@ -83,7 +83,7 @@ internal/event/ subscription/ mcp/
 make gen     # 生成 rpc 与 model，然后 go mod tidy
 make check   # go vet + go test + go build
 make validate  # 用 wbctl 校验 examples/ 下的任务类型
-go run ./app/rpc -f app/rpc/etc/workbench.yaml   # 本地启动 gRPC 服务（127.0.0.1:9090，dev 模式开启 reflection）
+go run ./app/rpc -f app/rpc/etc/workbench.yaml   # 本地启动 gRPC 服务（127.0.0.1:9090，dev 模式开启 reflection）；试运行需要独立的 ai_workbench_dryrun 库（同样执行 deploy/sql）
 ```
 
 集成测试（引擎、端到端）需要 MySQL 8.0 或 TiDB，设置 `WB_TEST_MYSQL=root:@tcp(127.0.0.1:3306)/` 后运行 `go test ./...`；未设置时这些测试跳过。CI 中用 MySQL 服务容器运行。

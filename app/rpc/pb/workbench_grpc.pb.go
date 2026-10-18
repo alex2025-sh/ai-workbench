@@ -65,7 +65,7 @@ type TaskTypeServiceClient interface {
 	DiscardTaskTypeDraft(ctx context.Context, in *DiscardDraftReq, opts ...grpc.CallOption) (*Empty, error)
 	// 对草稿及其依赖闭包完整编译校验
 	ValidateTaskTypeDraft(ctx context.Context, in *TaskTypeKeyReq, opts ...grpc.CallOption) (*ValidateResp, error)
-	// 试运行：动作节点只记录不执行，虚拟时钟
+	// 试运行：动作节点只记录不执行，虚拟时钟。草稿尚未实现时，对最新发布版本试运行
 	DryRunTaskTypeDraft(ctx context.Context, in *DryRunTaskTypeDraftReq, opts ...grpc.CallOption) (*DryRunResp, error)
 	// 按 schema 生成或从历史任务取样例 payload
 	GenerateSamplePayload(ctx context.Context, in *GenerateSamplePayloadReq, opts ...grpc.CallOption) (*GenerateSamplePayloadResp, error)
@@ -225,7 +225,7 @@ type TaskTypeServiceServer interface {
 	DiscardTaskTypeDraft(context.Context, *DiscardDraftReq) (*Empty, error)
 	// 对草稿及其依赖闭包完整编译校验
 	ValidateTaskTypeDraft(context.Context, *TaskTypeKeyReq) (*ValidateResp, error)
-	// 试运行：动作节点只记录不执行，虚拟时钟
+	// 试运行：动作节点只记录不执行，虚拟时钟。草稿尚未实现时，对最新发布版本试运行
 	DryRunTaskTypeDraft(context.Context, *DryRunTaskTypeDraftReq) (*DryRunResp, error)
 	// 按 schema 生成或从历史任务取样例 payload
 	GenerateSamplePayload(context.Context, *GenerateSamplePayloadReq) (*GenerateSamplePayloadResp, error)

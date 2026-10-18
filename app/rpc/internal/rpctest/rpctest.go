@@ -24,8 +24,10 @@ import (
 // Env 是一套跑过首次扫描的环境。扫描后：A1001、A1002 分配给 rm.alice 并在等定时器；
 // A1003 升级到 vip_cs_leads 组队列，escalate 节点等待决定。
 type Env struct {
-	Svc   *svc.ServiceContext
-	Clock *engine.FakeClock
+	Svc      *svc.ServiceContext
+	Clock    *engine.FakeClock
+	Platform string // 平台库 DSN
+	DryRun   string // 试运行库 DSN
 }
 
 // RepoFile 返回仓库内文件的绝对路径。
@@ -38,11 +40,12 @@ func RepoFile(rel string) string {
 func New(t *testing.T) *Env {
 	t.Helper()
 	platform := testdb.New(t, "deploy/sql/*.sql")
+	dry := testdb.New(t, "deploy/sql/*.sql")
 	biz := testdb.New(t, "deploy/mock/appeal.sql")
 	testdb.Exec(t, biz, "UPDATE appeal SET updated_at = updated_at - INTERVAL 5 MINUTE")
 	clock := engine.NewFakeClock(time.Now())
 	s, err := bootstrap.Build(bootstrap.Config{
-		DataSource: platform, BizDataSource: biz, Owner: "test",
+		DataSource: platform, BizDataSource: biz, DryRunDataSource: dry, Owner: "test",
 		RelationsFile: RepoFile("deploy/mock/vip_rm.yaml"), GroupsFile: RepoFile("deploy/mock/groups.yaml"),
 	}, clock)
 	if err != nil {
@@ -63,7 +66,7 @@ func New(t *testing.T) *Env {
 	if err := s.Ticker.Tick(context.Background(), struct{ Index, Total int }{0, 1}); err != nil {
 		t.Fatal(err)
 	}
-	return &Env{Svc: &svc.ServiceContext{Services: s}, Clock: clock}
+	return &Env{Svc: &svc.ServiceContext{Services: s}, Clock: clock, Platform: platform, DryRun: dry}
 }
 
 // TaskID 返回工单最新任务的 id 与 run id。

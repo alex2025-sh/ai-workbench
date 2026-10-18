@@ -11,6 +11,7 @@ import (
 	"github.com/alex2025-sh/ai-workbench/internal/action"
 	"github.com/alex2025-sh/ai-workbench/internal/assign"
 	"github.com/alex2025-sh/ai-workbench/internal/directory"
+	"github.com/alex2025-sh/ai-workbench/internal/dryrun"
 	"github.com/alex2025-sh/ai-workbench/internal/flow/engine"
 	"github.com/alex2025-sh/ai-workbench/internal/flow/nodes"
 	"github.com/alex2025-sh/ai-workbench/internal/ingest"
@@ -23,11 +24,14 @@ import (
 // Config 是组装所需的配置。
 type Config struct {
 	DataSource    string // 平台库（wf_*、task*、cfg_*），需要 parseTime=true&loc=UTC
-	BizDataSource string `json:",optional"`  // 业务库只读连接，供内置 skill 使用；为空时不注册 appeal skill
-	RelationsFile string `json:",optional"`  // 本地关系表（如 deploy/mock/vip_rm.yaml）
-	GroupsFile    string `json:",optional"`  // 本地用户组（如 deploy/mock/groups.yaml），供组任务的决策鉴权与可认领列表使用
-	Owner         string `json:",optional"`  // 进程标识，默认 worker-<随机数>，只用于排查
-	Parallelism   int    `json:",default=4"` // 一次推进（含一次 tick 的每一批）同时执行的 job 数
+	BizDataSource string `json:",optional"` // 业务库只读连接，供内置 skill 使用；为空时不注册 appeal skill
+	// DryRunDataSource 是专用的试运行库（结构同 deploy/sql），为空时不提供试运行。
+	// 每次试运行都会清空其中的运行数据，不能与 DataSource 相同；worker 与 ticker 不连接它。
+	DryRunDataSource string `json:",optional"`
+	RelationsFile    string `json:",optional"`  // 本地关系表（如 deploy/mock/vip_rm.yaml）
+	GroupsFile       string `json:",optional"`  // 本地用户组（如 deploy/mock/groups.yaml），供组任务的决策鉴权与可认领列表使用
+	Owner            string `json:",optional"`  // 进程标识，默认 worker-<随机数>，只用于排查
+	Parallelism      int    `json:",default=4"` // 一次推进（含一次 tick 的每一批）同时执行的 job 数
 }
 
 // ReadCommitted 在 DSN 上加上 READ-COMMITTED 隔离级别（已指定时不改）。
@@ -54,6 +58,7 @@ type Services struct {
 	Actions *action.Runtime
 	Lark    *lark.Mock
 	Groups  directory.Groups
+	DryRun  *dryrun.Runner // 未配置试运行库时为 nil
 	Cron    *ingest.CronRunner
 	Ticker  *ticker.Ticker
 }
@@ -106,6 +111,13 @@ func Build(c Config, clock engine.Clock) (*Services, error) {
 		owner = fmt.Sprintf("worker-%d", time.Now().UnixNano()%1_000_000)
 	}
 	s.Engine = engine.New(s.Store, s.Plans, nodes.Default(), s.Actions, clock, engine.Options{Owner: owner, DriveParallelism: c.Parallelism})
+	if c.DryRunDataSource != "" {
+		if c.DryRunDataSource == c.DataSource {
+			return nil, fmt.Errorf("bootstrap: DryRunDataSource must not be the platform database")
+		}
+		readOnly := func(name string) bool { _, ok := skills.Builtin[name]; return ok } // 平台内置 skill 都是只读查询
+		s.DryRun = dryrun.New(sqlx.NewMysql(ReadCommitted(c.DryRunDataSource)), s.Actions, nodes.Default(), readOnly)
+	}
 	s.Cron = ingest.NewCronRunner(conn, s.Plans, s.Tasks, s.Engine, s.Actions, clock)
 	s.Ticker = &ticker.Ticker{Cron: s.Cron, Engine: s.Engine}
 	return s, nil

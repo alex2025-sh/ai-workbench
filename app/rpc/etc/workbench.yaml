@@ -10,3 +10,5 @@ Workbench:
   BizDataSource: root:@tcp(127.0.0.1:3306)/biz_mock?parseTime=true&loc=UTC&charset=utf8mb4
   RelationsFile: deploy/mock/vip_rm.yaml
   GroupsFile: deploy/mock/groups.yaml
+  # 专用试运行库（结构同 deploy/sql），每次试运行都会清空其中的运行数据，不能指向平台库
+  DryRunDataSource: root:@tcp(127.0.0.1:3306)/ai_workbench_dryrun?parseTime=true&loc=UTC&charset=utf8mb4

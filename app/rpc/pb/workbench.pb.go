@@ -1649,7 +1649,7 @@ func (x *DryRunSend) GetRenderedJson() []byte {
 type DryRunTimePoint struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
-	Kind          string                 `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"` // timeout / escalation / snooze_wakeup / reminder
+	Kind          string                 `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"` // timer（定时器到期）/ timeout（人工节点超时）
 	OffsetMs      int64                  `protobuf:"varint,3,opt,name=offset_ms,json=offsetMs,proto3" json:"offset_ms,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
