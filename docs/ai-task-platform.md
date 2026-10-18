@@ -454,7 +454,7 @@ vip_ticket_alert v6
 | CatalogService | 画布与配置表单的数据源 | ListNodeTypes（含配置 schema、UI 提示、端口规则）、ListSkills、GetSkillSchema（转发 Skillhub） |
 | IngestService | API 来源 | PushEvent |
 | RunService | 工作流运行 | StartRun、Signal、CancelRun、GetRun、ListRuns、GetRunEvents、RetryNode、SkipNode |
-| TaskService | 任务处理 | GetTask、ListMyTasks、GetTaskEvents、ClaimTask、StartProcessing、UpdatePriority、Reassign |
+| TaskService | 任务处理 | GetTask、ListMyTasks、ListClaimableTasks、GetTaskEvents、ClaimTask、StartProcessing、UpdatePriority、Reassign |
 | CallbackService | 第三方回调 | LarkCardCallback |
 
 ### 暂不考虑

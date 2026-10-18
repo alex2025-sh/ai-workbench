@@ -7,6 +7,7 @@
 - `docs/ai-task-platform.md`：核心概念（事件类型、任务类型、workflow、展示模板、分配策略）、任务状态与优先级、功能模块。
 - `docs/task-type-spec.md`：任务类型 JSON（前后端契约）的字段说明。
 - `docs/workflow-engine.md`：自研轻量工作流引擎（不使用 Temporal）的数据模型、执行模型、人工节点、xxl-job 时钟、受控的环、与任务中心的集成、试运行。
+- `docs/frontend-design.md`：前端页面、路由、接口映射与交互约定（任务工作台、运行监控、配置控制台、画布）。
 
 设计文档的原稿在 Claude Docs 中维护，这里是导出副本；改动设计时两边同步。
 
