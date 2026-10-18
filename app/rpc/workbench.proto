@@ -742,6 +742,7 @@ message NodeView {
   int32 attempt = 5;
   int64 started_at = 6;
   int64 finished_at = 7;
+  string last_error = 8;  // 最近一次执行失败的错误（之后重试成功的也保留），没有失败过为空
 }
 
 message RunView {
@@ -751,6 +752,9 @@ message RunView {
   string status = 4;  // running / succeeded / failed / needs_intervention / cancelled
   repeated NodeView nodes = 5;
   bytes graph_json = 6;  // 该版本的 workflow 图，供运行态画布绘制
+  string blocked_node = 7;  // 同 RunSummary
+  string blocked_reason = 8;
+  bytes ui_json = 9;  // 该版本任务类型 JSON 的 ui（含画布坐标 canvas.positions），没有时为空
 }
 
 message ListRunsReq {
@@ -769,6 +773,9 @@ message RunSummary {
   string status = 4;
   int64 created_at = 5;
   int64 updated_at = 6;
+  // 需要人工介入（status = needs_intervention）时卡在哪个节点、原因；其余状态为空
+  string blocked_node = 7;
+  string blocked_reason = 8;
 }
 message ListRunsResp {
   repeated RunSummary items = 1;

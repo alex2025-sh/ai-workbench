@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,6 +37,19 @@ func TestRetryFailedNode(t *testing.T) {
 	if status, _ := nodeStatus(t, en, run.ID); status != engine.RunNeedsIntervention {
 		t.Fatalf("status = %s", status)
 	}
+	// 运行监控：快照与列表都能看到卡在哪个节点、为什么。
+	snap, err := en.Snapshot(e.ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Blocked == nil || snap.Blocked.NodeID != "s" || !strings.Contains(snap.Blocked.Reason, "downstream unavailable") ||
+		!strings.Contains(snap.Errors["s"], "downstream unavailable") || snap.Errors["start"] != "" {
+		t.Fatalf("blocked = %+v, errors = %v", snap.Blocked, snap.Errors)
+	}
+	runs, _, err := en.ListRuns(e.ctx, engine.RunQuery{IDs: []int64{run.ID}})
+	if err != nil || len(runs) != 1 || runs[0].Blocked == nil || runs[0].Blocked.NodeID != "s" {
+		t.Fatalf("list = %+v %v", runs, err)
+	}
 	if err := en.RetryNode(e.ctx, run.ID, "start", "ops", "x"); !errors.Is(err, engine.ErrNothingToRetry) {
 		t.Fatalf("retry a succeeded node: %v", err)
 	}
@@ -52,6 +66,10 @@ func TestRetryFailedNode(t *testing.T) {
 	}
 	if status, nodes := nodeStatus(t, en, run.ID); status != engine.RunSucceeded || nodes["ok"].Status != engine.NodeSucceeded {
 		t.Fatalf("status=%s nodes=%+v", status, nodes)
+	}
+	// 恢复后不再显示卡住的原因；节点的历史错误保留，便于排查。
+	if snap, err := en.Snapshot(e.ctx, run.ID); err != nil || snap.Blocked != nil || snap.Errors["s"] == "" {
+		t.Fatalf("after recovery: %+v %v", snap, err)
 	}
 	if err := en.RetryNode(e.ctx, run.ID, "s", "ops", "again"); !errors.Is(err, engine.ErrNotPaused) {
 		t.Fatalf("retry on a finished run: %v", err)

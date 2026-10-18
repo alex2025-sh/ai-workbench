@@ -39,12 +39,16 @@ func (l *GetRunLogic) GetRun(in *pb.RunIdReq) (*pb.RunView, error) {
 	graph, _ := json.Marshal(snap.Def.Spec.Workflow)
 	out := &pb.RunView{
 		RunId: snap.Run.ID, TaskTypeKey: snap.Run.PlanKey, TaskTypeVersion: int32(snap.Run.PlanVersion),
-		Status: string(snap.Run.Status), GraphJson: graph,
+		Status: string(snap.Run.Status), GraphJson: graph, UiJson: snap.Def.Spec.UI,
+	}
+	if b := snap.Blocked; b != nil {
+		out.BlockedNode, out.BlockedReason = b.NodeID, b.Reason
 	}
 	for _, n := range snap.Nodes {
 		out.Nodes = append(out.Nodes, &pb.NodeView{
 			NodeId: n.NodeID, Iteration: int32(n.Iteration), Status: string(n.Status), Port: n.Port,
 			Attempt: int32(n.Attempt), StartedAt: millis(n.StartedAt), FinishedAt: millis(n.FinishedAt),
+			LastError: snap.Errors[n.NodeID],
 		})
 	}
 	return out, nil

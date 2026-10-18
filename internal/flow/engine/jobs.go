@@ -346,7 +346,7 @@ func (e *Engine) failed(ctx context.Context, j Job, cause error) {
 			}
 		}
 		payload, _ := json.Marshal(map[string]any{"job_id": job.Id, "kind": job.Kind, "attempt": job.Attempt, "fail_count": job.FailCount, "reason": reason})
-		_, err = t.evts.Insert(t.ctx, &model.WfEvent{RunId: job.RunId, NodeId: job.NodeId, Iteration: job.Iteration, Type: "job_quarantined", Actor: "system",
+		_, err = t.evts.Insert(t.ctx, &model.WfEvent{RunId: job.RunId, NodeId: job.NodeId, Iteration: job.Iteration, Type: eventJobQuarantined, Actor: "system",
 			Payload: nullJSON(payload)})
 		return struct{}{}, err
 	})

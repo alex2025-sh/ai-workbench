@@ -136,6 +136,8 @@ export interface RunSummary {
   status: string;
   created_at: Int64;
   updated_at: Int64;
+  blocked_node: string; // 需人工介入时卡住的节点与原因
+  blocked_reason: string;
 }
 
 export interface ListRunsResp {
@@ -151,6 +153,7 @@ export interface NodeView {
   attempt: number;
   started_at: Int64;
   finished_at: Int64;
+  last_error: string;
 }
 
 export interface RunView {
@@ -160,6 +163,9 @@ export interface RunView {
   status: string;
   nodes: NodeView[];
   graph_json: Bytes;
+  blocked_node: string;
+  blocked_reason: string;
+  ui_json: Bytes; // 任务类型的 ui，含画布坐标
 }
 
 export interface RunEvent {

@@ -435,7 +435,7 @@ func (s *runState) finish(status RunStatus, resolution string) {
 
 func (s *runState) needsIntervention(nodeID, reason string) {
 	s.setRunStatus(RunNeedsIntervention)
-	s.event(nodeID, "run_needs_intervention", "", map[string]any{"reason": reason})
+	s.event(nodeID, eventNeedsIntervention, "", map[string]any{"reason": reason})
 }
 
 // resolution 取第一个成功结束的 end 节点上配置的结论，否则取最后一个人工节点的选项。

@@ -25,6 +25,50 @@ type RunListItem struct {
 	Run       Run
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	Blocked   *Blocked // 需要人工介入时卡住的节点与原因
+}
+
+// Blocked 是 run 进入人工介入的节点与原因，取最近一次进入人工介入的事件。
+type Blocked struct {
+	NodeID string
+	Reason string
+}
+
+const (
+	eventNeedsIntervention = "run_needs_intervention"
+	eventJobQuarantined    = "job_quarantined"
+)
+
+// diagnosticEvents 是运行监控用来提取错误与卡住原因的事件类型。
+var diagnosticEvents = []string{"node_retry", "node_failed", "effect_failed", eventJobQuarantined, eventNeedsIntervention}
+
+// eventError 取事件 payload 中的错误信息（error 或 reason）。
+func eventError(ev *model.WfEvent) string {
+	if !ev.Payload.Valid {
+		return ""
+	}
+	var p struct {
+		Error  string `json:"error"`
+		Reason string `json:"reason"`
+	}
+	if json.Unmarshal([]byte(ev.Payload.String), &p) != nil {
+		return ""
+	}
+	if p.Error != "" {
+		return p.Error
+	}
+	return p.Reason
+}
+
+// blockedBy 按 run 取最近一次进入人工介入的事件（节点失败、effect 失败、job 隔离都会记录）。evts 按写入顺序排列。
+func blockedBy(evts []*model.WfEvent) map[int64]*Blocked {
+	out := make(map[int64]*Blocked)
+	for _, ev := range evts {
+		if ev.Type == eventNeedsIntervention || ev.Type == eventJobQuarantined {
+			out[int64(ev.RunId)] = &Blocked{NodeID: ev.NodeId, Reason: eventError(ev)}
+		}
+	}
+	return out
 }
 
 // Event 是 run 的一条事件（节点状态变化、人工操作、隔离等）。
@@ -68,6 +112,24 @@ func (e *Engine) ListRuns(ctx context.Context, q RunQuery) ([]RunListItem, strin
 			return nil, "", err
 		}
 		out = append(out, RunListItem{Run: run, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt})
+	}
+	var blocked []uint64
+	for _, it := range out {
+		if it.Run.Status == RunNeedsIntervention {
+			blocked = append(blocked, uint64(it.Run.ID))
+		}
+	}
+	if len(blocked) > 0 {
+		evts, err := model.NewWfEventModel(e.store.conn).ListByTypes(ctx, blocked, []string{eventNeedsIntervention, eventJobQuarantined})
+		if err != nil {
+			return nil, "", err
+		}
+		by := blockedBy(evts)
+		for i := range out {
+			if out[i].Run.Status == RunNeedsIntervention {
+				out[i].Blocked = by[out[i].Run.ID]
+			}
+		}
 	}
 	return out, next, nil
 }

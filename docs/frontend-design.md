@@ -19,7 +19,7 @@
 | demo | VIP 工单提醒端到端：我的任务、可认领、任务详情 + `Signal`（演示「已联系」「升级」）；运行监控只读（列表、节点状态表、事件时间线）；任务类型只读查看 + 试运行 |
 | 一期 | 认领、开始处理、调整优先级、转派；运行监控的重试、跳过、取消；SLA 指示；变更集与差异页 |
 | 二期 | 任务类型编辑：Monaco + JSON Schema 校验、Issue 面板、试运行、卡片预览、来源试跑；组件库；AI 生成草稿入口（草稿走同一编译器校验） |
-| 三期 | 运行态画布；试运行路径叠加；语义化 workflow 差异。设计态画布（任务类型编辑）提前到本期实现，见「任务类型编辑与 Workflow 画布」 |
+| 三期 | 试运行路径叠加；语义化 workflow 差异。设计态画布（任务类型编辑）与运行态画布已提前实现 |
 
 demo 不含变更集：变更集、审批后端尚未实现，demo 也没有草稿编辑器，页面没有数据。`sla_status` 还没有更新逻辑，放在一期。一期中认领、开始处理、调整优先级、转派与运行干预（取消运行、重试节点、跳过节点）已实现。
 
@@ -43,7 +43,7 @@ demo 不含变更集：变更集、审批后端尚未实现，demo 也没有草�
 | `/tasks` | 我的任务（含「可认领」Tab） | TaskService |
 | `/tasks/:id` | 任务详情，Lark 卡片「在工作台打开」的深链 | TaskService |
 | `/runs` | 运行监控列表 | RunService |
-| `/runs/:id` | 运行详情（时间线；三期加运行态画布） | RunService |
+| `/runs/:id` | 运行详情（运行态画布、节点详情、事件时间线） | RunService |
 | `/config/task-types` | 任务类型列表 | TaskTypeService |
 | `/config/task-types/:key/edit` | 任务类型编辑（含画布） | TaskTypeService、CatalogService |
 | `/config/components` | 组件库 | ComponentService |
@@ -150,8 +150,8 @@ demo 不含变更集：变更集、审批后端尚未实现，demo 也没有草�
 
 | 动作 | 接口 |
 | --- | --- |
-| 列表 | `ListRuns({task_id, biz_key, status, task_type_key, created_after, created_before, page})` |
-| 详情 | `GetRun`（`nodes[]`、`graph_json`） |
+| 列表 | `ListRuns({task_id, biz_key, status, task_type_key, created_after, created_before, page})`；需人工介入的 run 带 `blocked_node`、`blocked_reason` |
+| 详情 | `GetRun`（`nodes[]` 含 `last_error`、`graph_json`、`ui_json` 中的画布坐标、`blocked_node` / `blocked_reason`） |
 | 事件时间线 | `GetRunEvents` |
 | 重试、跳过、取消 | `RetryNode`、`SkipNode`（选端口并填原因）、`CancelRun`；均需 `run.admin`，二次确认 + 必填原因 |
 
@@ -160,7 +160,10 @@ demo 不含变更集：变更集、审批后端尚未实现，demo 也没有草�
 - 取消后进行中的节点状态为 `cancelled`，显示「已取消」。语义见 `docs/workflow-engine.md`「运行干预」。
 
 - 列表顶部放「需人工介入」快捷过滤和数量角标：`needs_intervention` 目前不同步到任务中心，不看这里没人会发现。
-- 一期详情是节点状态表加时间线；三期换成运行态画布，按 `NodeView.status` 着色。
+- 列表显示需人工介入的 run 卡在哪个节点、原因，不用点进详情。
+- 详情以运行态画布为主：按该 run 锁定版本的 workflow 绘制（坐标沿用设计时保存的 `ui.canvas`，没有时自动排版），节点按 `NodeView.status` 着色，未到达的节点淡化，走过的连线高亮；初始视野居中到卡住或正在等待的节点。分支节点在卡片上写出口，执行超过一次时写「执行 n 次」，不单独列出口与执行次数。
+- 需人工介入时页头显示「卡在节点 X」与原因，并直接给出重试、跳过按钮；点击节点在右侧看状态、起止时间、最近一次错误（重试成功后仍保留，便于排查）与干预按钮。
+- 事件时间线把事件翻译成一句话（如「第 2 次执行失败，10:05 重试：…」），失败类标红，原始 payload 可展开。
 - 刷新用按钮，详情页打开期间 running 的 run 每 5 秒轮询一次。
 
 ## 四、配置控制台
