@@ -29,9 +29,10 @@ type Builder struct {
 	S *bootstrap.Services
 }
 
-// Summary 返回列表用的摘要。标题与副标题取任务类型默认模板的 title / summary。
+// Summary 返回列表用的摘要。标题与副标题取当前显示的卡片（与任务详情一致）的 title / summary。
+// 每行读一次 run 快照；列表一页 20 条，开销可以接受。
 func (b Builder) Summary(ctx context.Context, t *task.Task) *pb.TaskSummary {
-	title, subtitle := b.titles(ctx, t)
+	title, subtitle := b.titles(ctx, t, nil)
 	return &pb.TaskSummary{
 		Id: t.ID, TaskTypeKey: t.TaskType, Title: title, Subtitle: subtitle,
 		Status: pb.TaskStatus(task.StatusToProto(t.Status)), Priority: pb.TaskPriority(task.PriorityToProto(t.Priority)),
@@ -41,8 +42,10 @@ func (b Builder) Summary(ctx context.Context, t *task.Task) *pb.TaskSummary {
 }
 
 // View 返回任务视图，payload 已脱敏。
-func (b Builder) View(ctx context.Context, t *task.Task) *pb.TaskView {
-	title, subtitle := b.titles(ctx, t)
+func (b Builder) View(ctx context.Context, t *task.Task) *pb.TaskView { return b.view(ctx, t, nil) }
+
+func (b Builder) view(ctx context.Context, t *task.Task, cur *current) *pb.TaskView {
+	title, subtitle := b.titles(ctx, t, cur)
 	return &pb.TaskView{
 		Id: t.ID, TaskTypeKey: t.TaskType, TaskTypeVersion: int32(t.TypeVersion),
 		Status: pb.TaskStatus(task.StatusToProto(t.Status)), Priority: pb.TaskPriority(task.PriorityToProto(t.Priority)),
@@ -54,27 +57,51 @@ func (b Builder) View(ctx context.Context, t *task.Task) *pb.TaskView {
 
 // Detail 返回任务详情。actor 用于判断能否对等待中的人工节点做决定。
 func (b Builder) Detail(ctx context.Context, t *task.Task, actor string) (*pb.TaskDetail, error) {
-	out := &pb.TaskDetail{Task: b.View(ctx, t)}
+	cur, err := b.current(ctx, t)
+	if err != nil {
+		return nil, err
+	}
+	out := &pb.TaskDetail{Task: b.view(ctx, t, cur), RenderedJson: cur.card}
+	if cur.waiting != nil {
+		if out.PendingAction, err = b.pending(ctx, cur.snap.Def, t, cur.waiting, actor); err != nil {
+			return nil, err
+		}
+	}
+	if cur.snap != nil {
+		out.Progress = progress(cur.snap)
+	}
+	return out, nil
+}
+
+// current 是任务当前的展示状态：显示的卡片、run 快照（没有 run 时为 nil）与等待中的人工节点。
+type current struct {
+	card    []byte
+	snap    *engine.Snapshot
+	waiting *engine.NodeRun
+}
+
+// current 选出任务当前显示的卡片：有等待中的人工节点时取它的卡片，否则取最近一个发过卡片的节点
+// （通知或人工节点）实际发出的卡片；都没有时用任务类型默认模板渲染。
+func (b Builder) current(ctx context.Context, t *task.Task) (*current, error) {
 	if t.RunID == 0 {
 		def, err := b.S.Plans.Load(ctx, t.TaskType, t.TypeVersion)
 		if err != nil {
 			return nil, err
 		}
-		out.RenderedJson = render(ctx, def, def.Spec.View, taskEnv(t))
-		return out, nil
+		return &current{card: render(ctx, def, def.Spec.View, taskEnv(t))}, nil
 	}
 	snap, err := b.S.Engine.Snapshot(ctx, t.RunID)
 	if err != nil {
 		return nil, err
 	}
-	var waiting, shown *engine.NodeRun
+	cur := &current{snap: snap}
+	var shown *engine.NodeRun
 	for i := range snap.Nodes {
 		n := &snap.Nodes[i]
 		node, _ := snap.Def.Node(n.NodeID)
 		if node.Type == dsl.NodeHumanChoice && n.Status == engine.NodeWaiting {
-			waiting = n
+			cur.waiting = n
 		}
-		// 卡片取最近一个发过卡片的节点（通知或人工节点）；都没有时用任务类型默认模板。
 		// 开始时间相同时取拓扑序靠后的（Nodes 已按拓扑序排列）。
 		if _, ok := snap.Def.Plan.Bindings[n.NodeID]; ok && n.StartedAt != nil && n.Status != engine.NodeSkipped {
 			if shown == nil || !n.StartedAt.Before(*shown.StartedAt) {
@@ -82,21 +109,18 @@ func (b Builder) Detail(ctx context.Context, t *task.Task, actor string) (*pb.Ta
 			}
 		}
 	}
-	if waiting != nil {
-		shown = waiting
-		if out.PendingAction, err = b.pending(ctx, snap.Def, t, waiting, actor); err != nil {
-			return nil, err
+	if cur.waiting != nil {
+		shown = cur.waiting
+	}
+	switch {
+	case shown == nil:
+		cur.card = render(ctx, snap.Def, snap.Def.Spec.View, snap.Env(0))
+	default:
+		if cur.card = sentCard(shown.Output); cur.card == nil {
+			cur.card = render(ctx, snap.Def, snap.Def.Plan.Bindings[shown.NodeID].View, snap.Env(shown.Iteration))
 		}
 	}
-	if shown != nil {
-		if out.RenderedJson = sentCard(shown.Output); out.RenderedJson == nil {
-			out.RenderedJson = render(ctx, snap.Def, snap.Def.Plan.Bindings[shown.NodeID].View, snap.Env(shown.Iteration))
-		}
-	} else {
-		out.RenderedJson = render(ctx, snap.Def, snap.Def.Spec.View, snap.Env(0))
-	}
-	out.Progress = progress(snap)
-	return out, nil
+	return cur, nil
 }
 
 func (b Builder) pending(ctx context.Context, def *engine.Definition, t *task.Task, n *engine.NodeRun, actor string) (*pb.PendingAction, error) {
@@ -144,20 +168,18 @@ func progress(snap *engine.Snapshot) []*pb.ProgressStep {
 	return out
 }
 
-func (b Builder) titles(ctx context.Context, t *task.Task) (string, string) {
-	def, err := b.S.Plans.Load(ctx, t.TaskType, t.TypeVersion)
-	if err != nil {
-		logx.WithContext(ctx).Errorf("taskview: load %s@%d: %v", t.TaskType, t.TypeVersion, err)
-		return fmt.Sprintf("%s · %s", t.TaskType, t.SubjectID), ""
+// titles 取当前显示的卡片的 title / summary；cur 为 nil 时现读。卡片取不到时退回「任务类型名 · 主体 id」。
+func (b Builder) titles(ctx context.Context, t *task.Task, cur *current) (string, string) {
+	fallback := fmt.Sprintf("%s · %s", t.TaskType, t.SubjectID)
+	if cur == nil {
+		var err error
+		if cur, err = b.current(ctx, t); err != nil {
+			logx.WithContext(ctx).Errorf("taskview: task %d: %v", t.ID, err)
+			return fallback, ""
+		}
 	}
-	fallback := fmt.Sprintf("%s · %s", def.Spec.Name, t.SubjectID)
-	tpl, err := nodes.Template(def, def.Spec.View)
-	if err != nil {
-		return fallback, ""
-	}
-	// 列表不区分查看人，也不依赖节点输出：只用 payload 与任务字段渲染。
-	card, err := nodes.RenderCard(def, tpl, taskEnv(t))
-	if err != nil || card.Title == "" {
+	var card action.Card
+	if json.Unmarshal(cur.card, &card) != nil || card.Title == "" {
 		return fallback, ""
 	}
 	return card.Title, card.Summary

@@ -74,7 +74,7 @@ demo 不含变更集：变更集、审批后端尚未实现，demo 也没有草�
 | 「可认领」Tab | `ListClaimableTasks({task_type_key, priorities, page})` |
 | 认领 | `ClaimTask`，成功后行移到「我的任务」 |
 
-- 返回 `TaskSummary`，标题与副标题由服务端用任务类型默认模板的 `title` / `summary` 渲染（只用 payload 与任务字段，按 `x-pii` 脱敏，不区分查看人），前端不解析 payload。
+- 返回 `TaskSummary`，标题与副标题取任务当前显示的卡片（与详情页的 `rendered_json` 是同一张，如升级后显示升级卡片）的 `title` / `summary`，已按 `x-pii` 脱敏，前端不解析 payload。
 - 后端按优先级、`due_at` 排序，前端**平铺**显示并用左侧色条区分 P0 到 P3，不做分组折叠：游标分页下各组计数不准，P0 可能出现在第二页。要看某一优先级用筛选。
 - SLA：`on_track` 绿、`at_risk` 黄、`breached` 红；后端更新 `sla_status` 之前（一期）不显示该列。
 - `assignee_id` 经 BSP 批量解析成姓名并缓存。

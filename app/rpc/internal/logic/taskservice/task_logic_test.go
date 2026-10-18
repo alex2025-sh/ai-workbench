@@ -39,7 +39,8 @@ func TestTaskQueries(t *testing.T) {
 			t.Fatalf("page 1 = %v next=%q", got, first.NextCursor)
 		}
 		second := page(first.NextCursor)
-		if got := titles(second.Items); len(got) != 1 || got[0] != "VIP 工单待审核：A1002" || second.NextCursor != "" {
+		// 标题取最近发出的卡片：A1002 已发过 48 小时提醒。
+		if got := titles(second.Items); len(got) != 1 || got[0] != "VIP 工单已等待 48 小时：A1002" || second.NextCursor != "" {
 			t.Fatalf("page 2 = %v next=%q", got, second.NextCursor)
 		}
 		if first.Items[0].Subtitle == "" || first.Items[0].Status != pb.TaskStatus_TASK_STATUS_PENDING {
@@ -59,7 +60,7 @@ func TestTaskQueries(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got := titles(res.Items); len(got) != 1 || !strings.Contains(got[0], "A1003") {
+		if got := titles(res.Items); len(got) != 1 || got[0] != "VIP 工单超过 7 天未完成：A1003" {
 			t.Fatalf("lead claimable = %v", got)
 		}
 		res, err = NewListClaimableTasksLogic(alice, env.Svc).ListClaimableTasks(&pb.ListClaimableTasksReq{})

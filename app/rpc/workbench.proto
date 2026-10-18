@@ -806,7 +806,7 @@ message TaskView {
   bytes payload_json = 12;  // 已按调用人脱敏
   int64 run_id = 13;
   int64 updated_at = 14;
-  string title = 15;     // 任务类型默认模板的 title / summary，查询时用 payload 与任务字段渲染，按 x-pii 脱敏
+  string title = 15;     // 当前显示的卡片（同 TaskDetail.rendered_json）的 title / summary，已按 x-pii 脱敏
   string subtitle = 16;
 }
 

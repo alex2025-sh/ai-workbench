@@ -5671,7 +5671,7 @@ type TaskView struct {
 	PayloadJson     []byte                 `protobuf:"bytes,12,opt,name=payload_json,json=payloadJson,proto3" json:"payload_json,omitempty"` // 已按调用人脱敏
 	RunId           int64                  `protobuf:"varint,13,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
 	UpdatedAt       int64                  `protobuf:"varint,14,opt,name=updated_at,json=updatedAt,proto3" json:"updated_at,omitempty"`
-	Title           string                 `protobuf:"bytes,15,opt,name=title,proto3" json:"title,omitempty"` // 任务类型默认模板的 title / summary，查询时用 payload 与任务字段渲染，按 x-pii 脱敏
+	Title           string                 `protobuf:"bytes,15,opt,name=title,proto3" json:"title,omitempty"` // 当前显示的卡片（同 TaskDetail.rendered_json）的 title / summary，已按 x-pii 脱敏
 	Subtitle        string                 `protobuf:"bytes,16,opt,name=subtitle,proto3" json:"subtitle,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
