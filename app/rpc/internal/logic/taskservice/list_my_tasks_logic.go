@@ -3,6 +3,7 @@ package taskservicelogic
 import (
 	"context"
 
+	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/identity"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/svc"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/taskview"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/pb"
@@ -27,7 +28,7 @@ func NewListMyTasksLogic(ctx context.Context, svcCtx *svc.ServiceContext) *ListM
 
 // 我的任务，按优先级、截止时间排序；返回轻量摘要，不含 payload
 func (l *ListMyTasksLogic) ListMyTasks(in *pb.ListMyTasksReq) (*pb.ListMyTasksResp, error) {
-	actor, err := caller(l.ctx)
+	actor, err := identity.Require(l.ctx)
 	if err != nil {
 		return nil, err
 	}

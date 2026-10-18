@@ -3,12 +3,11 @@ package tasktypeservicelogic
 import (
 	"context"
 
+	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/identity"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/svc"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/pb"
 
 	"github.com/zeromicro/go-zero/core/logx"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 type ListTaskTypeVersionsLogic struct {
@@ -27,5 +26,16 @@ func NewListTaskTypeVersionsLogic(ctx context.Context, svcCtx *svc.ServiceContex
 
 // 版本历史
 func (l *ListTaskTypeVersionsLogic) ListTaskTypeVersions(in *pb.TaskTypeKeyReq) (*pb.ListVersionsResp, error) {
-	return nil, status.Error(codes.Unimplemented, "not implemented")
+	if _, err := identity.Require(l.ctx); err != nil {
+		return nil, err
+	}
+	rows, err := plans(l.svcCtx).Versions(l.ctx, in.Key)
+	if err != nil {
+		return nil, err
+	}
+	out := &pb.ListVersionsResp{}
+	for _, row := range rows {
+		out.Items = append(out.Items, versionInfo(row))
+	}
+	return out, nil
 }

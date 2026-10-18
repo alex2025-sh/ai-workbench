@@ -5,7 +5,9 @@ package identity
 import (
 	"context"
 
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 // MetadataKey 是调用人 ID 所在的 metadata key。接入 gateway 时与其约定对齐。
@@ -21,4 +23,12 @@ func UserID(ctx context.Context) string {
 		return v[0]
 	}
 	return ""
+}
+
+// Require 返回调用人 ID；没有身份时返回 Unauthenticated。
+func Require(ctx context.Context) (string, error) {
+	if u := UserID(ctx); u != "" {
+		return u, nil
+	}
+	return "", status.Error(codes.Unauthenticated, "missing caller identity")
 }

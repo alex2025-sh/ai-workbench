@@ -7,20 +7,12 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/identity"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/svc"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/pb"
 	"github.com/alex2025-sh/ai-workbench/internal/model"
+	"github.com/alex2025-sh/ai-workbench/internal/pkg/cursor"
 	"github.com/alex2025-sh/ai-workbench/internal/task"
 )
-
-// caller 返回调用人；没有身份时返回 Unauthenticated。
-func caller(ctx context.Context) (string, error) {
-	if u := identity.UserID(ctx); u != "" {
-		return u, nil
-	}
-	return "", status.Error(codes.Unauthenticated, "missing caller identity")
-}
 
 // loadTask 读取任务；不存在时返回 NotFound。
 func loadTask(ctx context.Context, svcCtx *svc.ServiceContext, id int64) (*task.Task, error) {
@@ -53,7 +45,7 @@ func listQuery(statuses []pb.TaskStatus, priorities []pb.TaskPriority, taskType 
 
 // queryError 把游标错误映射为 InvalidArgument。
 func queryError(err error) error {
-	if errors.Is(err, task.ErrBadCursor) {
+	if errors.Is(err, cursor.ErrBad) {
 		return status.Error(codes.InvalidArgument, err.Error())
 	}
 	return err

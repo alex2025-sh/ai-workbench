@@ -3,6 +3,7 @@ package taskservicelogic
 import (
 	"context"
 
+	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/identity"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/svc"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/pb"
 	"github.com/alex2025-sh/ai-workbench/internal/task"
@@ -26,7 +27,7 @@ func NewListClaimableTasksLogic(ctx context.Context, svcCtx *svc.ServiceContext)
 
 // 可认领的任务池（unassigned，调用人在候选人或候选组内），排序同上
 func (l *ListClaimableTasksLogic) ListClaimableTasks(in *pb.ListClaimableTasksReq) (*pb.ListMyTasksResp, error) {
-	actor, err := caller(l.ctx)
+	actor, err := identity.Require(l.ctx)
 	if err != nil {
 		return nil, err
 	}

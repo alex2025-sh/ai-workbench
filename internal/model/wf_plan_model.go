@@ -17,6 +17,10 @@ type (
 		WithSession(session sqlx.Session) WfPlanModel
 		// MaxVersion 返回某个任务类型已发布的最大版本，没有时为 0。
 		MaxVersion(ctx context.Context, planID string) (int64, error)
+		// Versions 返回某个任务类型的全部发布版本，新版本在前。
+		Versions(ctx context.Context, planID string) ([]*WfPlan, error)
+		// Latest 返回每个任务类型的最新发布版本，按 key 排序。
+		Latest(ctx context.Context) ([]*WfPlan, error)
 	}
 
 	customWfPlanModel struct {
@@ -40,4 +44,19 @@ func (m *customWfPlanModel) MaxVersion(ctx context.Context, planID string) (int6
 	var v int64
 	err := m.conn.QueryRowCtx(ctx, &v, query, planID)
 	return v, err
+}
+
+func (m *customWfPlanModel) Versions(ctx context.Context, planID string) ([]*WfPlan, error) {
+	query := fmt.Sprintf("select %s from %s where `plan_id` = ? order by `version` desc", wfPlanRows, m.table)
+	var out []*WfPlan
+	err := m.conn.QueryRowsCtx(ctx, &out, query, planID)
+	return out, err
+}
+
+func (m *customWfPlanModel) Latest(ctx context.Context) ([]*WfPlan, error) {
+	query := fmt.Sprintf("select %s from %s p where `version` = (select max(`version`) from %s where `plan_id` = p.`plan_id`) order by `plan_id`",
+		wfPlanRows, m.table, m.table)
+	var out []*WfPlan
+	err := m.conn.QueryRowsCtx(ctx, &out, query)
+	return out, err
 }

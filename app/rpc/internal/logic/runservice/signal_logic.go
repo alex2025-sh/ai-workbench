@@ -32,9 +32,9 @@ func NewSignalLogic(ctx context.Context, svcCtx *svc.ServiceContext) *SignalLogi
 
 // 向等待中的人工节点发送选择：按任务表鉴权（task.CanDecide，与 Lark 卡片回调共用）后交给引擎。
 func (l *SignalLogic) Signal(in *pb.SignalReq) (*pb.SignalResp, error) {
-	actor := identity.UserID(l.ctx)
-	if actor == "" {
-		return nil, status.Error(codes.Unauthenticated, "missing caller identity")
+	actor, err := identity.Require(l.ctx)
+	if err != nil {
+		return nil, err
 	}
 	view, err := l.svcCtx.Engine.GetRun(l.ctx, in.RunId)
 	if errors.Is(err, model.ErrNotFound) {

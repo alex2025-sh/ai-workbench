@@ -3,6 +3,7 @@ package taskservicelogic
 import (
 	"context"
 
+	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/identity"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/svc"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/pb"
 	"github.com/alex2025-sh/ai-workbench/internal/task"
@@ -26,7 +27,7 @@ func NewGetTaskEventsLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Get
 
 // 任务事件时间线
 func (l *GetTaskEventsLogic) GetTaskEvents(in *pb.GetTaskEventsReq) (*pb.GetTaskEventsResp, error) {
-	if _, err := caller(l.ctx); err != nil {
+	if _, err := identity.Require(l.ctx); err != nil {
 		return nil, err
 	}
 	if _, err := loadTask(l.ctx, l.svcCtx, in.Id); err != nil {

@@ -2,20 +2,11 @@ package task
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
-	"fmt"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/alex2025-sh/ai-workbench/internal/model"
-)
-
-// DefaultPageSize 与 MaxPageSize 约束列表的每页条数。
-const (
-	DefaultPageSize = 20
-	MaxPageSize     = 100
+	"github.com/alex2025-sh/ai-workbench/internal/pkg/cursor"
 )
 
 // ListQuery 是任务列表的查询条件：「我的任务」用 AssigneeID，「可认领」用 Groups。
@@ -43,7 +34,7 @@ type Event struct {
 
 // List 按优先级、截止时间（空排最后）、id 排序分页查询任务，返回下一页的游标（空 = 没有更多）。
 func (s *Store) List(ctx context.Context, q ListQuery) ([]Task, string, error) {
-	f := model.TaskFilter{AssigneeID: q.AssigneeID, Groups: q.Groups, TaskType: q.TaskType, Limit: pageSize(q.PageSize) + 1}
+	f := model.TaskFilter{AssigneeID: q.AssigneeID, Groups: q.Groups, TaskType: q.TaskType, Limit: cursor.Size(q.PageSize) + 1}
 	for _, st := range q.Statuses {
 		f.Statuses = append(f.Statuses, int64(st))
 	}
@@ -51,7 +42,7 @@ func (s *Store) List(ctx context.Context, q ListQuery) ([]Task, string, error) {
 		f.Priorities = append(f.Priorities, int64(p))
 	}
 	if q.Cursor != "" {
-		c, err := decodeCursor(q.Cursor, 3)
+		c, err := cursor.Decode(q.Cursor, 3)
 		if err != nil {
 			return nil, "", err
 		}
@@ -65,7 +56,7 @@ func (s *Store) List(ctx context.Context, q ListQuery) ([]Task, string, error) {
 	if len(rows) == f.Limit {
 		rows = rows[:len(rows)-1]
 		last := rows[len(rows)-1]
-		next = encodeCursor(last.Priority, model.SortDueAt(last.DueAt).UnixMilli(), int64(last.Id))
+		next = cursor.Encode(last.Priority, model.SortDueAt(last.DueAt).UnixMilli(), int64(last.Id))
 	}
 	out := make([]Task, 0, len(rows))
 	for _, r := range rows {
@@ -75,17 +66,17 @@ func (s *Store) List(ctx context.Context, q ListQuery) ([]Task, string, error) {
 }
 
 // Events 按写入顺序分页返回任务事件。
-func (s *Store) Events(ctx context.Context, taskID int64, cursor string, size int) ([]Event, string, error) {
-	limit := pageSize(size) + 1
-	var after *model.TaskEventCursor
-	if cursor != "" {
-		c, err := decodeCursor(cursor, 2)
+func (s *Store) Events(ctx context.Context, taskID int64, after string, size int) ([]Event, string, error) {
+	limit := cursor.Size(size) + 1
+	var from *model.TaskEventCursor
+	if after != "" {
+		c, err := cursor.Decode(after, 2)
 		if err != nil {
 			return nil, "", err
 		}
-		after = &model.TaskEventCursor{CreatedAt: time.UnixMicro(c[0]).UTC(), ID: uint64(c[1])}
+		from = &model.TaskEventCursor{CreatedAt: time.UnixMicro(c[0]).UTC(), ID: uint64(c[1])}
 	}
-	rows, err := s.events.ListByTask(ctx, uint64(taskID), after, limit)
+	rows, err := s.events.ListByTask(ctx, uint64(taskID), from, limit)
 	if err != nil {
 		return nil, "", err
 	}
@@ -93,7 +84,7 @@ func (s *Store) Events(ctx context.Context, taskID int64, cursor string, size in
 	if len(rows) == limit {
 		rows = rows[:len(rows)-1]
 		last := rows[len(rows)-1]
-		next = encodeCursor(last.CreatedAt.UnixMicro(), int64(last.Id))
+		next = cursor.Encode(last.CreatedAt.UnixMicro(), int64(last.Id))
 	}
 	out := make([]Event, 0, len(rows))
 	for _, r := range rows {
@@ -112,45 +103,4 @@ func (s *Store) Events(ctx context.Context, taskID int64, cursor string, size in
 		out = append(out, e)
 	}
 	return out, next, nil
-}
-
-func pageSize(n int) int {
-	switch {
-	case n <= 0:
-		return DefaultPageSize
-	case n > MaxPageSize:
-		return MaxPageSize
-	default:
-		return n
-	}
-}
-
-// 游标对调用方不透明：排序键用 | 连接后 base64。
-func encodeCursor(keys ...int64) string {
-	parts := make([]string, len(keys))
-	for i, k := range keys {
-		parts[i] = strconv.FormatInt(k, 10)
-	}
-	return base64.RawURLEncoding.EncodeToString([]byte(strings.Join(parts, "|")))
-}
-
-// ErrBadCursor 表示游标无法解析。
-var ErrBadCursor = fmt.Errorf("task: bad cursor")
-
-func decodeCursor(s string, n int) ([]int64, error) {
-	raw, err := base64.RawURLEncoding.DecodeString(s)
-	if err != nil {
-		return nil, ErrBadCursor
-	}
-	parts := strings.Split(string(raw), "|")
-	if len(parts) != n {
-		return nil, ErrBadCursor
-	}
-	out := make([]int64, n)
-	for i, p := range parts {
-		if out[i], err = strconv.ParseInt(p, 10, 64); err != nil {
-			return nil, ErrBadCursor
-		}
-	}
-	return out, nil
 }
