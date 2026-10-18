@@ -69,7 +69,9 @@
 | `skill_call` / `llm` / `lark_card` / `send_email` / `emit_event` | `next`、`error` | 见 schema；`error` 端口可以不连，失败时进入人工干预 |
 | `end` | 无 | 可选 `resolution` |
 
-除 `error` 外，每个端口都必须有连线。节点配置表单可以用 `wbctl node-types` 或 `CatalogService.ListNodeTypes` 拿到每种节点的独立配置 schema。
+除 `error` 外，每个端口都必须有连线。
+
+**超时与重试**：`skill_call`、`llm` 的 `timeout` 是单次执行超时，默认分别为 30 秒、2 分钟，上限 10 分钟，超时按错误码 `timeout` 失败。节点可以配置 `retry` 覆盖默认重试策略；`non_retryable_errors` 列出不重试的错误码，平台内置 `timeout`、`unknown_skill`，skill 也可以返回自己的错误码。重试耗尽后有 `error` 端口则走它，节点输出为 `{ error, code }`，否则 run 进入人工干预。节点配置表单可以用 `wbctl node-types` 或 `CatalogService.ListNodeTypes` 拿到每种节点的独立配置 schema。
 
 ## 连线
 

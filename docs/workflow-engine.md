@@ -113,8 +113,9 @@ wf_job (
   id BIGINT AUTO_RANDOM PRIMARY KEY,
   run_id, node_id, iteration,
   kind,                             -- execute / timeout / wake / timer / sync_task
-  due_at, status,                   -- pending / done / cancelled
-  attempt, owner, locked_until,     -- 租约
+  due_at, status,                   -- pending / done / cancelled / failed（隔离的毒丸 job）
+  attempt, owner, locked_until,     -- 租约；(owner, attempt) 是一次认领的凭证
+  fail_count,                       -- 处理失败次数（加载或提交出错），超限后隔离
   idem_key UNIQUE,                  -- run_id:node_id:iteration:kind
   INDEX (status, due_at)
 )
@@ -202,28 +203,37 @@ DSL 是“节点 + 端口 + 连线”的图；编译器在发布时完成全部�
 
 ### 一次节点执行的完整流程
 
-1. **认领**：驱动循环用 CAS 抢占 job，参考 Camunda 的锁拥有者 + 锁过期时间做法。TiDB 不支持 `SKIP LOCKED`，CAS 方式在 TiDB 上可直接使用。MySQL 8.0 虽然支持 SKIP LOCKED，也统一用 CAS，两种库的行为保持一致。认领成功后重新读取 job 的 `attempt`：执行时用它给节点打上围栏，调用方手里的 job 副本（例如 tick 批量查出的到期 job）可能已经过期。
-2. **执行**：事务外调用节点执行器（skill、LLM、发卡片等），不持有任何数据库锁。
-3. **提交**：开启悲观事务，锁 run 行，做防护校验，写结果，传播，插入新 job，全部一次提交。
-4. **继续**：提交返回本次插入的 job。已到期的（新就绪节点、`sync_task`）在同一个调用里回到第 1 步立即执行；未到期的（定时器、超时、重试）留在表里，等 tick 唤醒。
+1. **认领**：驱动循环用 CAS 抢占 job，参考 Camunda 的锁拥有者 + 锁过期时间做法。TiDB 不支持 `SKIP LOCKED`，CAS 方式在 TiDB 上可直接使用。MySQL 8.0 虽然支持 SKIP LOCKED，也统一用 CAS，两种库的行为保持一致。认领成功后重新读取 job 的 `attempt`：`(owner, attempt)` 就是这次认领的凭证，之后对 job 的每一次修改都必须带上它（见“认领凭证”）。
+2. **开始**：开启事务，锁 run 行，再锁 job 行确认仍由这次认领持有；把节点置为 `running`、记下 `attempt`，并把租约延长到节点超时之后。
+3. **执行**：事务外调用节点执行器（skill、LLM、发卡片等），不持有任何数据库锁，超过节点超时即取消。
+4. **提交**：开启悲观事务，锁 run 行，确认认领仍然有效，做防护校验，写结果，传播，插入新 job，全部一次提交。
+5. **继续**：提交返回本次插入的 job。已到期的（新就绪节点、`sync_task`）在同一个调用里回到第 1 步立即执行；未到期的（定时器、超时、重试）留在表里，等 tick 唤醒。
 
 ```sql
 -- 1. 认领（影响行数为 0 = 被别人抢走）
 UPDATE wf_job
 SET owner = ?, locked_until = NOW() + INTERVAL ? SECOND, attempt = attempt + 1
 WHERE id = ? AND status = 'pending' AND due_at <= NOW()
-  AND (owner IS NULL OR locked_until < NOW());
+  AND (owner = '' OR locked_until < NOW());
+
+-- 之后对 job 的任何修改（开始、完成、释放、重试、隔离）都带上凭证
+... WHERE id = ? AND owner = ? AND attempt = ? AND status = 'pending';
 ```
 
 ```go
-// 3. 提交（伪代码）
+// 4. 提交（伪代码）
 tx := db.BeginPessimistic()
-run := tx.SelectForUpdate("wf_run", runID)          // 串行化同一 run 的推进
+run := tx.SelectForUpdate("wf_run", runID)          // 串行化同一 run 的推进；先锁 run，再锁 job
+if !tx.LockHeld("wf_job", job.ID, job.Owner, job.Attempt) {
+    tx.Rollback()                                      // 认领已失效：job 属于更新的认领，只丢弃结果，不动 job
+    return
+}
 node := tx.Get("wf_node_run", runID, nodeID)
 
 // 防护校验：节点仍在执行、轮次和尝试次数与认领时一致
 if node.Status != Running || node.Iteration != job.Iteration || node.Attempt != job.Attempt {
-    tx.Rollback()                                      // 租约已被别人接手，或已被退回，结果丢弃
+    tx.FinishJob(job, "cancelled")                     // run 已取消或节点已被退回，结果丢弃
+    tx.Commit()
     return
 }
 
@@ -250,6 +260,24 @@ tx.Commit()
 ### 为什么需要防护校验
 
 Camunda 记录过一个典型问题：执行时间超过锁时长的 job 会被另一个执行器重新认领，前一个执行器完成后再写回，就会产生冲突甚至并行执行。我们用 `attempt` 和 `iteration` 做围栏：重新认领时 `attempt` 加 1，原执行者提交时发现不一致，结果直接丢弃。外部副作用依靠幂等键兜底（见“失败处理、幂等与恢复”）。
+
+### 认领凭证
+
+围栏只靠节点上的 `attempt` 不够，job 本身也必须按凭证 `(owner, attempt)` 修改。只比较 `owner` 时有两种交错会让流程永久卡住：
+
+| 交错 | 只比较 owner 时的结果 | 按凭证处理 |
+| --- | --- | --- |
+| 同一进程的 tick 重新认领了自己过期的 job，旧执行先返回 | 旧执行按 owner 把 job 取消，新执行提交时找不到 job，节点停在 `running` | 旧执行发现 job 已不归自己，只丢弃结果 |
+| A 认领后、开始执行前停顿超过租约，B 重新认领并开始执行 | A 恢复后把节点的 `attempt` 写回旧值并执行，B 提交时被判为过期并取消 job | A 在开始执行的事务里发现认领已失效，不执行、不改节点 |
+
+规则：失去资格的一方只能放弃自己的结果，不能修改 job 或节点；只有持有当前凭证的一方能完成、释放或隔离 job。开始执行和提交都在锁 run 行之后锁 job 行确认凭证，加锁顺序固定为“先 run 后 job”。
+
+### 超时与租约
+
+单次执行超时、租约和整体重试是三件事：超时取消一次调用；租约防止执行期间被别人重复认领；重试决定失败后还执行几次。
+
+- **超时**：`skill_call`、`llm` 可配置 `timeout`；默认 skill 等动作 30 秒、LLM 2 分钟，上限 10 分钟。超时的调用被取消，按错误码 `timeout` 失败，再由重试策略决定是否重试。
+- **租约**：开始执行时把租约延长到“超时 + 30 秒”，执行期间不会被重新认领；进程崩溃时，租约到期后由 tick 接手。
 
 ## 人工节点、定时器与 xxl-job 时钟
 
@@ -427,6 +455,8 @@ xxl-job 只通知一台机器，解决的是 ticker 不重复触发；这里防�
 
 重试策略字段参考 Temporal：初始间隔、退避系数、最大间隔、最大次数、不可重试的错误类型。每种节点类型有默认值，DSL 只能在平台允许的范围内覆盖。重试 = 把 job 的 `due_at` 设为退避后的时间，`attempt` 递增。
 
+不可重试的错误按**错误码**匹配：动作以带错误码的错误返回（`action.Error`），平台内置 `timeout`（超过单次执行超时）与 `unknown_skill`。错误码在 `non_retryable_errors` 中、或执行器判定为确定性错误（如表达式错误）时，不再重试。节点失败的输出带 `error` 与 `code`，`error` 端口之后的节点可以按错误码分支。
+
 重试耗尽后：节点有 `error` 端口则走 `error` 端口；否则 run 进入 `needs_intervention`，运维可选择重试该节点、跳过（指定端口）或终止 run。所有人工干预写入 `wf_event`。
 
 ### 幂等
@@ -445,7 +475,9 @@ xxl-job 只通知一台机器，解决的是 ticker 不重复触发；这里防�
 | 故障 | 恢复方式 |
 | --- | --- |
 | 进程在执行中崩溃 | 已认领的 job 租约过期后由下一次 tick 重新认领，`attempt + 1`；已提交、尚未执行的 job 本来就在表里，tick 照常执行 |
-| 提交事务失败 | 事务回滚，job 仍为认领状态，租约过期后重试 |
+| 提交事务失败 | 事务回滚，job 按凭证释放并退避重试（2 秒起，最长 5 分钟），`fail_count + 1`；进程正在退出时直接释放，不计次数 |
+| 毒丸 job（加载定义失败、配置无法解码等确定性错误） | 连续处理失败 5 次，或认领超过 30 次仍未完成（处理时反复崩溃），job 置为 `failed` 隔离，run 转为 `needs_intervention`，写 `job_quarantined` 事件 |
+| 动作卡住不返回 | 超过节点超时即取消，按 `timeout` 错误重试；租约覆盖超时，执行期间不会被重复认领 |
 | 不同 run 的事务在 `wf_job` 索引上死锁 | 预防：`wf_job` 只按主键更新（撤销 job 时先查出 id 再逐条更新），连接默认使用 READ-COMMITTED，避免范围更新的间隙锁；兜底：推进事务遇到死锁或锁等待超时整体重试（最多 5 次，每次重新加载状态），正确性只依赖 run 行锁 |
 | 进程发版重启 | 状态全部在库中，没有内存队列，重启后由 tick 继续 |
 | xxl-job 漏触发 | 下一次 tick 补上，延迟一个周期 |
@@ -477,7 +509,7 @@ xxl-job 只通知一台机器，解决的是 ticker 不重复触发；这里防�
 | 传播单测 | 表驱动：分支、汇合 all/any、跳过向下传播、嵌套分支 |
 | 时间相关 | 注入可控时钟，快进验证 48h 超时、重复提醒、snooze |
 | 并发 | 两个分支同时到达 `merge`；点击与超时同时发生；同一 job 被两个进程认领；多个进程同时接收事件并 tick |
-| 故障注入 | 在认领后、外部调用后、提交前、提交后分别杀掉进程，验证无丢失、无重复推进 |
+| 故障注入 | 在认领后、外部调用后、提交前、提交后分别杀掉进程，验证无丢失、无重复推进；认领后停顿超过租约、同一进程重新认领自己的 job，验证旧执行不影响新认领；加载失败的 job 被隔离 |
 | 退回 | 区域重置后旧轮次的 job 全部作废；达到上限后走 `on_exhausted` |
 
 ## 扩展性

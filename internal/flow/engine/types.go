@@ -61,6 +61,7 @@ const (
 	JobPending   JobStatus = "pending"
 	JobDone      JobStatus = "done"
 	JobCancelled JobStatus = "cancelled"
+	JobFailed    JobStatus = "failed" // 毒丸 job：反复处理失败后被隔离，run 进入人工干预
 )
 
 // Vars 是 run 的变量：触发时的任务 payload 与任务引用。
@@ -115,7 +116,8 @@ type Job struct {
 	Payload     json.RawMessage `json:"payload,omitempty"`
 	DueAt       time.Time       `json:"due_at"`
 	Status      JobStatus       `json:"status"`
-	Attempt     int             `json:"attempt"`
+	Attempt     int             `json:"attempt"` // 认领次数；(Owner, Attempt) 是一次认领的凭证
+	FailCount   int             `json:"fail_count"`
 	Owner       string          `json:"owner,omitempty"`
 	LockedUntil *time.Time      `json:"locked_until,omitempty"`
 	IdemKey     string          `json:"idem_key"`

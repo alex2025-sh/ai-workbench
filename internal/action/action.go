@@ -7,6 +7,7 @@ package action
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -37,6 +38,43 @@ type Request struct {
 type Result struct {
 	Output   json.RawMessage
 	Retrying bool // true 表示可重试的失败
+}
+
+// Error 是带错误码的动作错误。节点的重试策略按错误码匹配 non_retryable_errors，
+// 错误码也会写进节点输出，供 error 端口之后的节点判断。
+type Error struct {
+	Code string
+	Err  error
+}
+
+func (e *Error) Error() string {
+	if e.Err == nil {
+		return "action: " + e.Code
+	}
+	return e.Err.Error()
+}
+
+func (e *Error) Unwrap() error { return e.Err }
+
+// ErrorCode 实现错误码接口。
+func (e *Error) ErrorCode() string { return e.Code }
+
+// 平台内置的错误码；动作实现可以用 *Error 返回自己的错误码。
+const (
+	CodeTimeout      = "timeout"       // 超过节点的单次执行超时
+	CodeUnknownSkill = "unknown_skill" // skill 不存在
+)
+
+// ErrorCode 返回错误的错误码：错误链上实现了 ErrorCode() 的取其值，超时为 timeout，其余为空。
+func ErrorCode(err error) string {
+	var c interface{ ErrorCode() string }
+	if errors.As(err, &c) {
+		return c.ErrorCode()
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return CodeTimeout
+	}
+	return ""
 }
 
 // Action 是一种动作的实现。

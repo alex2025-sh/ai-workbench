@@ -133,7 +133,7 @@ func nodeFromRow(r *model.WfNodeRun) NodeRun {
 func jobFromRow(r *model.WfJob) Job {
 	j := Job{
 		ID: int64(r.Id), RunID: int64(r.RunId), NodeID: r.NodeId, Iteration: int(r.Iteration), Kind: JobKind(r.Kind),
-		DueAt: r.DueAt.UTC(), Status: JobStatus(r.Status), Attempt: int(r.Attempt), Owner: r.Owner,
+		DueAt: r.DueAt.UTC(), Status: JobStatus(r.Status), Attempt: int(r.Attempt), FailCount: int(r.FailCount), Owner: r.Owner,
 		LockedUntil: nullTime(r.LockedUntil), IdemKey: r.IdemKey,
 	}
 	if r.Payload.Valid {
@@ -288,8 +288,8 @@ func (s *Store) claim(ctx context.Context, j *Job, owner string, now time.Time, 
 	if err != nil || !ok {
 		return false, err
 	}
-	// 重新读取认领后的 attempt：内存里的 job 可能来自较早的轮询，attempt 已过期，
-	// 而防护校验依赖每次认领得到不同的 attempt。
+	// 重新读取认领后的 attempt：调用方手里的 job 副本（如 tick 批量查出的）可能已经过期，
+	// 而 (owner, attempt) 是这次认领的凭证，之后对 job 的每次修改都要带上它。
 	row, err := s.jobs.FindOne(ctx, uint64(j.ID))
 	if err != nil {
 		return false, err

@@ -63,3 +63,6 @@ func (s *Skills) Invoke(ctx context.Context, req Request) (Result, error) {
 type UnknownSkillError struct{ Name string }
 
 func (e *UnknownSkillError) Error() string { return "action: unknown skill " + e.Name }
+
+// ErrorCode 实现错误码接口。
+func (e *UnknownSkillError) ErrorCode() string { return CodeUnknownSkill }
