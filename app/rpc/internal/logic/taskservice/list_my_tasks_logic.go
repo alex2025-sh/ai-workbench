@@ -37,10 +37,11 @@ func (l *ListMyTasksLogic) ListMyTasks(in *pb.ListMyTasksReq) (*pb.ListMyTasksRe
 		return nil, err
 	}
 	q.AssigneeID = actor
-	return list(l.ctx, l.svcCtx, q)
+	return list(l.ctx, l.svcCtx, q, actor)
 }
 
-func list(ctx context.Context, svcCtx *svc.ServiceContext, q task.ListQuery) (*pb.ListMyTasksResp, error) {
+// list 查询一页任务；第一页同时返回按 (优先级, 状态) 的计数，供前端按优先级分区显示总数。
+func list(ctx context.Context, svcCtx *svc.ServiceContext, q task.ListQuery, actor string) (*pb.ListMyTasksResp, error) {
 	ts, next, err := svcCtx.Tasks.List(ctx, q)
 	if err != nil {
 		return nil, queryError(err)
@@ -48,7 +49,20 @@ func list(ctx context.Context, svcCtx *svc.ServiceContext, q task.ListQuery) (*p
 	b := taskview.Builder{S: svcCtx.Services}
 	out := &pb.ListMyTasksResp{NextCursor: next}
 	for i := range ts {
-		out.Items = append(out.Items, b.Summary(ctx, &ts[i]))
+		out.Items = append(out.Items, b.Summary(ctx, &ts[i], actor))
+	}
+	if q.Cursor == "" {
+		counts, err := svcCtx.Tasks.Count(ctx, q)
+		if err != nil {
+			return nil, err
+		}
+		for _, c := range counts {
+			out.Counts = append(out.Counts, &pb.TaskCount{
+				Priority: pb.TaskPriority(task.PriorityToProto(c.Priority)),
+				Status:   pb.TaskStatus(task.StatusToProto(c.Status)),
+				Count:    c.N,
+			})
+		}
 	}
 	return out, nil
 }

@@ -46,6 +46,24 @@ func TestTaskQueries(t *testing.T) {
 		if first.Items[0].Subtitle == "" || first.Items[0].Status != pb.TaskStatus_TASK_STATUS_PENDING {
 			t.Fatalf("summary = %+v", first.Items[0])
 		}
+		if first.Items[0].TaskTypeName != "VIP 工单提醒" || first.Items[0].PendingAction != nil {
+			t.Fatalf("summary type name / pending = %q %+v", first.Items[0].TaskTypeName, first.Items[0].PendingAction)
+		}
+		// 计数只在第一页返回，覆盖全部结果而不是这一页：alice 有 2 个 P1 待处理任务。
+		if len(first.Counts) != 1 || first.Counts[0].Priority != pb.TaskPriority_TASK_PRIORITY_P1 ||
+			first.Counts[0].Status != pb.TaskStatus_TASK_STATUS_PENDING || first.Counts[0].Count != 2 {
+			t.Fatalf("counts = %+v", first.Counts)
+		}
+		if len(second.Counts) != 0 {
+			t.Fatalf("counts on page 2 = %+v", second.Counts)
+		}
+	})
+
+	t.Run("counts follow the filters", func(t *testing.T) {
+		res, err := NewListMyTasksLogic(alice, env.Svc).ListMyTasks(&pb.ListMyTasksReq{Priorities: []pb.TaskPriority{pb.TaskPriority_TASK_PRIORITY_P0}})
+		if err != nil || len(res.Items) != 0 || len(res.Counts) != 0 {
+			t.Fatalf("P0 only = %+v %v", res, err)
+		}
 	})
 
 	t.Run("bad cursor", func(t *testing.T) {
@@ -62,6 +80,13 @@ func TestTaskQueries(t *testing.T) {
 		}
 		if got := titles(res.Items); len(got) != 1 || got[0] != "VIP 工单超过 7 天未完成：A1003" {
 			t.Fatalf("lead claimable = %v", got)
+		}
+		// 组任务不需要先认领就能做决定：列表卡片带上可直接点击的操作。
+		if p := res.Items[0].PendingAction; p == nil || p.NodeId != "escalate" || !p.CanSignal || len(p.Options) != 2 {
+			t.Fatalf("claimable pending = %+v", p)
+		}
+		if len(res.Counts) != 1 || res.Counts[0].Status != pb.TaskStatus_TASK_STATUS_UNASSIGNED || res.Counts[0].Count != 1 {
+			t.Fatalf("claimable counts = %+v", res.Counts)
 		}
 		res, err = NewListClaimableTasksLogic(alice, env.Svc).ListClaimableTasks(&pb.ListClaimableTasksReq{})
 		if err != nil || len(res.Items) != 0 {

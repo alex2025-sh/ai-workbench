@@ -25,6 +25,7 @@ type (
 	PendingAction         = pb.PendingAction
 	ProgressStep          = pb.ProgressStep
 	ReassignReq           = pb.ReassignReq
+	TaskCount             = pb.TaskCount
 	TaskDetail            = pb.TaskDetail
 	TaskEvent             = pb.TaskEvent
 	TaskIdReq             = pb.TaskIdReq

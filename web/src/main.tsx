@@ -9,7 +9,7 @@ import { IdentityProvider } from './identity';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <ConfigProvider locale={zhCN}>
+    <ConfigProvider locale={zhCN} button={{ autoInsertSpace: false }}>
       <AntApp>
         <BrowserRouter>
           <IdentityProvider>

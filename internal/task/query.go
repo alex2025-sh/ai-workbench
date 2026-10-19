@@ -65,6 +65,33 @@ func (s *Store) List(ctx context.Context, q ListQuery) ([]Task, string, error) {
 	return out, next, nil
 }
 
+// Count 是一组 (优先级, 状态) 的任务数。
+type Count struct {
+	Priority TaskPriority
+	Status   TaskStatus
+	N        int64
+}
+
+// Count 按 (优先级, 状态) 分组计数，条件与 List 相同（忽略游标与分页）。
+func (s *Store) Count(ctx context.Context, q ListQuery) ([]Count, error) {
+	f := model.TaskFilter{AssigneeID: q.AssigneeID, Groups: q.Groups, TaskType: q.TaskType}
+	for _, st := range q.Statuses {
+		f.Statuses = append(f.Statuses, int64(st))
+	}
+	for _, p := range q.Priorities {
+		f.Priorities = append(f.Priorities, int64(p))
+	}
+	rows, err := s.tasks.Count(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Count, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, Count{Priority: TaskPriority(r.Priority), Status: TaskStatus(r.Status), N: r.N})
+	}
+	return out, nil
+}
+
 // Events 按写入顺序分页返回任务事件。
 func (s *Store) Events(ctx context.Context, taskID int64, after string, size int) ([]Event, string, error) {
 	limit := cursor.Size(size) + 1
