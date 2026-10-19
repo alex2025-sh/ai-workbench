@@ -2,10 +2,13 @@ package tasktypeservicelogic
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 
 	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/identity"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/svc"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/pb"
+	"github.com/alex2025-sh/ai-workbench/internal/flow/compiler"
 
 	"github.com/zeromicro/go-zero/core/logx"
 )
@@ -44,5 +47,13 @@ func (l *GetTaskTypeLogic) GetTaskType(in *pb.GetTaskTypeReq) (*pb.GetTaskTypeRe
 	if _, err := l.svcCtx.TaskTypes.Find(l.ctx, in.Key); err == nil {
 		sum.HasDraft = true
 	}
-	return &pb.GetTaskTypeResp{Summary: sum, Version: versionInfo(row), BodyJson: []byte(row.Dsl)}, nil
+	var plan compiler.Plan
+	if err := json.Unmarshal([]byte(row.Compiled), &plan); err != nil {
+		return nil, fmt.Errorf("task type %s@%d: compiled plan: %w", row.PlanId, row.Version, err)
+	}
+	bindings, err := json.Marshal(plan.Bindings)
+	if err != nil {
+		return nil, err
+	}
+	return &pb.GetTaskTypeResp{Summary: sum, Version: versionInfo(row), BodyJson: []byte(row.Dsl), BindingsJson: bindings}, nil
 }
