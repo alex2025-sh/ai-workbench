@@ -41,11 +41,23 @@ export interface TaskSummary {
   snooze_until: Int64;
   due_at: Int64;
   updated_at: Int64;
+  task_type_name: string;
+  /** 等待中的人工节点及调用人可选的操作，与详情的 pending_action 相同；没有时为 null。 */
+  pending_action: PendingAction | null;
+  run_id: Int64;
+}
+
+export interface TaskCount {
+  priority: TaskPriority;
+  status: TaskStatus;
+  count: Int64;
 }
 
 export interface ListTasksResp {
   items: TaskSummary[];
   next_cursor: string;
+  /** 只在第一页返回：按 (priority, status) 的计数，条件与请求相同。 */
+  counts: TaskCount[];
 }
 
 export interface TaskView {

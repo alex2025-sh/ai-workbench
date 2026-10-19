@@ -32,6 +32,15 @@ type (
 		SetPriority(ctx context.Context, id uint64, priority int64) error
 		// List 按优先级、截止时间（空排最后）、id 排序分页查询，键集分页。
 		List(ctx context.Context, f TaskFilter) ([]*Task, error)
+		// Count 按 (priority, status) 分组计数，条件与 List 相同（忽略 After 与 Limit）。
+		Count(ctx context.Context, f TaskFilter) ([]TaskCount, error)
+	}
+
+	// TaskCount 是一组 (priority, status) 的任务数。
+	TaskCount struct {
+		Priority int64 `db:"priority"`
+		Status   int64 `db:"status"`
+		N        int64 `db:"n"`
 	}
 
 	// TaskFilter 是任务列表的查询条件。AssigneeID 与 Groups 至少指定一个；同时指定时取并集。
@@ -110,6 +119,37 @@ func SortDueAt(t sql.NullTime) time.Time {
 }
 
 func (m *customTaskModel) List(ctx context.Context, f TaskFilter) ([]*Task, error) {
+	where, args := f.where()
+	if where == nil {
+		return nil, nil
+	}
+	const dueKey = "coalesce(`due_at`, ?)"
+	if f.After != nil {
+		where = append(where, "(`priority`, "+dueKey+", `id`) > (?, ?, ?)")
+		args = append(args, noDueAt, f.After.Priority, f.After.DueAt, f.After.ID)
+	}
+	query := fmt.Sprintf("select %s from %s where %s order by `priority`, %s, `id` limit ?",
+		taskRows, m.table, strings.Join(where, " and "), dueKey)
+	args = append(args, noDueAt, f.Limit)
+	var out []*Task
+	err := m.conn.QueryRowsCtx(ctx, &out, query, args...)
+	return out, err
+}
+
+func (m *customTaskModel) Count(ctx context.Context, f TaskFilter) ([]TaskCount, error) {
+	where, args := f.where()
+	if where == nil {
+		return nil, nil
+	}
+	query := fmt.Sprintf("select `priority`, `status`, count(*) as `n` from %s where %s group by `priority`, `status` order by `priority`, `status`",
+		m.table, strings.Join(where, " and "))
+	var out []TaskCount
+	err := m.conn.QueryRowsCtx(ctx, &out, query, args...)
+	return out, err
+}
+
+// where 返回 List 与 Count 共用的条件；没有指定处理人或组时返回 nil（查询结果为空）。
+func (f TaskFilter) where() ([]string, []any) {
 	var who []string
 	var args []any
 	if f.AssigneeID != "" {
@@ -142,17 +182,7 @@ func (m *customTaskModel) List(ctx context.Context, f TaskFilter) ([]*Task, erro
 			args = append(args, v)
 		}
 	}
-	const dueKey = "coalesce(`due_at`, ?)"
-	if f.After != nil {
-		where = append(where, "(`priority`, "+dueKey+", `id`) > (?, ?, ?)")
-		args = append(args, noDueAt, f.After.Priority, f.After.DueAt, f.After.ID)
-	}
-	query := fmt.Sprintf("select %s from %s where %s order by `priority`, %s, `id` limit ?",
-		taskRows, m.table, strings.Join(where, " and "), dueKey)
-	args = append(args, noDueAt, f.Limit)
-	var out []*Task
-	err := m.conn.QueryRowsCtx(ctx, &out, query, args...)
-	return out, err
+	return where, args
 }
 
 func placeholders(n int) string {

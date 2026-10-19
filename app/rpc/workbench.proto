@@ -843,6 +843,11 @@ message TaskSummary {
   int64 snooze_until = 9;
   int64 due_at = 10;
   int64 updated_at = 11;
+  string task_type_name = 12;           // 任务类型的显示名称（任务所属版本）
+  // 等待中的人工节点及调用人可选的操作，与 TaskDetail.pending_action 相同；列表卡片据此直接给出操作按钮。
+  // 没有等待中的人工节点时为空。
+  PendingAction pending_action = 13;
+  int64 run_id = 14;                    // 驱动任务的 run，Signal 用；0 = 没有 run
 }
 
 // 人工节点上的一个可选操作，对应 DSL 的 human_choice.options。
@@ -906,6 +911,15 @@ message ListClaimableTasksReq {
 message ListMyTasksResp {
   repeated TaskSummary items = 1;
   string next_cursor = 2;
+  // 只在第一页（cursor 为空）返回：按 (priority, status) 分组的计数，条件与本次请求相同（不含游标与分页），
+  // 供列表按优先级分区显示准确的总数。只列出计数大于 0 的组合。
+  repeated TaskCount counts = 3;
+}
+
+message TaskCount {
+  TaskPriority priority = 1;
+  TaskStatus status = 2;
+  int64 count = 3;
 }
 
 message GetTaskEventsReq {

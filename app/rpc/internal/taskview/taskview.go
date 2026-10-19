@@ -29,22 +29,43 @@ type Builder struct {
 	S *bootstrap.Services
 }
 
-// Summary 返回列表用的摘要。标题与副标题取当前显示的卡片（与任务详情一致）的 title / summary。
+// Summary 返回列表用的摘要。标题与副标题取当前显示的卡片（与任务详情一致）的 title / summary；
+// 有等待中的人工节点时带上调用人可选的操作（与详情的 pending_action 相同），列表卡片据此直接给出按钮。
 // 每行读一次 run 快照；列表一页 20 条，开销可以接受。
-func (b Builder) Summary(ctx context.Context, t *task.Task) *pb.TaskSummary {
-	title, subtitle := b.titles(ctx, t, nil)
-	return &pb.TaskSummary{
-		Id: t.ID, TaskTypeKey: t.TaskType, Title: title, Subtitle: subtitle,
+func (b Builder) Summary(ctx context.Context, t *task.Task, actor string) *pb.TaskSummary {
+	out := &pb.TaskSummary{
+		Id: t.ID, TaskTypeKey: t.TaskType,
 		Status: pb.TaskStatus(task.StatusToProto(t.Status)), Priority: pb.TaskPriority(task.PriorityToProto(t.Priority)),
 		AssigneeId: t.AssigneeID, SlaStatus: string(t.SLAStatus),
-		SnoozeUntil: millis(t.SnoozeUntil), DueAt: millis(t.DueAt), UpdatedAt: t.UpdatedAt.UnixMilli(),
+		SnoozeUntil: millis(t.SnoozeUntil), DueAt: millis(t.DueAt), UpdatedAt: t.UpdatedAt.UnixMilli(), RunId: t.RunID,
 	}
+	if def, err := b.S.Plans.Load(ctx, t.TaskType, t.TypeVersion); err == nil {
+		out.TaskTypeName = def.Spec.Name
+	}
+	cur, err := b.current(ctx, t)
+	if err != nil {
+		logx.WithContext(ctx).Errorf("taskview: task %d: %v", t.ID, err)
+	}
+	out.Title, out.Subtitle = b.titles(ctx, t, cur)
+	if cur != nil && cur.waiting != nil && !t.Status.IsTerminal() {
+		if out.PendingAction, err = b.pending(ctx, cur.snap.Def, t, cur.waiting, actor); err != nil {
+			logx.WithContext(ctx).Errorf("taskview: task %d pending action: %v", t.ID, err)
+			out.PendingAction = nil
+		}
+	}
+	return out
 }
 
 // View 返回任务视图，payload 已脱敏。
 func (b Builder) View(ctx context.Context, t *task.Task) *pb.TaskView { return b.view(ctx, t, nil) }
 
 func (b Builder) view(ctx context.Context, t *task.Task, cur *current) *pb.TaskView {
+	if cur == nil {
+		var err error
+		if cur, err = b.current(ctx, t); err != nil {
+			logx.WithContext(ctx).Errorf("taskview: task %d: %v", t.ID, err)
+		}
+	}
 	title, subtitle := b.titles(ctx, t, cur)
 	return &pb.TaskView{
 		Id: t.ID, TaskTypeKey: t.TaskType, TaskTypeVersion: int32(t.TypeVersion),
@@ -168,15 +189,11 @@ func progress(snap *engine.Snapshot) []*pb.ProgressStep {
 	return out
 }
 
-// titles 取当前显示的卡片的 title / summary；cur 为 nil 时现读。卡片取不到时退回「任务类型名 · 主体 id」。
+// titles 取当前显示的卡片的 title / summary。卡片取不到（cur 为 nil 或渲染失败）时退回「任务类型 · 主体 id」。
 func (b Builder) titles(ctx context.Context, t *task.Task, cur *current) (string, string) {
 	fallback := fmt.Sprintf("%s · %s", t.TaskType, t.SubjectID)
 	if cur == nil {
-		var err error
-		if cur, err = b.current(ctx, t); err != nil {
-			logx.WithContext(ctx).Errorf("taskview: task %d: %v", t.ID, err)
-			return fallback, ""
-		}
+		return fallback, ""
 	}
 	var card action.Card
 	if json.Unmarshal(cur.card, &card) != nil || card.Title == "" {

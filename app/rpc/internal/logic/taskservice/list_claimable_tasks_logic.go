@@ -42,5 +42,5 @@ func (l *ListClaimableTasksLogic) ListClaimableTasks(in *pb.ListClaimableTasksRe
 		return &pb.ListMyTasksResp{}, nil
 	}
 	q.Statuses = []task.TaskStatus{task.TaskStatusUnassigned}
-	return list(l.ctx, l.svcCtx, q)
+	return list(l.ctx, l.svcCtx, q, actor)
 }

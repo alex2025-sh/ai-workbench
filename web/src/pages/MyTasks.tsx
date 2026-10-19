@@ -1,78 +1,110 @@
-// 我的任务 / 可认领：后端按优先级、截止时间排序，前端平铺并用左侧色条区分优先级（游标分页下分组计数不准，不做分组）。
+// 我的任务 / 可认领：按优先级分区的卡片网格。
+//
+// 每个优先级是一个分区，各自查询、各自游标分页（「查看更多」），分区标题的计数来自后端第一页返回的
+// counts（与筛选条件相同、不受分页影响），所以计数是准确的。没有任务的分区不显示。
+// 卡片上的操作提交后，任务表由引擎异步同步，所以稍后重新加载该分区。
 import { ReloadOutlined } from '@ant-design/icons';
-import { Alert, App as AntApp, Button, Empty, List, Space, Tabs, Tag, Typography } from 'antd';
-import { useCallback, useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Alert, Button, Col, Empty, Row, Skeleton, Space, Tabs, Tag, Typography } from 'antd';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError } from '../api/client';
 import { taskApi } from '../api/services';
-import type { ListTasksResp, TaskPriority, TaskStatus, TaskSummary } from '../api/types';
-import { fmtTime, priorityColor, priorityLabel, taskStatusColor, taskStatusLabel } from '../format';
+import type { ListTasksResp, TaskCount, TaskPriority, TaskStatus, TaskSummary } from '../api/types';
+import { TaskBoardCard } from '../components/TaskBoardCard';
+import { priorityColor, taskStatusLabel } from '../format';
+import { useIdentity } from '../identity';
 
-const statusOptions: TaskStatus[] = [
-  'TASK_STATUS_PENDING',
-  'TASK_STATUS_PROCESSING',
-  'TASK_STATUS_SNOOZED',
-  'TASK_STATUS_SOLVED',
-];
+const statusOptions: TaskStatus[] = ['TASK_STATUS_PENDING', 'TASK_STATUS_PROCESSING', 'TASK_STATUS_SNOOZED', 'TASK_STATUS_SOLVED'];
 const activeStatuses: TaskStatus[] = ['TASK_STATUS_PENDING', 'TASK_STATUS_PROCESSING', 'TASK_STATUS_SNOOZED'];
-const priorityOptions: TaskPriority[] = ['TASK_PRIORITY_P0', 'TASK_PRIORITY_P1', 'TASK_PRIORITY_P2', 'TASK_PRIORITY_P3'];
+const priorities: TaskPriority[] = ['TASK_PRIORITY_P0', 'TASK_PRIORITY_P1', 'TASK_PRIORITY_P2', 'TASK_PRIORITY_P3'];
+/** 分区每页 9 张：三列网格正好三行。 */
+const PAGE_SIZE = 9;
+/** 提交后重新加载分区的时机：引擎同步任务表通常在 1 秒内完成，再补一次兜底。 */
+const RELOAD_AFTER = [800, 3000];
 
 type TabKey = 'mine' | 'claimable';
+
+interface Section {
+  items: TaskSummary[];
+  cursor: string;
+  counts: TaskCount[];
+  loading: boolean;
+  error?: string;
+}
+
+const emptySection: Section = { items: [], cursor: '', counts: [], loading: true };
 
 function toggle<T>(list: T[], v: T): T[] {
   return list.includes(v) ? list.filter((x) => x !== v) : [...list, v];
 }
 
+function total(counts: TaskCount[]): number {
+  return counts.reduce((n, c) => n + Number(c.count), 0);
+}
+
 export default function MyTasks() {
+  const { user } = useIdentity();
   const [tab, setTab] = useState<TabKey>('mine');
   const [statuses, setStatuses] = useState<TaskStatus[]>(activeStatuses);
-  const [priorities, setPriorities] = useState<TaskPriority[]>([]);
-  const [items, setItems] = useState<TaskSummary[]>([]);
-  const [cursor, setCursor] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string>();
-  const [claiming, setClaiming] = useState<string>();
-  const { message } = AntApp.useApp();
+  const [shown, setShown] = useState<TaskPriority[]>([]); // 空 = 全部优先级
+  const [sections, setSections] = useState<Partial<Record<TaskPriority, Section>>>({});
+  const timers = useRef<number[]>([]);
 
-  // 认领成功后任务移到「我的任务」。
-  const claim = async (id: string) => {
-    setClaiming(id);
-    try {
-      await taskApi.claim(id);
-      message.success('已认领，任务已移到「我的任务」');
-      setItems((prev) => prev.filter((t) => t.id !== id));
-    } catch (e) {
-      message.error(e instanceof ApiError ? `认领失败：${e.message}` : String(e));
-      void load();
-    } finally {
-      setClaiming(undefined);
-    }
-  };
-
-  const load = useCallback(
-    async (after = '') => {
-      setLoading(true);
-      setError(undefined);
-      try {
-        const page = { cursor: after, page_size: 20 };
-        const res: ListTasksResp =
-          tab === 'mine'
-            ? await taskApi.listMine({ statuses, priorities, page })
-            : await taskApi.listClaimable({ priorities, page });
-        setItems((prev) => (after ? [...prev, ...res.items] : res.items));
-        setCursor(res.next_cursor);
-      } catch (e) {
-        setError(e instanceof ApiError ? `${e.code}: ${e.message}` : String(e));
-      } finally {
-        setLoading(false);
-      }
+  const fetchPage = useCallback(
+    (priority: TaskPriority, cursor: string): Promise<ListTasksResp> => {
+      const page = { cursor, page_size: PAGE_SIZE };
+      return tab === 'mine'
+        ? taskApi.listMine({ statuses, priorities: [priority], page })
+        : taskApi.listClaimable({ priorities: [priority], page });
     },
-    [tab, statuses, priorities],
+    [tab, statuses],
   );
 
+  const loadSection = useCallback(
+    async (priority: TaskPriority, cursor = '') => {
+      setSections((prev) => ({ ...prev, [priority]: { ...(prev[priority] ?? emptySection), loading: true, error: undefined } }));
+      try {
+        const res = await fetchPage(priority, cursor);
+        setSections((prev) => {
+          const old = prev[priority] ?? emptySection;
+          return {
+            ...prev,
+            [priority]: {
+              items: cursor ? [...old.items, ...res.items] : res.items,
+              cursor: res.next_cursor,
+              counts: cursor ? old.counts : res.counts ?? [],
+              loading: false,
+            },
+          };
+        });
+      } catch (e) {
+        const error = e instanceof ApiError ? `${e.code}: ${e.message}` : String(e);
+        setSections((prev) => ({ ...prev, [priority]: { ...(prev[priority] ?? emptySection), loading: false, error } }));
+      }
+    },
+    [fetchPage],
+  );
+
+  const visible = shown.length > 0 ? priorities.filter((p) => shown.includes(p)) : priorities;
+
+  const loadAll = useCallback(() => {
+    setSections({});
+    visible.forEach((p) => void loadSection(p));
+  }, [loadSection, shown]);
+
   useEffect(() => {
-    void load();
-  }, [load]);
+    loadAll();
+  }, [loadAll, user]);
+
+  useEffect(() => () => timers.current.forEach((t) => window.clearTimeout(t)), []);
+
+  // 卡片上的操作完成后，重新加载该任务所在的分区（任务可能离开当前分区，如认领后移到「我的任务」）。
+  const onChanged = (priority: TaskPriority) => {
+    RELOAD_AFTER.forEach((ms) => timers.current.push(window.setTimeout(() => void loadSection(priority), ms)));
+  };
+
+  const loaded = visible.map((p) => sections[p]);
+  const allLoaded = loaded.every((s) => s && !s.loading);
+  const nothing = allLoaded && loaded.every((s) => s && !s.error && s.items.length === 0);
 
   return (
     <>
@@ -84,12 +116,12 @@ export default function MyTasks() {
           { key: 'claimable', label: '可认领' },
         ]}
         tabBarExtraContent={
-          <Button icon={<ReloadOutlined />} onClick={() => void load()} loading={loading}>
+          <Button icon={<ReloadOutlined />} onClick={loadAll} loading={!allLoaded}>
             刷新
           </Button>
         }
       />
-      <Space direction="vertical" style={{ marginBottom: 16 }}>
+      <Space direction="vertical" style={{ marginBottom: 8 }}>
         {tab === 'mine' && (
           <Space wrap>
             <Typography.Text type="secondary">状态</Typography.Text>
@@ -102,47 +134,50 @@ export default function MyTasks() {
         )}
         <Space wrap>
           <Typography.Text type="secondary">优先级</Typography.Text>
-          {priorityOptions.map((p) => (
-            <Tag.CheckableTag key={p} checked={priorities.includes(p)} onChange={() => setPriorities(toggle(priorities, p))}>
-              {priorityLabel[p]}
+          {priorities.map((p) => (
+            <Tag.CheckableTag key={p} checked={shown.includes(p)} onChange={() => setShown(toggle(shown, p))}>
+              {p.replace('TASK_PRIORITY_', '')}
             </Tag.CheckableTag>
           ))}
         </Space>
       </Space>
-      {error && <Alert type="error" message={error} showIcon style={{ marginBottom: 16 }} />}
-      <List
-        bordered
-        loading={loading && items.length === 0}
-        dataSource={items}
-        locale={{ emptyText: <Empty description={tab === 'mine' ? '没有任务' : '没有可认领的任务'} /> }}
-        renderItem={(t) => (
-          <List.Item style={{ borderLeft: `4px solid ${priorityColor[t.priority]}` }}>
-            <List.Item.Meta
-              title={<Link to={`/tasks/${t.id}`}>{t.title}</Link>}
-              description={t.subtitle || t.task_type_key}
-            />
-            <Space size="large">
-              <Tag color={priorityColor[t.priority]}>{priorityLabel[t.priority]}</Tag>
-              <Tag color={taskStatusColor[t.status]}>{taskStatusLabel[t.status]}</Tag>
-              <Typography.Text type="secondary">{t.assignee_id || '—'}</Typography.Text>
-              <Typography.Text type="secondary">截止 {fmtTime(t.due_at)}</Typography.Text>
-              <Typography.Text type="secondary">更新 {fmtTime(t.updated_at)}</Typography.Text>
-              {tab === 'claimable' && (
-                <Button size="small" type="primary" ghost loading={claiming === t.id} onClick={() => void claim(t.id)}>
-                  认领
-                </Button>
-              )}
+
+      {nothing && <Empty style={{ marginTop: 48 }} description={tab === 'mine' ? '没有任务' : '没有可认领的任务'} />}
+
+      {visible.map((p) => {
+        const s = sections[p];
+        if (!s) return null;
+        if (s.loading && s.items.length === 0) return <Skeleton key={p} active paragraph={{ rows: 3 }} style={{ marginTop: 24 }} />;
+        if (!s.error && s.items.length === 0) return null;
+        const n = total(s.counts);
+        return (
+          <section key={p} style={{ marginTop: 24 }} aria-label={`${p.replace('TASK_PRIORITY_', '')} 任务`}>
+            <Space size={12} align="baseline" style={{ marginBottom: 12 }}>
+              <Typography.Title level={5} style={{ margin: 0, color: priorityColor[p] }}>
+                {p.replace('TASK_PRIORITY_', '')}
+              </Typography.Title>
+              <Typography.Text strong>
+                {s.counts.map((c) => `${taskStatusLabel[c.status]} ${c.count}`).join(' · ')}
+              </Typography.Text>
             </Space>
-          </List.Item>
-        )}
-      />
-      {cursor && (
-        <div style={{ textAlign: 'center', marginTop: 16 }}>
-          <Button onClick={() => void load(cursor)} loading={loading}>
-            加载更多
-          </Button>
-        </div>
-      )}
+            {s.error && <Alert type="error" showIcon message={s.error} style={{ marginBottom: 12 }} />}
+            <Row gutter={[16, 16]}>
+              {s.items.map((t) => (
+                <Col key={t.id} xs={24} md={12} xl={8}>
+                  <TaskBoardCard task={t} me={user} onChanged={() => onChanged(p)} />
+                </Col>
+              ))}
+            </Row>
+            {s.cursor && (
+              <div style={{ textAlign: 'center', marginTop: 12 }}>
+                <Button type="link" loading={s.loading} onClick={() => void loadSection(p, s.cursor)}>
+                  查看更多（还有 {Math.max(0, n - s.items.length)} 个）
+                </Button>
+              </div>
+            )}
+          </section>
+        );
+      })}
     </>
   );
 }
