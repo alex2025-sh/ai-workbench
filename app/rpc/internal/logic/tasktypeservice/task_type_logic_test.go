@@ -1,6 +1,7 @@
 package tasktypeservicelogic
 
 import (
+	"encoding/json"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -42,6 +43,20 @@ func TestTaskTypeQueries(t *testing.T) {
 	}
 	if _, err := spec.Parse(got.BodyJson); err != nil {
 		t.Fatalf("body is not a task type: %v", err)
+	}
+	// 编译后的绑定：notify_rm 沿用任务类型默认的 rm_card，escalate 用自己配置的 lead_card。
+	var bindings map[string]struct {
+		View     any    `json:"view"`
+		ViewFrom string `json:"view_from"`
+	}
+	if err := json.Unmarshal(got.BindingsJson, &bindings); err != nil {
+		t.Fatalf("bindings: %v", err)
+	}
+	if b := bindings["notify_rm"]; b.View != "rm_card" || b.ViewFrom != "task_type" {
+		t.Errorf("notify_rm binding = %+v", b)
+	}
+	if b := bindings["escalate"]; b.View != "lead_card" || b.ViewFrom != "self" {
+		t.Errorf("escalate binding = %+v", b)
 	}
 	for _, req := range []*pb.GetTaskTypeReq{{Key: "nope"}, {Key: "vip_appeal_alert", Version: 9}} {
 		if _, err := NewGetTaskTypeLogic(ctx, env.Svc).GetTaskType(req); status.Code(err) != codes.NotFound {

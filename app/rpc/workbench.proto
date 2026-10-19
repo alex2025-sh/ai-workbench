@@ -326,6 +326,9 @@ message GetTaskTypeResp {
   VersionInfo version = 2;
   bytes body_json = 3;
   repeated ManifestItem manifest = 4;
+  // 编译后每个通知 / 人工节点实际使用的卡片模板与处理人（已处理继承）：
+  // {"<node_id>": {"view": ..., "view_from": "self|task_type|<上游人工节点>", "assignment": ..., "assignment_from": ...}}
+  bytes bindings_json = 5;
 }
 
 message TaskTypeKeyReq {

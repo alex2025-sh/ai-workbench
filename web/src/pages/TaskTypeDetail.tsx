@@ -1,12 +1,15 @@
-// 任务类型详情（已发布版本，只读）：定义、版本与试运行；「编辑」进入草稿与画布。
+// 任务类型详情（已发布版本，只读）：定义、试运行与版本；「编辑」进入草稿与画布。
+// 默认打开「定义」，当前 Tab 记在 URL 的 tab 参数里，便于分享链接。
 import { ArrowLeftOutlined, EditOutlined } from '@ant-design/icons';
 import { Button, Card, Descriptions, Result, Space, Spin, Table, Tabs, Typography } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { ApiError, decodeJson } from '../api/client';
 import { taskTypeApi } from '../api/services';
 import type { GetTaskTypeResp, TaskTypeBody, VersionInfo } from '../api/types';
 import { DryRunPanel } from '../components/DryRunPanel';
+import type { Binding, Definition } from '../components/definition/model';
+import { TaskTypeDefinition } from '../components/definition/TaskTypeDefinition';
 import { fmtTime } from '../format';
 
 export default function TaskTypeDetail() {
@@ -14,6 +17,8 @@ export default function TaskTypeDetail() {
   const [tt, setTt] = useState<GetTaskTypeResp>();
   const [versions, setVersions] = useState<VersionInfo[]>([]);
   const [error, setError] = useState<Error>();
+  const [params, setParams] = useSearchParams();
+  const tab = params.get('tab') ?? 'definition';
 
   useEffect(() => {
     Promise.all([taskTypeApi.get(key), taskTypeApi.versions(key)])
@@ -25,6 +30,7 @@ export default function TaskTypeDetail() {
   }, [key]);
 
   const body = useMemo(() => decodeJson<TaskTypeBody>(tt?.body_json), [tt]);
+  const bindings = useMemo(() => decodeJson<Record<string, Binding>>(tt?.bindings_json) ?? {}, [tt]);
 
   if (error) {
     const notFound = error instanceof ApiError && error.code === 'NotFound';
@@ -50,7 +56,7 @@ export default function TaskTypeDetail() {
         }
         style={{ marginBottom: 16 }}
       >
-        <Descriptions size="small" column={3}>
+        <Descriptions size="small" column={{ xs: 1, md: 3 }}>
           <Descriptions.Item label="Namespace">{tt.summary.namespace}</Descriptions.Item>
           <Descriptions.Item label="版本">v{tt.version.version}</Descriptions.Item>
           <Descriptions.Item label="发布">{fmtTime(tt.version.published_at, 'YYYY-MM-DD HH:mm')} · {tt.version.published_by}</Descriptions.Item>
@@ -58,9 +64,15 @@ export default function TaskTypeDetail() {
         {body.description && <Typography.Paragraph type="secondary">{body.description}</Typography.Paragraph>}
       </Card>
       <Tabs
+        activeKey={tab}
+        onChange={(k) => setParams(k === 'definition' ? {} : { tab: k }, { replace: true })}
         items={[
+          {
+            key: 'definition',
+            label: '定义',
+            children: <TaskTypeDefinition body={body as unknown as Definition} bindings={bindings} version={tt.version.version} />,
+          },
           { key: 'dry-run', label: '试运行', children: <DryRunPanel taskKey={key} body={body} /> },
-          { key: 'body', label: '定义', children: <pre style={{ fontSize: 12 }}>{JSON.stringify(body, null, 2)}</pre> },
           {
             key: 'versions',
             label: '版本',

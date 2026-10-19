@@ -221,6 +221,7 @@ export interface GetTaskTypeResp {
   summary: TaskTypeSummary;
   version: VersionInfo;
   body_json: Bytes;
+  bindings_json?: Bytes; // node_id → 编译后实际使用的卡片模板与处理人（已处理继承）
 }
 
 export interface DryRunStep {
