@@ -1,123 +1,113 @@
 # 任务类型 JSON 说明
 
-前端画布、仓库中的 YAML、AI 生成的配置，最终都是同一份任务类型 JSON，作为 `SaveTaskTypeDraft.body_json` 提交。本文说明它的结构；字段的精确约束以 [`api/schema/task_type.schema.json`](../api/schema/task_type.schema.json) 为准，完整示例见 [`examples/task_types/vip_appeal_alert.yaml`](../examples/task_types/vip_appeal_alert.yaml)。
+任务类型 = **数据源 + 业务字段 + 人工节点链 + 卡片**。配置页的四步表单、仓库中的 YAML（`examples/task_types/`）最终都是同一份 JSON，作为 `SaveTaskTypeDraft.body_json` 提交。字段的精确约束以 [`api/schema/task_type.schema.json`](../api/schema/task_type.schema.json) 为准。
 
-## 校验分三层
+## 校验
 
 | 层次 | 检查什么 | 在哪里 |
 | --- | --- | --- |
-| 结构 | 字段名、类型、必填项、取值范围 | `task_type.schema.json`，前端也可以直接用它做本地校验 |
-| 语义 | payload schema、来源映射、去重键、卡片模板及其引用 | `internal/spec` |
-| workflow | 连线、端口、环、变量引用、view / assignment 继承 | `internal/flow/compiler`，同时产出执行计划 |
+| 结构 | 字段名、类型、必填项、取值范围 | `task_type.schema.json`（报错已翻译成中文） |
+| 语义 | 字段名唯一、模板占位引用的字段存在、节点 id 唯一、最后一个节点不能升级、link 配置完整、cron 与 SQL 合法 | `internal/tasktype.Check` |
+| 引用 | 团队、数据源连接、业务关系是否存在 | `internal/registry.Validate` |
 
-保存草稿时返回快速校验结果但不阻止保存；提交变更集和发布时，存在 error 级别的问题会被拒绝。
+保存草稿时返回全部问题但不阻止保存；发布时有任何问题都会拒绝。问题的 `path`（如 `nodes.1.assignee.team`）用于在配置页定位到步骤与表单项。
 
 ## 顶层结构
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `key` | 是 | 任务类型标识，`^[a-z][a-z0-9_]{1,63}$`，创建后不可修改 |
+| `key` | 是 | 任务类型标识，`^[a-z][a-z0-9_]{0,63}$`，创建后不可修改 |
 | `namespace` | | 所属团队或业务域 |
 | `name` | 是 | 显示名称 |
-| `description` | | 任务说明，同时作为 AI 摘要的场景说明 |
-| `default_priority` | | `P0`–`P3`，默认 `P2` |
-| `schema` | 是 | payload 的 JSON Schema，顶层必须是 object |
-| `sources` | | 任务来源：`cron` / `kafka` / `api` |
-| `dedup_key` | | 去重键模板，如 `{{ payload.appeal_id }}` |
-| `views` | | 卡片模板：名称 → 内嵌模板，或共享组件 `key@version` |
-| `view` / `assignment` | | 默认卡片模板与分配策略，节点未配置时继承 |
-| `workflow` | 是 | `nodes` + `edges` |
-| `ui` | | 前端专用（画布坐标等），后端原样保存，编译器忽略 |
+| `description` | | 任务说明 |
+| `priority` | | 新任务的优先级 `P0`–`P3`，默认 `P2` |
+| `source` | 是 | 数据源 |
+| `fields` | 是 | 业务字段（有序数组） |
+| `card` | 是 | 卡片 |
+| `nodes` | 是 | 人工节点链，1–10 个 |
 
-## payload schema 的扩展字段
+模板（卡片标题、链接地址）只支持字段占位 `{字段名}`，`{key}` 是数据源给出的 key；没有表达式语言，计算写在 SQL 里。
 
-字段的 `title`、`description` 同时用于表单标签、卡片字段名和 AI 摘要的字段说明。
+## 数据源 `source`
 
-| 关键字 | 取值 | 作用 |
+三种来源归一成同一个语义：**某个 key 当前在 / 不在待办集合里**。在 → 没有跟踪中的任务就创建，有则刷新字段（不重发通知）；不在 → 未完结的任务自动关闭（resolution `auto_closed`）。
+
+处理人手工完结（close / no_response）的任务仍「跟踪中」：key 还在结果里时不会重建，等它从结果中消失一次、再出现才是新任务。同一任务类型、同一 key 只有一个跟踪中的任务（唯一索引 `(task_type, track_key)`）。
+
+| `kind` | 字段 | 说明 |
 | --- | --- | --- |
-| `x-pii` | `mask_middle` / `hash` / `drop` | 发往 Lark、LLM、日志时统一脱敏 |
-| `x-format` | `money` / `percent` / `duration` / `datetime` | 展示格式；`money` 字段的类型必须是 string |
-| `x-currency-field` | 同级字段名 | 金额对应的币种字段 |
-| `x-enum-labels` | 值 → 中文含义 | 展示与给 LLM 的上下文 |
-| `x-enum-source` | 字典名 | 值来自外部字典 |
+| `sql` | `datasource`、`schedule`、`timezone`、`query` | 平台按 cron 执行查询，**结果集就是当前待办**。`datasource` 是平台注册的只读连接名；`query` 只能是单条 SELECT，必须有一列叫 `key`，其余列就是业务字段。执行：只读事务、超时 10 秒、最多 5000 行；超过 5000 行时只创建不关闭（无法判断哪些 key 消失了） |
+| `api` | — | 业务方调用 `IngestService.Push` |
+| `kafka` | — | 业务方发到平台固定的 topic `wb.task.events` |
 
-## 表达式与模板
+推送的消息：
 
-- **表达式**：`when`、`anchor`、`filter`、`close_when`、`subject`、`expr`、`exclude`、来源的 `mapping` 直接写表达式，如 `payload.vip_level > 0`。
-- **模板**：其余字符串都是模板，用 `{{ 表达式 }}` 插值，如 `VIP 工单 {{ payload.appeal_id }}`。
+```json
+{ "task_type": "kyc_review", "key": "K1", "op": "upsert", "occurred_at": 1760918400000,
+  "fields": { "uid": "10086", "amount": "12.50" } }
+```
 
-语法是 [expr-lang](https://expr-lang.org/docs/language-definition)。表达式是纯函数，不能调用 `now()`。
+`op = upsert` 等于「在」，`op = close` 等于「不在」；`occurred_at` 比该 key 已应用的消息旧时忽略（乱序、重复投递）；`fields` 中不认识的字段报错。
 
-| 命名空间 | 内容 | 可用位置 |
-| --- | --- | --- |
-| `payload` | 任务 payload | workflow、卡片模板、去重键、默认分配策略 |
-| `task` | 任务公共字段：`id`、`priority`、`assignee` | workflow、卡片模板、默认分配策略 |
-| `nodes.<id>.output` | 上游节点的输出 | workflow（节点必须在当前节点上游）、卡片模板 |
-| `loop.iteration` | 退回环内的轮次 | 环内节点 |
-| `record` | 扫描结果或消息中的原始记录 | 来源的 `filter`、`close_when`、`mapping` |
-| `viewer` | 查看者：`dept`、`roles` | 卡片的受众变体 `variants[].when` |
+时间类规则（如提交 48 小时后提醒、7 天后升级）属于业务数据：写成时间窗口互不重叠的 SQL，拆成多个任务类型，见 `examples/task_types/vip_appeal_*.yaml`。
 
-## 节点类型与端口
-
-| 节点 | 端口 | 主要配置 |
-| --- | --- | --- |
-| `trigger` | `next` | 无，入口，每个 workflow 恰好一个 |
-| `condition` | 每个分支的 `port` + `default` | `branches: [{ port, when }]`，按顺序选中第一个为 true 的分支 |
-| `merge` | `next` | `mode: all / any` |
-| `timer` | `next` | `after`（如 `48h`、`7d`），可选 `anchor`（从某个时间字段开始算） |
-| `human_choice` | 每个选项的 `key`；配置 `timeout` 时另有 `timeout` | `options`、`view`、`assignment`、`form`、`timeout`、`remind`；带 `snooze` 的选项表示推迟，不产生端口 |
-| `skill_call` / `llm` / `lark_card` / `send_email` / `emit_event` | `next`、`error` | 见 schema；`error` 端口可以不连，失败时进入人工干预 |
-
-发卡片的节点把发出的卡片记在输出里：`lark_card` 的输出为 `{ to, message_id, card }`；`human_choice` 等待时为 `{ assignee, group, card }`，做出选择后为 `{ option, form, actor, assignment, card }`（`assignment` 即等待时的处理人）。Web 任务详情显示的就是这张卡片，与 Lark 上看到的一致。
-| `end` | 无 | 可选 `resolution` |
-
-除 `error` 外，每个端口都必须有连线。
-
-**超时与重试**：`skill_call`、`llm` 的 `timeout` 是单次执行超时，默认分别为 30 秒、2 分钟，上限 10 分钟，超时按错误码 `timeout` 失败。节点可以配置 `retry` 覆盖默认重试策略；`non_retryable_errors` 列出不重试的错误码，平台内置 `timeout`、`unknown_skill`，skill 也可以返回自己的错误码。重试耗尽后有 `error` 端口则走它，节点输出为 `{ error, code }`，否则 run 进入人工干预。`human_choice` 的 `timeout` 从节点进入等待算起，卡片在进入等待之后发送。节点配置表单可以用 `wbctl node-types` 或 `CatalogService.ListNodeTypes` 拿到每种节点的独立配置 schema。
-
-## 连线
-
-`{ id, from, port, to }`。普通连线必须构成有向无环图；退回用 `kind: rework`，必须同时设置 `max_iterations` 和 `on_exhausted`，源节点必须是 `human_choice`，目标节点必须位于源节点的每条上游路径上。
-
-## 来源
+## 字段 `fields`
 
 | 字段 | 说明 |
 | --- | --- |
-| `kind` | `cron`（平台按 `schedule` 调用查询 `skill` 增量扫描）/ `kafka` / `api`（生产方按标准信封投递 `event_type`） |
-| `mapping` | payload 字段 → 表达式（基于 `record`），映射结果按 `schema` 校验 |
-| `filter` | 为 true 的记录创建任务；同一 `dedup_key` 的任务已存在时跳过 |
-| `close_when` | 为 true 的记录按 `dedup_key` 找到未完结的任务，取消它的 run，任务以 `auto_closed` 完结（run 尚未启动时直接关闭任务）；先于 `filter` 求值，需要配置 `dedup_key` |
+| `name` | 字段名，SQL 来源为列名；不能叫 `key` |
+| `label` | 显示名，用作卡片与详情的标签；缺省显示字段名 |
+| `type` | `text`（默认）/ `number` / `money`（字符串承载，不经过 float64）/ `datetime`（Unix 秒、毫秒或日期文本，按 Asia/Shanghai 显示）/ `enum` |
+| `pii` | `mask_middle` / `hash` / `drop`：工作台、任务详情与 Lark 都按此显示 |
+| `options` | `enum` 的取值：`[{ "value": "COMMITED", "label": "待审核" }]` |
 
-`close_when` 让外部状态变化直接推动流程：比如工单在中途审核完成，扫描到状态变化就结束提醒，不必等到下一个定时检查点。
+## 卡片 `card`
 
-**去重键要能区分“同一件事的不同轮次”**。同一去重键的任务已完结后，再扫描到也不会建新任务。工单被驳回后重新提交属于一次新的审核，所以 VIP 示例的去重键是 `{{ payload.appeal_id }}:{{ payload.commit_time_ms }}`；审核通过等状态变化不改变提交时间，`close_when` 仍能按同一个键找到任务。
+| 字段 | 说明 |
+| --- | --- |
+| `title` | 标题模板 |
+| `fields` | 卡片上的字段名，顺序即显示顺序；工作台卡片显示前 3 个 |
 
-**扫描的可靠性**：单条记录映射、校验或表达式求值失败时跳过并计数；数据库等暂时性失败会停止本次扫描、保留游标，下次重扫。内置的 appeal 扫描只读取 `lag_seconds`（默认 60 秒）之前更新的行，覆盖长事务与从库延迟。
+一个任务类型只有一张卡片，渲染时自动带上当前节点名。工作台、任务详情、配置页预览与 Lark 用同一份渲染结果（`tasktype.RenderCard`）。
 
-## view 与 assignment 的引用和继承
+## 节点 `nodes`
 
-- **view**：`views` 中的名称、共享组件 `key@version`，或 `{ default, variants: [{ when, view }] }`。
-- **assignment**：内嵌策略 `{ resolvers, filters, strategy, exclude, fallback }`，或共享组件 `key@version`。
-- **继承**：`human_choice` 与 `lark_card` 不写 view / assignment（`lark_card` 中叫 `to`）时，沿用上一个 `human_choice` 的配置，没有则用任务类型默认值。多条上游路径继承到的配置不一致时报 `inherit_conflict`。每个节点最终用的是哪一份，在编译结果的 `bindings` 中可以看到。
+任务创建时进入第一个节点；`escalate` 进入下一个节点；`close` / `no_response` 结束任务。一个节点只由一个人决策。
 
-## 问题格式
+| 字段 | 说明 |
+| --- | --- |
+| `id` | 节点 id，任务记录当前所在的节点 |
+| `name` | 节点名，显示在卡片与流程图上 |
+| `assignee` | 分配器，见下 |
+| `actions` | 处理人可用的动作，见下 |
+| `link` | 启用 `link` 时必填：`{ "label": "打开工单", "url": "https://.../{appeal_id}" }` |
+| `snooze` | 可选的推迟时长，如 `["1h", "4h", "1d"]`（缺省即这三个） |
+| `lark` | 进入节点、分配到人、推迟到期时发 Lark 通知 |
 
-```json
-{ "code": "unknown_port", "severity": "error", "path": "workflow.edges.e12.port",
-  "node_id": "escalate", "edge_id": "e12", "message": "节点 \"escalate\"（human_choice）没有端口 \"done\"，可用端口：handled" }
-```
+分配器：
 
-`path` 用 ID 而不是数组下标定位，前端可以直接高亮对应的节点、连线或字段。`code` 的全部取值见 `internal/flow/compiler` 中的 `IssueCode`。
+| `kind` | 字段 | 进入节点时 |
+| --- | --- | --- |
+| `relation` | `relation`、`field`、`fallback_team` | 按业务关系（如 `vip_rm`）用字段值查到一个人；查不到时进入 `fallback_team` 的认领队列 |
+| `team` | `team`、`mode: claim` | 进入团队队列，成员认领；通知发到团队的 Lark 群（没配群时私发给全部成员） |
+| `team` | `team`、`mode: assign` | 进入团队队列，分配者指定执行者（也可以领给自己）；通知私发给分配者 |
+
+动作（平台内置，代码里是一个注册表，新增动作不改配置格式）：
+
+| 动作 | 效果 | 任务是否完结 |
+| --- | --- | --- |
+| `close` | 已处理，resolution `handled` | 是 |
+| `no_response` | 无需处理，resolution `no_response` | 是 |
+| `snooze` | 推迟：状态 snoozed，到期回到待处理并重新通知 | 否 |
+| `link` | 打开业务系统链接，只在前端打开，不改变状态 | 否 |
+| `escalate` | 交给下一个节点，重新分配并通知；最后一个节点不能启用 | 否 |
+
+此外始终可用、不需要配置的任务操作：认领、分配（分配模式的分配者）、开始处理、转派、调整优先级。
 
 ## 命令行
 
-一期没有前端时，用 YAML 编写任务类型：
-
 ```bash
-go run ./cmd/wbctl validate examples/task_types/*.yaml   # 校验
-go run ./cmd/wbctl json examples/task_types/vip_appeal_alert.yaml   # 输出 body_json
-go run ./cmd/wbctl plan examples/task_types/vip_appeal_alert.yaml   # 输出执行计划
-go run ./cmd/wbctl node-types                           # 节点类型目录
+go run ./cmd/wbctl validate examples/task_types/*.yaml   # 结构与语义校验
+go run ./cmd/wbctl json examples/task_types/vip_appeal_48h.yaml   # 输出 JSON
+go run ./cmd/wbctl publish -f app/worker/etc/worker.yaml examples/task_types/*.yaml   # 本地直接发布
 ```
-
-YAML 按 1.2 解析：`yes`、`no`、`on`、`off` 都是字符串，只有 `true` / `false` 是布尔值。

@@ -18,9 +18,11 @@ import (
 	"time"
 
 	"github.com/zeromicro/go-zero/core/conf"
+	"github.com/zeromicro/go-zero/core/logx"
 
 	"github.com/alex2025-sh/ai-workbench/internal/bootstrap"
 	"github.com/alex2025-sh/ai-workbench/internal/tasktype"
+	"github.com/alex2025-sh/ai-workbench/internal/ticker"
 )
 
 func main() {
@@ -117,10 +119,14 @@ func publish(args []string) error {
 	if fs.NArg() == 0 {
 		usage()
 	}
-	var c struct {
+	var c struct { // 与 app/worker 的配置结构相同，只用其中的 bootstrap.Config
 		bootstrap.Config
-		Log    any `json:",optional"`
-		Ticker any `json:",optional"`
+		Log    logx.LogConf `json:",optional"`
+		Ticker struct {
+			Mode     string              `json:",optional"`
+			Interval time.Duration       `json:",optional"`
+			XxlJob   ticker.XxlJobConfig `json:",optional"`
+		} `json:",optional"`
 	}
 	conf.MustLoad(*config, &c)
 	s, err := bootstrap.Build(c.Config, nil)

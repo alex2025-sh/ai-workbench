@@ -1,14 +1,14 @@
-// 我的任务 / 可认领：按优先级分区的卡片网格。
+// 任务工作台：我的任务 / 团队队列 / 我经手的，按优先级分区的卡片网格。
 //
 // 每个优先级是一个分区，各自查询、各自游标分页（「查看更多」），分区标题的计数来自后端第一页返回的
 // counts（与筛选条件相同、不受分页影响），所以计数是准确的。没有任务的分区不显示。
-// 卡片上的操作提交后，任务表由引擎异步同步，所以稍后重新加载该分区。
+// 卡片上的操作是同步生效的，提交后立即重新加载该分区（任务可能离开当前分区，如认领后移到「我的任务」）。
 import { ReloadOutlined } from '@ant-design/icons';
 import { Alert, Button, Col, Empty, Row, Skeleton, Space, Tabs, Tag, Typography } from 'antd';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ApiError } from '../api/client';
 import { taskApi } from '../api/services';
-import type { ListTasksResp, TaskCount, TaskPriority, TaskStatus, TaskSummary } from '../api/types';
+import type { ListTasksResp, Scope, TaskCount, TaskPriority, TaskStatus, TaskSummary } from '../api/types';
 import { TaskBoardCard } from '../components/TaskBoardCard';
 import { priorityColor, taskStatusLabel } from '../format';
 import { useIdentity } from '../identity';
@@ -18,10 +18,7 @@ const activeStatuses: TaskStatus[] = ['TASK_STATUS_PENDING', 'TASK_STATUS_PROCES
 const priorities: TaskPriority[] = ['TASK_PRIORITY_P0', 'TASK_PRIORITY_P1', 'TASK_PRIORITY_P2', 'TASK_PRIORITY_P3'];
 /** 分区每页 9 张：三列网格正好三行。 */
 const PAGE_SIZE = 9;
-/** 提交后重新加载分区的时机：引擎同步任务表通常在 1 秒内完成，再补一次兜底。 */
-const RELOAD_AFTER = [800, 3000];
-
-type TabKey = 'mine' | 'claimable';
+type TabKey = Scope;
 
 interface Section {
   items: TaskSummary[];
@@ -47,14 +44,12 @@ export default function MyTasks() {
   const [statuses, setStatuses] = useState<TaskStatus[]>(activeStatuses);
   const [shown, setShown] = useState<TaskPriority[]>([]); // 空 = 全部优先级
   const [sections, setSections] = useState<Partial<Record<TaskPriority, Section>>>({});
-  const timers = useRef<number[]>([]);
 
   const fetchPage = useCallback(
     (priority: TaskPriority, cursor: string): Promise<ListTasksResp> => {
       const page = { cursor, page_size: PAGE_SIZE };
-      return tab === 'mine'
-        ? taskApi.listMine({ statuses, priorities: [priority], page })
-        : taskApi.listClaimable({ priorities: [priority], page });
+      // 团队队列只有待认领 / 待分配的任务；我经手的显示全部状态（含已完结），都不按状态筛选
+      return taskApi.list({ scope: tab, statuses: tab === 'mine' ? statuses : [], priorities: [priority], page });
     },
     [tab, statuses],
   );
@@ -95,12 +90,8 @@ export default function MyTasks() {
     loadAll();
   }, [loadAll, user]);
 
-  useEffect(() => () => timers.current.forEach((t) => window.clearTimeout(t)), []);
-
-  // 卡片上的操作完成后，重新加载该任务所在的分区（任务可能离开当前分区，如认领后移到「我的任务」）。
-  const onChanged = (priority: TaskPriority) => {
-    RELOAD_AFTER.forEach((ms) => timers.current.push(window.setTimeout(() => void loadSection(priority), ms)));
-  };
+  // 卡片上的操作完成后，重新加载该任务所在的分区。
+  const onChanged = (priority: TaskPriority) => void loadSection(priority);
 
   const loaded = visible.map((p) => sections[p]);
   const allLoaded = loaded.every((s) => s && !s.loading);
@@ -113,7 +104,8 @@ export default function MyTasks() {
         onChange={(k) => setTab(k as TabKey)}
         items={[
           { key: 'mine', label: '我的任务' },
-          { key: 'claimable', label: '可认领' },
+          { key: 'queue', label: '团队队列' },
+          { key: 'involved', label: '我经手的' },
         ]}
         tabBarExtraContent={
           <Button icon={<ReloadOutlined />} onClick={loadAll} loading={!allLoaded}>
@@ -142,7 +134,7 @@ export default function MyTasks() {
         </Space>
       </Space>
 
-      {nothing && <Empty style={{ marginTop: 48 }} description={tab === 'mine' ? '没有任务' : '没有可认领的任务'} />}
+      {nothing && <Empty style={{ marginTop: 48 }} description={{ mine: '没有任务', queue: '团队队列里没有待认领或待分配的任务', involved: '没有经手过、现在不在你名下的任务' }[tab]} />}
 
       {visible.map((p) => {
         const s = sections[p];
@@ -157,14 +149,14 @@ export default function MyTasks() {
                 {p.replace('TASK_PRIORITY_', '')}
               </Typography.Title>
               <Typography.Text strong>
-                {s.counts.map((c) => `${taskStatusLabel[c.status]} ${c.count}`).join(' · ')}
+                {tab === 'queue' ? `${n} 个待认领或待分配` : s.counts.map((c) => `${taskStatusLabel[c.status]} ${c.count}`).join(' · ')}
               </Typography.Text>
             </Space>
             {s.error && <Alert type="error" showIcon message={s.error} style={{ marginBottom: 12 }} />}
             <Row gutter={[16, 16]}>
               {s.items.map((t) => (
                 <Col key={t.id} xs={24} md={12} xl={8}>
-                  <TaskBoardCard task={t} me={user} onChanged={() => onChanged(p)} />
+                  <TaskBoardCard task={t} onChanged={() => onChanged(p)} />
                 </Col>
               ))}
             </Row>

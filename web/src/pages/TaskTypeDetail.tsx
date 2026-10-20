@@ -1,5 +1,5 @@
-// 任务类型详情（已发布版本，只读）：定义、试运行与版本；「编辑」进入草稿与画布。
-// 默认打开「定义」，当前 Tab 记在 URL 的 tab 参数里，便于分享链接。
+// 任务类型详情（已发布版本，只读）：与编辑页同样的四部分（数据源、字段、节点、卡片）只读展示，另有版本与 JSON。
+// 当前 Tab 记在 URL 的 tab 参数里，便于分享链接。
 import { ArrowLeftOutlined, EditOutlined } from '@ant-design/icons';
 import { Button, Card, Descriptions, Result, Space, Spin, Table, Tabs, Typography } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
@@ -7,18 +7,20 @@ import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { ApiError, decodeJson } from '../api/client';
 import { taskTypeApi } from '../api/services';
 import type { GetTaskTypeResp, TaskTypeBody, VersionInfo } from '../api/types';
-import { DryRunPanel } from '../components/DryRunPanel';
-import type { Binding, Definition } from '../components/definition/model';
-import { TaskTypeDefinition } from '../components/definition/TaskTypeDefinition';
+import { JsonEditor } from '../components/JsonEditor';
+import { CardStep } from '../components/tasktype/CardStep';
+import { FieldsStep } from '../components/tasktype/FieldsStep';
+import { NodesStep } from '../components/tasktype/NodesStep';
+import { SourceStep } from '../components/tasktype/SourceStep';
 import { fmtTime } from '../format';
 
 export default function TaskTypeDetail() {
   const { key = '' } = useParams();
+  const [params, setParams] = useSearchParams();
+  const tab = params.get('tab') ?? 'definition';
   const [tt, setTt] = useState<GetTaskTypeResp>();
   const [versions, setVersions] = useState<VersionInfo[]>([]);
   const [error, setError] = useState<Error>();
-  const [params, setParams] = useSearchParams();
-  const tab = params.get('tab') ?? 'definition';
 
   useEffect(() => {
     Promise.all([taskTypeApi.get(key), taskTypeApi.versions(key)])
@@ -28,13 +30,12 @@ export default function TaskTypeDetail() {
       })
       .catch((e) => setError(e as Error));
   }, [key]);
-
   const body = useMemo(() => decodeJson<TaskTypeBody>(tt?.body_json), [tt]);
-  const bindings = useMemo(() => decodeJson<Record<string, Binding>>(tt?.bindings_json) ?? {}, [tt]);
 
   if (error) {
-    const notFound = error instanceof ApiError && error.code === 'NotFound';
-    return <Result status={notFound ? '404' : 'error'} title={notFound ? '任务类型不存在' : '加载失败'} subTitle={error.message} />;
+    const nf = error instanceof ApiError && error.code === 'NotFound';
+    return <Result status={nf ? '404' : 'error'} title={nf ? '任务类型不存在或尚未发布' : '加载失败'} subTitle={error.message}
+      extra={nf && <Link to={`/config/task-types/${key}/edit`}>去编辑草稿</Link>} />;
   }
   if (!tt || !body) return <Spin style={{ display: 'block', marginTop: 80 }} />;
 
@@ -56,12 +57,16 @@ export default function TaskTypeDetail() {
         }
         style={{ marginBottom: 16 }}
       >
-        <Descriptions size="small" column={{ xs: 1, md: 3 }}>
-          <Descriptions.Item label="Namespace">{tt.summary.namespace}</Descriptions.Item>
-          <Descriptions.Item label="版本">v{tt.version.version}</Descriptions.Item>
-          <Descriptions.Item label="发布">{fmtTime(tt.version.published_at, 'YYYY-MM-DD HH:mm')} · {tt.version.published_by}</Descriptions.Item>
-        </Descriptions>
-        {body.description && <Typography.Paragraph type="secondary">{body.description}</Typography.Paragraph>}
+        <Descriptions
+          size="small"
+          column={{ xs: 1, md: 3 }}
+          items={[
+            { key: 'ns', label: '命名空间', children: tt.summary.namespace || '—' },
+            { key: 'v', label: '版本', children: `v${tt.version.version}` },
+            { key: 'p', label: '发布', children: `${fmtTime(tt.version.published_at, 'YYYY-MM-DD HH:mm')} · ${tt.version.published_by}` },
+          ]}
+        />
+        {body.description && <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>{body.description}</Typography.Paragraph>}
       </Card>
       <Tabs
         activeKey={tab}
@@ -70,9 +75,15 @@ export default function TaskTypeDetail() {
           {
             key: 'definition',
             label: '定义',
-            children: <TaskTypeDefinition body={body as unknown as Definition} bindings={bindings} version={tt.version.version} />,
+            children: (
+              <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                <SourceStep body={body} issues={[]} sourceState={tt.source_state} />
+                <FieldsStep body={body} issues={[]} />
+                <NodesStep body={body} issues={[]} />
+                <CardStep body={body} issues={[]} />
+              </Space>
+            ),
           },
-          { key: 'dry-run', label: '试运行', children: <DryRunPanel taskKey={key} body={body} /> },
           {
             key: 'versions',
             label: '版本',
@@ -83,8 +94,7 @@ export default function TaskTypeDetail() {
                 pagination={false}
                 dataSource={versions}
                 columns={[
-                  { title: '版本', dataIndex: 'version', render: (v: number) => `v${v}` },
-                  { title: '状态', dataIndex: 'state' },
+                  { title: '版本', dataIndex: 'version', render: (v: number) => <Link to={`/config/task-types/${key}?tab=versions`}>v{v}</Link> },
                   { title: '发布人', dataIndex: 'published_by' },
                   { title: '发布时间', dataIndex: 'published_at', render: (v: string) => fmtTime(v, 'YYYY-MM-DD HH:mm') },
                   { title: '内容哈希', dataIndex: 'content_hash', render: (v: string) => <Typography.Text code>{v.slice(0, 12)}</Typography.Text> },
@@ -92,6 +102,7 @@ export default function TaskTypeDetail() {
               />
             ),
           },
+          { key: 'json', label: 'JSON', children: <JsonEditor value={body} onChange={() => undefined} readOnly height="70vh" /> },
         ]}
       />
     </>

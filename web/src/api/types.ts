@@ -1,4 +1,4 @@
-// app/rpc/workbench.proto 中前端用到的消息（JSON 形态：snake_case，int64 为字符串，bytes 为 base64）。
+// proto 消息的 JSON 形态（devgw / gateway 的 proto3 JSON 映射）：字段名 snake_case，int64 为字符串，bytes 为 base64。
 
 export type Int64 = string;
 export type Bytes = string;
@@ -19,32 +19,54 @@ export interface PageReq {
 }
 
 export interface Issue {
-  code: string;
-  severity: string;
   path: string;
-  node_id: string;
-  edge_id: string;
   message: string;
 }
 
-// ---- TaskService ----
+// ---- 任务
+
+export interface KV {
+  label: string;
+  value: string;
+}
+
+/** 渲染后的卡片：与 Lark 卡片同一份内容，已按字段的 pii 脱敏。 */
+export interface Card {
+  title: string;
+  node_name: string;
+  fields: KV[];
+  link: KV | null;
+}
+
+export interface ActionOption {
+  key: 'close' | 'no_response' | 'snooze' | 'escalate' | 'link';
+  label: string;
+  snooze_ms: Int64[];
+  url: string;
+  next_node_name: string;
+}
 
 export interface TaskSummary {
   id: Int64;
   task_type_key: string;
-  title: string;
-  subtitle: string;
+  task_type_name: string;
+  task_type_version: number;
+  biz_key: string;
   status: TaskStatus;
   priority: TaskPriority;
   assignee_id: string;
-  sla_status: string;
+  team_key: string;
+  team_mode: '' | 'claim' | 'assign';
+  node_id: string;
+  resolution: string;
   snooze_until: Int64;
-  due_at: Int64;
+  created_at: Int64;
   updated_at: Int64;
-  task_type_name: string;
-  /** 等待中的人工节点及调用人可选的操作，与详情的 pending_action 相同；没有时为 null。 */
-  pending_action: PendingAction | null;
-  run_id: Int64;
+  card: Card | null;
+  actions: ActionOption[];
+  can_claim: boolean;
+  can_assign: boolean;
+  can_start: boolean;
 }
 
 export interface TaskCount {
@@ -53,267 +75,151 @@ export interface TaskCount {
   count: Int64;
 }
 
+export type Scope = 'mine' | 'queue' | 'involved';
+
 export interface ListTasksResp {
   items: TaskSummary[];
   next_cursor: string;
-  /** 只在第一页返回：按 (priority, status) 的计数，条件与请求相同。 */
   counts: TaskCount[];
 }
 
-export interface TaskView {
-  id: Int64;
-  task_type_key: string;
-  task_type_version: number;
-  status: TaskStatus;
-  priority: TaskPriority;
-  assignee_id: string;
-  current_node: string;
-  resolution: string;
-  sla_status: string;
-  snooze_until: Int64;
-  due_at: Int64;
-  payload_json: Bytes;
-  run_id: Int64;
-  updated_at: Int64;
-  title: string;
-  subtitle: string;
+export interface NodeView {
+  id: string;
+  name: string;
+  assignee: string;
+  current: boolean;
+  visited: boolean;
+  actions: string[];
 }
 
-export interface ActionOption {
-  key: string;
-  label: string;
-  style: string;
-  required_fields: string[];
-  snooze_ms: Int64;
-}
-
-export interface FormField {
-  key: string;
-  label: string;
-  type: string;
-  options: string[];
-}
-
-export interface PendingAction {
+export interface HistoryItem {
+  kind: string;
+  actor: string;
   node_id: string;
-  iteration: number;
-  can_signal: boolean;
-  options: ActionOption[];
-  deadline_at: Int64;
-  form_fields: FormField[];
-}
-
-export interface ProgressStep {
-  node_id: string;
-  display_name: string;
-  status: string;
+  node_name: string;
+  from_status: TaskStatus;
+  to_status: TaskStatus;
+  detail_json: Bytes;
+  at: Int64;
 }
 
 export interface TaskDetail {
-  task: TaskView;
-  rendered_json: Bytes;
-  pending_action: PendingAction | null;
-  progress: ProgressStep[];
-}
-
-export interface TaskEvent {
-  id: Int64;
-  type: string;
-  from_status: TaskStatus;
-  to_status: TaskStatus;
-  actor: string;
-  reason: string;
-  detail_json: Bytes;
-  created_at: Int64;
-}
-
-export interface TaskEventsResp {
-  items: TaskEvent[];
-  next_cursor: string;
-}
-
-// ---- RunService ----
-
-export interface SignalResp {
-  accepted: boolean;
-  reason: string;
-  /** already_handled / stale / not_waiting / invalid_form / unsupported / forbidden */
-  code: string;
-}
-
-export interface RunSummary {
-  run_id: Int64;
-  task_type_key: string;
-  task_type_version: number;
-  status: string;
-  created_at: Int64;
-  updated_at: Int64;
-  blocked_node: string; // 需人工介入时卡住的节点与原因
-  blocked_reason: string;
-}
-
-export interface ListRunsResp {
-  items: RunSummary[];
-  next_cursor: string;
-}
-
-export interface NodeView {
-  node_id: string;
-  iteration: number;
-  status: string;
-  port: string;
-  attempt: number;
-  started_at: Int64;
-  finished_at: Int64;
-  last_error: string;
-}
-
-export interface RunView {
-  run_id: Int64;
-  task_type_key: string;
-  task_type_version: number;
-  status: string;
+  task: TaskSummary;
+  fields: KV[];
   nodes: NodeView[];
-  graph_json: Bytes;
-  blocked_node: string;
-  blocked_reason: string;
-  ui_json: Bytes; // 任务类型的 ui，含画布坐标
+  history: HistoryItem[];
+  team_members: string[];
+  can_reassign: boolean;
+  can_update_priority: boolean;
+  read_only: boolean;
 }
 
-export interface RunEvent {
-  id: Int64;
-  node_id: string;
-  iteration: number;
-  type: string;
-  payload_json: Bytes;
-  actor: string;
-  created_at: Int64;
-}
-
-export interface RunEventsResp {
-  items: RunEvent[];
-  next_cursor: string;
-}
-
-// ---- TaskTypeService ----
+// ---- 任务类型
 
 export interface TaskTypeSummary {
   key: string;
-  name: string;
   namespace: string;
+  name: string;
   latest_version: number;
   has_draft: boolean;
-  status: string;
   updated_at: Int64;
+  source_kind: string;
 }
 
 export interface VersionInfo {
   version: number;
   content_hash: string;
-  state: string;
-  change_set_id: Int64;
   published_by: string;
-  approved_by: string;
   published_at: Int64;
+}
+
+export interface SourceState {
+  next_run_at: Int64;
+  last_run_at: Int64;
+  last_rows: number;
+  last_created: number;
+  last_closed: number;
+  last_error: string;
 }
 
 export interface GetTaskTypeResp {
   summary: TaskTypeSummary;
   version: VersionInfo;
   body_json: Bytes;
-  bindings_json?: Bytes; // node_id → 编译后实际使用的卡片模板与处理人（已处理继承）
+  source_state: SourceState | null;
 }
 
-export interface DryRunStep {
-  node_id: string;
-  iteration: number;
-  port: string;
-  status: string;
-}
-
-export interface DryRunSend {
-  node_id: string;
-  kind: string;
-  target: string;
-  summary: string;
-  rendered_json: Bytes;
-}
-
-export interface DryRunTimePoint {
-  node_id: string;
-  kind: string;
-  offset_ms: Int64;
-}
-
-export interface DryRunCase {
-  sample_index: number;
-  path: DryRunStep[];
-  assignee_id: string;
-  sends: DryRunSend[];
-  timeline: DryRunTimePoint[];
-  end_status: string;
-  issues: Issue[];
-}
-
-export interface DryRunResp {
+export interface DraftResp {
+  key: string;
+  base_version: number;
   revision: Int64;
-  content_hash: string;
-  passed: boolean;
-  cases: DryRunCase[];
+  body_json: Bytes;
+  updated_by: string;
   issues: Issue[];
 }
 
-// ---- 渲染后的卡片（rendered_json 解码后，与 Lark 卡片同一结构，见 internal/action.Card） ----
-
-export interface Card {
-  title: string;
-  color?: string;
-  summary?: string;
-  fields: { label: string; value: string; short?: boolean }[] | null;
-  links?: { label: string; url: string }[] | null;
+export interface TrialSqlResp {
+  columns: string[];
+  rows_json: Bytes;
+  has_more: boolean;
 }
 
-// ---- 任务类型 JSON 中前端用到的部分 ----
+// ---- 团队
+
+export interface TeamMember {
+  user_id: string;
+  role: 'assigner' | 'executor';
+}
+
+export interface Team {
+  key: string;
+  name: string;
+  chat_id: string;
+  members: TeamMember[];
+  updated_by: string;
+}
+
+// ---- 任务类型 JSON（与 api/schema/task_type.schema.json 一致）
+
+export type SourceKind = 'sql' | 'api' | 'kafka';
+export type FieldType = 'text' | 'number' | 'money' | 'datetime' | 'enum';
+export type ActionKey = 'close' | 'no_response' | 'snooze' | 'link' | 'escalate';
+
+export interface TTField {
+  name: string;
+  label?: string;
+  type?: FieldType;
+  pii?: 'mask_middle' | 'hash' | 'drop';
+  options?: { value: string; label: string }[];
+}
+
+export interface TTAssignee {
+  kind: 'relation' | 'team';
+  relation?: string;
+  field?: string;
+  fallback_team?: string;
+  team?: string;
+  mode?: 'claim' | 'assign';
+}
+
+export interface TTNode {
+  id: string;
+  name: string;
+  assignee: TTAssignee;
+  actions: ActionKey[];
+  link?: { label: string; url: string };
+  snooze?: string[];
+  lark?: boolean;
+}
 
 export interface TaskTypeBody {
   key: string;
+  namespace?: string;
   name: string;
   description?: string;
-  schema?: { properties?: Record<string, { type?: string; title?: string }> };
-  workflow?: {
-    nodes: { id: string; type: string; name?: string; config?: { options?: { key: string; label: string; snooze?: string }[] } }[];
-  };
-}
-
-// ---- 草稿与节点目录 ----
-
-export interface Draft {
-  base_version: number; // 0 = 尚未发布过
-  revision: Int64;
-  body_json: Bytes;
-  locked_by_change_set: Int64;
-  updated_by: string;
-  updated_at: Int64;
-  content_hash: string; // 不含 ui，只移动坐标时不变
-}
-
-export interface NodeTypeInfo {
-  type: string;
-  category: string; // native / action
-  display_name: string;
-  description: string;
-  icon: string;
-  config_schema_json: Bytes; // 独立的 JSON Schema（含 $defs）
-  ui_schema_json: Bytes;
-  port_rule: string; // fixed / from_options / from_branches
-  fixed_ports: string[];
-}
-
-export interface Skill {
-  name: string;
-  display_name: string;
-  description: string;
-  category: string;
-  side_effect: boolean;
-  latest_version: string;
+  priority?: 'P0' | 'P1' | 'P2' | 'P3';
+  source: { kind: SourceKind; datasource?: string; schedule?: string; timezone?: string; query?: string };
+  fields: TTField[];
+  card: { title: string; fields?: string[] };
+  nodes: TTNode[];
 }

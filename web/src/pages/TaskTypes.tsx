@@ -1,4 +1,4 @@
-// 任务类型列表：已发布的与新建尚未发布的；新建后进入编辑页（草稿与画布）。
+// 任务类型列表：已发布的与新建尚未发布的；新建后进入编辑页（四步表单）。
 import { PlusOutlined } from '@ant-design/icons';
 import { Alert, Button, Input, Space, Table, Tag } from 'antd';
 import { useEffect, useState } from 'react';
@@ -50,7 +50,8 @@ export default function TaskTypes() {
             render: (k: string, t) => <Link to={t.latest_version > 0 ? `/config/task-types/${k}` : `/config/task-types/${k}/edit`}>{k}</Link>,
           },
           { title: '名称', dataIndex: 'name' },
-          { title: 'Namespace', dataIndex: 'namespace' },
+          { title: '命名空间', dataIndex: 'namespace' },
+          { title: '数据源', dataIndex: 'source_kind', render: (k: string) => ({ sql: '定时 SQL', api: 'API 推送', kafka: 'Kafka' } as Record<string, string>)[k] ?? '—' },
           {
             title: '最新版本',
             render: (_, t) => (

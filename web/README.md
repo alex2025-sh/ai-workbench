@@ -1,19 +1,18 @@
-# AI Workbench 前端 demo
+# AI Workbench 前端
 
 React 18 + Vite + TypeScript + Ant Design 5。页面与交互约定见 [docs/frontend-design.md](../docs/frontend-design.md)。
 
-范围：我的任务、可认领、任务详情（卡片、流程操作、认领 / 开始处理 / 调整优先级 / 转派、进度、事件）、运行监控（取消运行、重试节点、跳过节点）、任务类型（新建、草稿编辑与 workflow 画布、校验、试运行、开发环境发布）。
+范围：任务工作台（我的任务、团队队列、我经手的）、任务详情（卡片、业务字段、流程图、认领 / 分配 / 开始处理 / 已处理 / 无需处理 / 推迟 / 升级 / 转派 / 优先级、历史）、任务类型（新建、四步配置与节点链画布、试跑 SQL、卡片预览、校验、发布、只读详情）、团队。
 
 ## 本地运行
 
-需要 MySQL 8.0 或 TiDB，建三个库并执行 `deploy/sql`：平台库 `ai_workbench`、试运行库 `ai_workbench_dryrun`，以及 mock 业务库 `biz_mock`（执行 `deploy/mock/appeal.sql`）。在仓库根目录：
+需要 MySQL 8.0 或 TiDB。建两个库：平台库 `ai_workbench`（执行 `deploy/sql/platform.sql` 与 `deploy/mock/teams.sql`）和 mock 业务库 `biz_mock`（执行 `deploy/mock/appeal.sql`）。在仓库根目录：
 
 ```bash
-# 1. 发布示例任务类型
-WB_DSN='root:@tcp(127.0.0.1:3306)/ai_workbench?parseTime=true&loc=UTC&charset=utf8mb4' \
-  go run ./cmd/wbctl publish examples/task_types/vip_appeal_alert.yaml
+# 1. 发布示例任务类型（配置里的 DSN 按本地 MySQL 修改）
+go run ./cmd/wbctl publish -f app/worker/etc/worker.yaml examples/task_types/*.yaml
 
-# 2. 后端：worker（cron 扫描，约 1 分钟后生成任务）、gRPC 服务、开发网关
+# 2. 后端：worker（执行 SQL 来源，首次 tick 即生成任务）、gRPC 服务、开发网关
 go run ./app/worker -f app/worker/etc/worker.yaml
 go run ./app/rpc -f app/rpc/etc/workbench.yaml
 go run ./cmd/devgw
@@ -26,23 +25,23 @@ Vite 把 `/byai_platform` 与 `/dev` 代理到 devgw（默认 `http://127.0.0.1:
 
 ## 身份
 
-右上角「切换身份」读取 devgw 的 `GET /dev/users`（来自 `deploy/mock/vip_rm.yaml` 与 `groups.yaml`），选中的身份经 `X-Dev-User` 请求头传给后端。演示路径：
+右上角「切换身份」读取 devgw 的 `GET /dev/users`（来自 `deploy/mock/vip_rm.yaml`、`teams.sql` 与 `permissions.yaml`），选中的身份经 `X-Dev-User` 请求头传给后端。演示路径：
 
-- `rm.alice@example.com`：我的任务中有 A1001、A1002；
-- `lead@example.com`：可认领中有升级后的 A1003，可以认领、开始处理、调整优先级、转派，或进入详情点「已处理」完成任务；
-- `ops@example.com`：有 `task.admin`、`run.admin`，可以转派任意任务，在运行详情中取消运行、重试或跳过节点（权限见 `deploy/mock/permissions.yaml`）；
-- 任意身份：运行监控、任务类型页的试运行。
+- `rm.alice@example.com`：我的任务中有 A1001（待审核）、A1002（已等待 48 小时，可升级给组长）；升级后在「我经手的」里只读可见；
+- `lead@example.com`：团队队列中有 A1007（没有 RM，进入组长团队认领）和 A1003（超过 7 天，VIP 审核小组的分配者，分配给组员）；
+- `reviewer.dave@example.com`：被分配后在我的任务中处理；
+- `ops@example.com`：有 `task.admin`、`task_type.publish`、`team.admin`，可以转派任意任务、发布任务类型、维护团队。
 
 ## 目录
 
 ```text
 src/api/client.ts     接口客户端：POST + JSON、bytes 字段的 base64 编解码、错误、身份请求头
-src/api/types.ts      proto 消息的 JSON 形态（snake_case，int64 为字符串）
+src/api/types.ts      proto 消息的 JSON 形态（snake_case，int64 为字符串）与任务类型 JSON
 src/api/services.ts   各 service 的调用封装
-src/components/       TaskCard（后端渲染的卡片）、DryRunPanel（试运行）、JsonEditor（CodeMirror）
-src/components/canvas/       workflow 画布：model（端口、默认配置、自动排版）、WorkflowCanvas、FlowNode、NodeConfigPanel
-src/components/schemaform/   按 JSON Schema 生成节点配置表单；labels.ts 为字段的中文标签
-src/pages/            MyTasks、TaskDetail、Runs、RunDetail、TaskTypes、TaskTypeDetail、TaskTypeEditor
+src/components/       TaskCard（后端渲染的卡片）、TaskBoardCard（工作台卡片）、TaskActions（任务操作按钮）、
+                      ChainCanvas（节点链画布）、JsonEditor（CodeMirror）
+src/components/tasktype/  任务类型的四步：SourceStep、FieldsStep、NodesStep、CardStep（编辑与只读共用）
+src/pages/            MyTasks、TaskDetail、TaskTypes、TaskTypeDetail、TaskTypeEditor、Teams
 ```
 
 `npm run typecheck` 做类型检查，`npm run build` 产出 `dist/`。

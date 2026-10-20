@@ -65,6 +65,18 @@ func TestValidateIssues(t *testing.T) {
 	}
 }
 
+func TestSchemaMessages(t *testing.T) {
+	base := string(load(t, "vip_appeal_48h.yaml"))
+	_, issues := Validate([]byte(strings.Replace(base, `"team":"vip_cs_leads"`, `"team":""`, 1)))
+	if len(issues) != 1 || issues[0].Path != "nodes.1.assignee.team" || issues[0].Message != "团队不能为空" {
+		t.Fatalf("issues = %v", issues)
+	}
+	_, issues = Validate([]byte(strings.Replace(base, `{"kind":"team","mode":"claim","team":"vip_cs_leads"}`, `{"kind":"team","mode":"claim"}`, 1)))
+	if len(issues) != 1 || issues[0].Path != "nodes.1.assignee.team" || issues[0].Message != "缺少团队" {
+		t.Fatalf("issues = %v", issues)
+	}
+}
+
 func TestCheckQuery(t *testing.T) {
 	ok := []string{
 		"select 1 as `key`",

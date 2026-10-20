@@ -1,387 +1,202 @@
-// 任务详情：卡片（后端渲染，与 Lark 一致）、流程操作（等待中的人工节点）、简化进度与事件时间线。
+// 任务详情 /tasks/:id（Lark 卡片「在工作台处理」的深链）。
 //
-// 流程操作走 RunService.Signal（服务端按任务表鉴权）。任务表由引擎异步同步，提交成功后短轮询，
-// 直到等待中的节点 (node_id, iteration) 或任务的 updated_at 变化；被拒绝时按 code 决定刷新还是留在表单。
-import { ArrowLeftOutlined, ReloadOutlined } from '@ant-design/icons';
-import {
-  Alert,
-  App as AntApp,
-  AutoComplete,
-  Button,
-  Card,
-  Col,
-  Collapse,
-  Descriptions,
-  Form,
-  Input,
-  Modal,
-  Result,
-  Row,
-  Select,
-  Space,
-  Spin,
-  Steps,
-  Tag,
-  Timeline,
-  Tooltip,
-  Typography,
-} from 'antd';
-import { useCallback, useEffect, useRef, useState } from 'react';
+// 左侧：卡片（与 Lark 一致）、全部业务字段、节点链（当前节点高亮，走过的节点为绿色）。
+// 右侧：状态与操作（认领 / 分配 / 开始处理 / 节点动作 / 转派 / 调整优先级）、处理历史。
+// 经手人（如升级前的 RM）与团队成员可以查看整个流程，但只有当前处理人能处理。
+import { ArrowLeftOutlined, EyeOutlined } from '@ant-design/icons';
+import { Alert, App as AntApp, Button, Card, Col, Descriptions, Input, Modal, Result, Row, Select, Space, Spin, Tag, Timeline, Typography } from 'antd';
+import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ApiError, decodeJson } from '../api/client';
 import { taskApi } from '../api/services';
-import type { ActionOption, Card as CardData, TaskDetail as Detail, TaskEvent, TaskPriority } from '../api/types';
-import { SignalModal } from '../components/SignalModal';
+import type { HistoryItem, TaskDetail as Detail, TaskPriority } from '../api/types';
+import { ChainCanvas } from '../components/ChainCanvas';
+import { TaskActions } from '../components/TaskActions';
 import { TaskCard } from '../components/TaskCard';
-import { useIdentity } from '../identity';
-import { fmtDuration, fmtTime, nodeStatusLabel, priorityColor, priorityLabel, taskStatusColor, taskStatusLabel } from '../format';
+import { fmtTime, historyLabel, priorityColor, priorityLabel, resolutionLabel, taskStatusColor, taskStatusLabel } from '../format';
 
-const POLL_INTERVAL = 2000;
-const POLL_TIMES = 10;
+const priorities: TaskPriority[] = ['TASK_PRIORITY_P0', 'TASK_PRIORITY_P1', 'TASK_PRIORITY_P2', 'TASK_PRIORITY_P3'];
 
-const stepStatus: Record<string, 'wait' | 'process' | 'finish' | 'error'> = {
-  pending: 'wait',
-  running: 'process',
-  waiting: 'process',
-  succeeded: 'finish',
-  skipped: 'wait',
-  failed: 'error',
-};
+function historyText(h: HistoryItem): string {
+  const d = decodeJson<Record<string, unknown>>(h.detail_json) ?? {};
+  const parts = [historyLabel[h.kind] ?? h.kind];
+  if (h.kind === 'assigned') parts.push(`给 ${d.assignee}`);
+  if (h.kind === 'snooze' && d.snooze_until) parts.push(`至 ${fmtTime(String(d.snooze_until))}`);
+  if (h.kind === 'escalate') parts.push(`离开「${h.node_name}」`);
+  if (h.kind === 'reassigned') parts.push(`${d.from || '队列'} → ${d.to}`);
+  if (h.kind === 'priority') parts.push(`P${d.from} → P${d.to}`);
+  if (h.kind === 'created') parts.push(`进入「${h.node_name}」`);
+  if (d.note) parts.push(`：${d.note}`);
+  return parts.join(' ');
+}
 
 export default function TaskDetail() {
   const { id = '' } = useParams();
   const { message } = AntApp.useApp();
-  const [detail, setDetail] = useState<Detail>();
-  const [events, setEvents] = useState<TaskEvent[]>([]);
+  const [d, setD] = useState<Detail>();
   const [error, setError] = useState<ApiError | Error>();
-  const [syncing, setSyncing] = useState(false);
-  const [choosing, setChoosing] = useState<ActionOption>();
-  const timer = useRef<number>();
+  const [reassign, setReassign] = useState(false);
+  const [to, setTo] = useState('');
+  const [reason, setReason] = useState('');
 
-  const load = useCallback(async () => {
-    try {
-      const [d, ev] = await Promise.all([taskApi.get(id), taskApi.events(id, { page_size: 100 })]);
-      setDetail(d);
-      setEvents(ev.items);
-      setError(undefined);
-      return d;
-    } catch (e) {
-      setError(e as Error);
-      return undefined;
-    }
+  const load = useCallback(() => {
+    taskApi.get(id).then(setD, (e) => setError(e as Error));
   }, [id]);
-
-  useEffect(() => {
-    void load();
-    return () => window.clearTimeout(timer.current);
-  }, [load]);
-
-  // 提交成功后等任务表同步：节点或 updated_at 变化即停止。
-  const waitForSync = (before: Detail) => {
-    setSyncing(true);
-    const key = (d: Detail) => `${d.pending_action?.node_id ?? ''}:${d.pending_action?.iteration ?? ''}:${d.task.updated_at}`;
-    let n = 0;
-    const tick = async () => {
-      const d = await load();
-      if (d && key(d) !== key(before)) {
-        setSyncing(false);
-        return;
-      }
-      if (++n >= POLL_TIMES) {
-        setSyncing(false);
-        message.info('状态同步中，请稍后刷新');
-        return;
-      }
-      timer.current = window.setTimeout(tick, POLL_INTERVAL);
-    };
-    timer.current = window.setTimeout(tick, 300);
-  };
+  useEffect(load, [load]);
 
   if (error) {
-    const notFound = error instanceof ApiError && error.code === 'NotFound';
+    const code = error instanceof ApiError ? error.code : '';
     return (
       <Result
-        status={notFound ? '404' : 'error'}
-        title={notFound ? '任务不存在' : '加载失败'}
+        status={code === 'NotFound' ? '404' : code === 'PermissionDenied' ? '403' : 'error'}
+        title={code === 'NotFound' ? '任务不存在' : code === 'PermissionDenied' ? '你没有参与这个任务' : '加载失败'}
         subTitle={error.message}
-        extra={<Link to="/tasks">返回我的任务</Link>}
+        extra={<Link to="/tasks">返回任务工作台</Link>}
       />
     );
   }
-  if (!detail) return <Spin style={{ display: 'block', marginTop: 80 }} />;
-
-  const t = detail.task;
-  const card = decodeJson<CardData>(detail.rendered_json);
-  const payload = decodeJson(t.payload_json);
+  if (!d) return <Spin style={{ display: 'block', marginTop: 80 }} />;
+  const t = d.task;
+  const terminal = t.status === 'TASK_STATUS_SOLVED';
 
   return (
     <>
       <Space style={{ marginBottom: 16 }}>
         <Link to="/tasks">
-          <ArrowLeftOutlined /> 我的任务
+          <ArrowLeftOutlined /> 任务工作台
         </Link>
       </Space>
-      <Card
-        title={
-          <Space>
-            <span style={{ borderLeft: `4px solid ${priorityColor[t.priority]}`, paddingLeft: 8 }}>{t.title}</span>
-            <Tag color={taskStatusColor[t.status]}>{taskStatusLabel[t.status]}</Tag>
-          </Space>
-        }
-        extra={
-          <Button icon={<ReloadOutlined />} onClick={() => void load()}>
-            刷新
-          </Button>
-        }
-        style={{ marginBottom: 16 }}
-      >
-        <Descriptions size="small" column={4}>
-          <Descriptions.Item label="优先级">{priorityLabel[t.priority]}</Descriptions.Item>
-          <Descriptions.Item label="处理人">{t.assignee_id || '—（组队列）'}</Descriptions.Item>
-          <Descriptions.Item label="截止">{fmtTime(t.due_at)}</Descriptions.Item>
-          <Descriptions.Item label="推迟至">{fmtTime(t.snooze_until)}</Descriptions.Item>
-          <Descriptions.Item label="任务类型">
-            <Link to={`/config/task-types/${t.task_type_key}`}>
-              {t.task_type_key}@{t.task_type_version}
-            </Link>
-          </Descriptions.Item>
-          <Descriptions.Item label="结论">{t.resolution || '—'}</Descriptions.Item>
-          <Descriptions.Item label="运行">{t.run_id !== '0' ? <Link to={`/runs/${t.run_id}`}>#{t.run_id}</Link> : '—'}</Descriptions.Item>
-          <Descriptions.Item label="更新">{fmtTime(t.updated_at, 'YYYY-MM-DD HH:mm:ss')}</Descriptions.Item>
-        </Descriptions>
-      </Card>
-
-      <Row gutter={16}>
-        <Col span={14}>
-          <TaskCard card={card} />
-          <Collapse
-            style={{ marginTop: 16 }}
-            items={[
-              {
-                key: 'payload',
-                label: '任务数据（已按调用人脱敏）',
-                children: <pre style={{ margin: 0, fontSize: 12 }}>{JSON.stringify(payload, null, 2)}</pre>,
-              },
-            ]}
-          />
-          <Card title="事件时间线" size="small" style={{ marginTop: 16 }}>
-            <Timeline
-              items={events.map((e) => ({
-                children: (
-                  <>
-                    <Typography.Text strong>{e.type}</Typography.Text>{' '}
-                    {e.from_status !== 'TASK_STATUS_UNSPECIFIED' && <>{taskStatusLabel[e.from_status]} → </>}
-                    {taskStatusLabel[e.to_status]}
-                    <Typography.Text type="secondary">
-                      {' '}
-                      · {e.actor || 'system'} · {fmtTime(e.created_at, 'MM-DD HH:mm:ss')}
-                    </Typography.Text>
-                    {e.reason && <div>{e.reason}</div>}
-                  </>
-                ),
-              }))}
-            />
-          </Card>
-        </Col>
-        <Col span={10}>
-          <ActionPanel detail={detail} syncing={syncing} onChoose={setChoosing} onChanged={() => void load()} />
-          <Card title="进度" size="small" style={{ marginTop: 16 }}>
-            <Steps
-              direction="vertical"
-              size="small"
-              items={detail.progress.map((s) => ({
-                title: s.display_name,
-                description: nodeStatusLabel[s.status] ?? s.status,
-                status: stepStatus[s.status] ?? 'wait',
-              }))}
-            />
-          </Card>
-        </Col>
-      </Row>
-
-      {choosing && detail.pending_action && (
-        <SignalModal
-          runId={t.run_id}
-          action={detail.pending_action}
-          option={choosing}
-          onClose={() => setChoosing(undefined)}
-          onAccepted={() => {
-            setChoosing(undefined);
-            message.success('已提交');
-            waitForSync(detail);
-          }}
-          onStale={(reason) => {
-            setChoosing(undefined);
-            message.warning(reason || '该节点已被处理');
-            void load();
-          }}
+      {d.read_only && !terminal && (
+        <Alert
+          type="info"
+          showIcon
+          icon={<EyeOutlined />}
+          style={{ marginBottom: 16 }}
+          message={t.assignee_id ? `任务现在由 ${t.assignee_id} 处理，你可以查看整个流程，但不能处理。` : `任务在团队 ${t.team_key} 的队列中，你可以查看，但不能处理。`}
         />
       )}
+      <Row gutter={[16, 16]}>
+        <Col xs={24} lg={16}>
+          <Space direction="vertical" size={16} style={{ width: '100%' }}>
+            <TaskCard card={t.card} />
+            <Card size="small" title="业务字段">
+              <Descriptions
+                bordered
+                size="small"
+                column={{ xs: 1, md: 2 }}
+                items={d.fields.map((f, i) => ({ key: i, label: f.label, children: f.value || <Typography.Text type="secondary">—</Typography.Text> }))}
+                labelStyle={{ width: 112, color: 'rgba(0,0,0,0.55)' }}
+              />
+            </Card>
+            <Card size="small" title="流程" extra={<Typography.Text type="secondary">{t.task_type_name} · v{t.task_type_version}</Typography.Text>}>
+              <ChainCanvas
+                height={220}
+                nodes={d.nodes.map((n) => ({
+                  id: n.id,
+                  name: n.name,
+                  assignee: n.assignee,
+                  actions: n.actions,
+                  state: n.current ? 'current' : n.visited ? 'visited' : 'future',
+                }))}
+              />
+            </Card>
+          </Space>
+        </Col>
+        <Col xs={24} lg={8}>
+          <Space direction="vertical" size={16} style={{ width: '100%' }}>
+            <Card size="small" title="状态">
+              <Descriptions
+                size="small"
+                column={1}
+                items={[
+                  { key: 's', label: '状态', children: <Tag color={taskStatusColor[t.status]}>{taskStatusLabel[t.status]}</Tag> },
+                  { key: 'p', label: '优先级', children: <Tag color={priorityColor[t.priority]}>{priorityLabel[t.priority]}</Tag> },
+                  { key: 'n', label: '当前节点', children: t.card?.node_name ?? t.node_id },
+                  {
+                    key: 'a',
+                    label: '处理人',
+                    children: t.assignee_id || (t.team_key ? `团队 ${t.team_key}（${t.team_mode === 'assign' ? '待分配' : '待认领'}）` : '—'),
+                  },
+                  ...(t.status === 'TASK_STATUS_SNOOZED' ? [{ key: 'z', label: '推迟至', children: fmtTime(t.snooze_until, 'YYYY-MM-DD HH:mm') }] : []),
+                  ...(terminal ? [{ key: 'r', label: '结果', children: resolutionLabel[t.resolution] ?? t.resolution }] : []),
+                  { key: 'k', label: '数据源 key', children: <Typography.Text code copyable>{t.biz_key}</Typography.Text> },
+                  { key: 'c', label: '创建', children: fmtTime(t.created_at, 'YYYY-MM-DD HH:mm') },
+                ]}
+              />
+              {!terminal && (
+                <div style={{ marginTop: 12 }}>
+                  <TaskActions task={t} layout="detail" members={d.team_members} onChanged={load} />
+                </div>
+              )}
+              {(d.can_reassign || d.can_update_priority) && (
+                <Space wrap style={{ marginTop: 12 }}>
+                  {d.can_reassign && (
+                    <Button size="small" onClick={() => setReassign(true)}>
+                      转派
+                    </Button>
+                  )}
+                  {d.can_update_priority && (
+                    <Select
+                      size="small"
+                      value={t.priority}
+                      style={{ width: 120 }}
+                      options={priorities.map((p) => ({ value: p, label: priorityLabel[p] }))}
+                      onChange={async (p: TaskPriority) => {
+                        try {
+                          await taskApi.priority(t.id, p);
+                          message.success('优先级已调整');
+                          load();
+                        } catch (e) {
+                          message.error(String((e as Error).message));
+                        }
+                      }}
+                    />
+                  )}
+                </Space>
+              )}
+            </Card>
+            <Card size="small" title="处理历史">
+              <Timeline
+                items={d.history.map((h) => ({
+                  color: h.kind === 'gone' || h.kind === 'close' || h.kind === 'no_response' ? 'green' : h.kind === 'escalate' ? 'orange' : 'blue',
+                  children: (
+                    <div>
+                      <div>{historyText(h)}</div>
+                      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                        {fmtTime(h.at, 'MM-DD HH:mm')} · {h.actor}
+                      </Typography.Text>
+                    </div>
+                  ),
+                }))}
+              />
+            </Card>
+          </Space>
+        </Col>
+      </Row>
+      <Modal
+        title="转派"
+        open={reassign}
+        okText="转派"
+        cancelText="取消"
+        okButtonProps={{ disabled: !to || !reason }}
+        onCancel={() => setReassign(false)}
+        onOk={async () => {
+          try {
+            await taskApi.reassign(t.id, to, reason);
+            message.success('已转派');
+            setReassign(false);
+            load();
+          } catch (e) {
+            message.error(String((e as Error).message));
+          }
+        }}
+      >
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <Input placeholder="新处理人（email）" value={to} onChange={(e) => setTo(e.target.value)} />
+          <Input.TextArea rows={2} placeholder="原因（必填）" value={reason} onChange={(e) => setReason(e.target.value)} />
+        </Space>
+      </Modal>
     </>
   );
 }
 
-// 操作区：任务中心的操作（认领、开始处理、调整优先级、转派，直接生效）与流程操作（等待中的人工节点的选项）。
-// 按钮是否显示按当前身份判断，权限以服务端校验为准。
-function ActionPanel(props: { detail: Detail; syncing: boolean; onChoose: (o: ActionOption) => void; onChanged: () => void }) {
-  const { detail, syncing, onChoose } = props;
-  const t = detail.task;
-  const p = detail.pending_action;
-  const { user, can } = useIdentity();
-  const { message } = AntApp.useApp();
-  const [busy, setBusy] = useState<string>();
-  const [dialog, setDialog] = useState<'priority' | 'reassign'>();
-
-  const run = async (label: string, fn: () => Promise<unknown>) => {
-    setBusy(label);
-    try {
-      await fn();
-      message.success(`${label}成功`);
-      props.onChanged();
-    } catch (e) {
-      message.error(e instanceof ApiError ? `${label}失败：${e.message}` : String(e));
-    } finally {
-      setBusy(undefined);
-    }
-  };
-
-  const open = t.status !== 'TASK_STATUS_SOLVED';
-  const mine = t.assignee_id !== '' && t.assignee_id === user;
-  const manage = open && (mine || can('task.admin'));
-  const taskActions = [
-    t.status === 'TASK_STATUS_UNASSIGNED' && (
-      <Button key="claim" type="primary" ghost loading={busy === '认领'} onClick={() => void run('认领', () => taskApi.claim(t.id))}>
-        认领
-      </Button>
-    ),
-    t.status === 'TASK_STATUS_PENDING' && mine && (
-      <Button key="start" loading={busy === '开始处理'} onClick={() => void run('开始处理', () => taskApi.startProcessing(t.id))}>
-        开始处理
-      </Button>
-    ),
-    manage && (
-      <Button key="priority" onClick={() => setDialog('priority')}>
-        调整优先级
-      </Button>
-    ),
-    manage && (
-      <Button key="reassign" onClick={() => setDialog('reassign')}>
-        转派
-      </Button>
-    ),
-  ].filter(Boolean);
-
-  return (
-    <Card title="操作" size="small">
-      {taskActions.length > 0 && <Space wrap style={{ marginBottom: 16 }}>{taskActions}</Space>}
-      {dialog === 'priority' && (
-        <PriorityModal
-          current={t.priority}
-          onClose={() => setDialog(undefined)}
-          onSubmit={(priority, reason) => run('调整优先级', () => taskApi.updatePriority(t.id, priority, reason)).then(() => setDialog(undefined))}
-        />
-      )}
-      {dialog === 'reassign' && (
-        <ReassignModal
-          current={t.assignee_id}
-          onClose={() => setDialog(undefined)}
-          onSubmit={(assignee, reason) => run('转派', () => taskApi.reassign(t.id, assignee, reason)).then(() => setDialog(undefined))}
-        />
-      )}
-      {syncing && <Alert type="info" showIcon message="已提交，正在同步任务状态…" style={{ marginBottom: 12 }} />}
-      {!p ? (
-        <Typography.Text type="secondary">{t.status === 'TASK_STATUS_SOLVED' ? '任务已完成' : '当前没有等待你决定的流程节点'}</Typography.Text>
-      ) : (
-        <>
-          <Typography.Paragraph>
-            当前节点 <Typography.Text code>{p.node_id}</Typography.Text>
-            {Number(p.deadline_at) > 0 && <> · 超时 {fmtTime(p.deadline_at)}</>}
-          </Typography.Paragraph>
-          {!p.can_signal && (
-            <Alert
-              type="warning"
-              showIcon
-              message={t.assignee_id ? `处理人是 ${t.assignee_id}，你只能查看` : '你不在该任务的候选组内，只能查看'}
-              style={{ marginBottom: 12 }}
-            />
-          )}
-          <Space wrap>
-            {p.options.map((o) => {
-              const snooze = Number(o.snooze_ms) > 0;
-              const button = (
-                <Button
-                  key={o.key}
-                  type={o.style === 'primary' ? 'primary' : 'default'}
-                  danger={o.style === 'danger'}
-                  disabled={!p.can_signal || syncing}
-                  onClick={() => onChoose(o)}
-                >
-                  {o.label}
-                  {snooze && `（${fmtDuration(o.snooze_ms)}）`}
-                </Button>
-              );
-              return snooze ? (
-                <Tooltip key={o.key} title="推迟：到期后重新提醒，期间仍可直接处理">
-                  {button}
-                </Tooltip>
-              ) : (
-                button
-              );
-            })}
-          </Space>
-        </>
-      )}
-    </Card>
-  );
-}
-
-function PriorityModal(props: { current: TaskPriority; onClose: () => void; onSubmit: (p: TaskPriority, reason: string) => Promise<void> }) {
-  const [form] = Form.useForm<{ priority: TaskPriority; reason: string }>();
-  const [saving, setSaving] = useState(false);
-  const submit = async () => {
-    const v = await form.validateFields();
-    setSaving(true);
-    await props.onSubmit(v.priority, v.reason).finally(() => setSaving(false));
-  };
-  return (
-    <Modal open title="调整优先级" okText="确认" onOk={() => void submit()} onCancel={props.onClose} confirmLoading={saving}>
-      <Form form={form} layout="vertical" initialValues={{ priority: props.current }}>
-        <Form.Item name="priority" label="优先级" rules={[{ required: true }]}>
-          <Select options={Object.entries(priorityLabel).map(([value, label]) => ({ value, label }))} />
-        </Form.Item>
-        <Form.Item name="reason" label="原因" rules={[{ required: true, whitespace: true, message: '请填写原因' }]}>
-          <Input.TextArea rows={3} />
-        </Form.Item>
-      </Form>
-    </Modal>
-  );
-}
-
-// 转派：人员选择器线上直接调 BSP，demo 用 devgw 的 mock 身份列表，也可以直接输入。
-function ReassignModal(props: { current: string; onClose: () => void; onSubmit: (assignee: string, reason: string) => Promise<void> }) {
-  const { users } = useIdentity();
-  const [form] = Form.useForm<{ assignee: string; reason: string }>();
-  const [saving, setSaving] = useState(false);
-  const submit = async () => {
-    const v = await form.validateFields();
-    setSaving(true);
-    await props.onSubmit(v.assignee.trim(), v.reason).finally(() => setSaving(false));
-  };
-  return (
-    <Modal open title="转派" okText="确认" onOk={() => void submit()} onCancel={props.onClose} confirmLoading={saving}>
-      <Typography.Paragraph type="secondary">当前处理人：{props.current || '—（组队列）'}。转派只改变处理人，任务状态不变。</Typography.Paragraph>
-      <Form form={form} layout="vertical">
-        <Form.Item name="assignee" label="转派给" rules={[{ required: true, whitespace: true, message: '请选择处理人' }]}>
-          <AutoComplete
-            options={users.filter((u) => u.id !== props.current).map((u) => ({ value: u.id }))}
-            filterOption={(input, o) => (o?.value ?? '').includes(input)}
-            placeholder="选择或输入人员 ID"
-          />
-        </Form.Item>
-        <Form.Item name="reason" label="原因" rules={[{ required: true, whitespace: true, message: '请填写原因' }]}>
-          <Input.TextArea rows={3} />
-        </Form.Item>
-      </Form>
-    </Modal>
-  );
-}

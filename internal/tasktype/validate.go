@@ -12,6 +12,7 @@ import (
 
 	"github.com/robfig/cron/v3"
 	"github.com/santhosh-tekuri/jsonschema/v6"
+	"github.com/santhosh-tekuri/jsonschema/v6/kind"
 	"golang.org/x/text/language"
 	"golang.org/x/text/message"
 
@@ -211,7 +212,7 @@ func schemaIssues(ve *jsonschema.ValidationError) []Issue {
 	var walk func(e *jsonschema.ValidationError)
 	walk = func(e *jsonschema.ValidationError) {
 		if len(e.Causes) == 0 {
-			out = append(out, Issue{Path: strings.Join(e.InstanceLocation, "."), Message: e.ErrorKind.LocalizedString(printer)})
+			out = append(out, schemaIssue(e))
 			return
 		}
 		for _, c := range e.Causes {
@@ -221,6 +222,61 @@ func schemaIssues(ve *jsonschema.ValidationError) []Issue {
 	walk(ve)
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return dedup(out)
+}
+
+// fieldNames 是常见路径末段的中文名，用于把 JSON Schema 的报错翻译成配置人员看得懂的话。
+var fieldNames = map[string]string{
+	"key": "标识", "name": "名称", "team": "团队", "fallback_team": "兜底团队", "relation": "业务关系", "field": "字段",
+	"datasource": "数据源连接", "schedule": "调度", "query": "查询", "title": "标题", "label": "显示名", "url": "链接地址",
+	"id": "节点 id", "actions": "动作", "nodes": "节点", "mode": "分派方式", "kind": "类型", "type": "类型", "pii": "脱敏",
+}
+
+// schemaIssue 把一条 JSON Schema 报错翻译成中文；不认识的保持原文。
+func schemaIssue(e *jsonschema.ValidationError) Issue {
+	loc := e.InstanceLocation
+	path := strings.Join(loc, ".")
+	name := ""
+	if len(loc) > 0 {
+		name = fieldNames[loc[len(loc)-1]]
+	}
+	msg := e.ErrorKind.LocalizedString(printer)
+	switch k := e.ErrorKind.(type) {
+	case *kind.Required:
+		var names []string
+		for _, m := range k.Missing {
+			if n := fieldNames[m]; n != "" {
+				names = append(names, n)
+			} else {
+				names = append(names, m)
+			}
+		}
+		msg = "缺少" + strings.Join(names, "、")
+		if len(k.Missing) == 1 {
+			path = strings.TrimPrefix(path+"."+k.Missing[0], ".")
+		}
+	case *kind.Pattern:
+		if k.Got == "" {
+			msg = "不能为空"
+		} else {
+			msg = fmt.Sprintf("「%s」格式不正确：只能用小写字母、数字、下划线，字母开头", k.Got)
+		}
+	case *kind.MinLength:
+		msg = "不能为空"
+	case *kind.MinItems:
+		msg = fmt.Sprintf("至少需要 %d 项", k.Want)
+	case *kind.Enum:
+		msg = fmt.Sprintf("取值 %v 不在可选范围内", k.Got)
+	case *kind.AdditionalProperties:
+		msg = "不支持的配置项：" + strings.Join(k.Properties, "、")
+	case *kind.UniqueItems:
+		msg = "有重复项"
+	case *kind.Type:
+		msg = fmt.Sprintf("类型应为 %s", strings.Join(k.Want, " / "))
+	}
+	if name != "" && !strings.HasPrefix(msg, "缺少") && !strings.HasPrefix(msg, "不支持") {
+		msg = name + msg
+	}
+	return Issue{Path: path, Message: msg}
 }
 
 func dedup(in []Issue) []Issue {
