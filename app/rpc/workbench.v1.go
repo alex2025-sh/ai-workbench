@@ -5,14 +5,11 @@ import (
 	"fmt"
 
 	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/config"
-	callbackserviceServer "github.com/alex2025-sh/ai-workbench/app/rpc/internal/server/callbackservice"
 	catalogserviceServer "github.com/alex2025-sh/ai-workbench/app/rpc/internal/server/catalogservice"
-	changesetserviceServer "github.com/alex2025-sh/ai-workbench/app/rpc/internal/server/changesetservice"
-	componentserviceServer "github.com/alex2025-sh/ai-workbench/app/rpc/internal/server/componentservice"
 	ingestserviceServer "github.com/alex2025-sh/ai-workbench/app/rpc/internal/server/ingestservice"
-	runserviceServer "github.com/alex2025-sh/ai-workbench/app/rpc/internal/server/runservice"
 	taskserviceServer "github.com/alex2025-sh/ai-workbench/app/rpc/internal/server/taskservice"
 	tasktypeserviceServer "github.com/alex2025-sh/ai-workbench/app/rpc/internal/server/tasktypeservice"
+	teamserviceServer "github.com/alex2025-sh/ai-workbench/app/rpc/internal/server/teamservice"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/svc"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/pb"
 
@@ -35,13 +32,10 @@ func main() {
 
 	s := zrpc.MustNewServer(c.RpcServerConf, func(grpcServer *grpc.Server) {
 		pb.RegisterTaskTypeServiceServer(grpcServer, tasktypeserviceServer.NewTaskTypeServiceServer(ctx))
-		pb.RegisterComponentServiceServer(grpcServer, componentserviceServer.NewComponentServiceServer(ctx))
-		pb.RegisterChangeSetServiceServer(grpcServer, changesetserviceServer.NewChangeSetServiceServer(ctx))
+		pb.RegisterTeamServiceServer(grpcServer, teamserviceServer.NewTeamServiceServer(ctx))
+		pb.RegisterTaskServiceServer(grpcServer, taskserviceServer.NewTaskServiceServer(ctx))
 		pb.RegisterCatalogServiceServer(grpcServer, catalogserviceServer.NewCatalogServiceServer(ctx))
 		pb.RegisterIngestServiceServer(grpcServer, ingestserviceServer.NewIngestServiceServer(ctx))
-		pb.RegisterRunServiceServer(grpcServer, runserviceServer.NewRunServiceServer(ctx))
-		pb.RegisterTaskServiceServer(grpcServer, taskserviceServer.NewTaskServiceServer(ctx))
-		pb.RegisterCallbackServiceServer(grpcServer, callbackserviceServer.NewCallbackServiceServer(ctx))
 
 		if c.Mode == service.DevMode || c.Mode == service.TestMode {
 			reflection.Register(grpcServer)

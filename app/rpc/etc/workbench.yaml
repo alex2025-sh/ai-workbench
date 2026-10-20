@@ -1,6 +1,5 @@
 # 本地开发配置。不注册 etcd；dev 模式开启 gRPC reflection，便于 grpcurl 调试。
 Name: workbench.rpc
-AllowDirectPublish: true   # 开发环境：任务类型草稿可直接发布（正式环境走变更集与审批）
 ListenOn: 127.0.0.1:9090
 Mode: dev
 Log:
@@ -8,9 +7,9 @@ Log:
 
 Workbench:
   DataSource: root:@tcp(127.0.0.1:3306)/ai_workbench?parseTime=true&loc=UTC&charset=utf8mb4
-  BizDataSource: root:@tcp(127.0.0.1:3306)/biz_mock?parseTime=true&loc=UTC&charset=utf8mb4
+  # SQL 来源可用的只读连接（线上为只读从库账号），配置页的「试跑 SQL」也用它
+  Datasources:
+    appeal_ro: root:@tcp(127.0.0.1:3306)/biz_mock?charset=utf8mb4
   RelationsFile: deploy/mock/vip_rm.yaml
-  GroupsFile: deploy/mock/groups.yaml
   PermissionsFile: deploy/mock/permissions.yaml
-  # 专用试运行库（结构同 deploy/sql），每次试运行都会清空其中的运行数据，不能指向平台库
-  DryRunDataSource: root:@tcp(127.0.0.1:3306)/ai_workbench_dryrun?parseTime=true&loc=UTC&charset=utf8mb4
+  WebBase: http://127.0.0.1:5173

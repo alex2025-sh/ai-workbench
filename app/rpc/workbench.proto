@@ -1,214 +1,123 @@
 syntax = "proto3";
 
 // AI Workbench 对外 gRPC 接口。前端与外部系统经公司 gateway 访问，gateway 负责 HTTP 与 gRPC 的转换、
-// 认证与限流。设计见 docs/ai-task-platform.md「前后端交互」「接口清单」。
+// 认证与限流。设计见 docs/ai-task-platform.md。
 //
 // 约定：
 //   * 每个方法行尾注释给出 gateway 的 HTTP 路径（/byai_platform/api/v1/<资源>/<动作>，统一 POST）。
 //     一期不引入 gateway 注解，接入 gateway 时再改为 bgw.v1.method_options。
-//   * 调用人身份由 gateway 写入 gRPC metadata，请求消息中不包含 actor / viewer 等身份字段。
+//   * 调用人身份由 gateway 写入 gRPC metadata，请求消息中不包含 actor 等身份字段。
 //   * 接口级权限在 BSP 权限平台按方法配置。
-//   * 业务 JSON（payload、body、dsl、report）用 bytes 承载 UTF-8 JSON，不用 google.protobuf.Struct，
+//   * 业务 JSON（任务类型、业务字段、查询结果）用 bytes 承载 UTF-8 JSON，不用 google.protobuf.Struct，
 //     避免数字变成 double 导致金额丢精度。
 //   * 时间统一为 Unix 毫秒（int64），0 表示未设置。
 package workbench.v1;
 
 option go_package = "./pb";
 
-
-// 任务类型及其自有组件（schema、来源、workflow、自有卡片模板）
+// 任务类型：草稿、校验、发布与已发布版本
 service TaskTypeService {
   // 新建任务类型并创建草稿
-  rpc CreateTaskType(CreateTaskTypeReq) returns (CreateTaskTypeResp); // POST /byai_platform/api/v1/task_type/create
+  rpc CreateTaskType(CreateTaskTypeReq) returns (DraftResp); // POST /byai_platform/api/v1/task_type/create
 
-  // 任务类型列表，按 namespace 筛选
+  // 任务类型列表
   rpc ListTaskTypes(ListTaskTypesReq) returns (ListTaskTypesResp); // POST /byai_platform/api/v1/task_type/list
 
-  // 获取已发布版本及其发布清单
+  // 已发布版本（version 为 0 取最新）与数据源状态
   rpc GetTaskType(GetTaskTypeReq) returns (GetTaskTypeResp); // POST /byai_platform/api/v1/task_type/get
-
-  // 获取草稿；没有时基于最新发布版本创建
-  rpc GetTaskTypeDraft(TaskTypeKeyReq) returns (GetTaskTypeDraftResp); // POST /byai_platform/api/v1/task_type/draft/get
-
-  // 保存草稿（revision 乐观锁）
-  rpc SaveTaskTypeDraft(SaveTaskTypeDraftReq) returns (SaveTaskTypeDraftResp); // POST /byai_platform/api/v1/task_type/draft/save
-
-  // 丢弃草稿
-  rpc DiscardTaskTypeDraft(DiscardDraftReq) returns (Empty); // POST /byai_platform/api/v1/task_type/draft/discard
-
-  // 对草稿及其依赖闭包完整编译校验
-  rpc ValidateTaskTypeDraft(TaskTypeKeyReq) returns (ValidateResp); // POST /byai_platform/api/v1/task_type/draft/validate
-
-  // 试运行：动作节点只记录不执行，虚拟时钟。有草稿时试运行草稿，否则试运行最新发布版本
-  rpc DryRunTaskTypeDraft(DryRunTaskTypeDraftReq) returns (DryRunResp); // POST /byai_platform/api/v1/task_type/draft/dry_run
-
-  // 按 schema 生成或从历史任务取样例 payload
-  rpc GenerateSamplePayload(GenerateSamplePayloadReq) returns (GenerateSamplePayloadResp); // POST /byai_platform/api/v1/task_type/sample_payload
-
-  // 用样例数据预览卡片模板
-  rpc PreviewView(PreviewViewReq) returns (PreviewViewResp); // POST /byai_platform/api/v1/task_type/view/preview
-
-  // 试跑来源：cron 立即扫描一次，Kafka / API 用样例消息
-  rpc TrialSource(TrialSourceReq) returns (TrialSourceResp); // POST /byai_platform/api/v1/task_type/source/trial
 
   // 版本历史
   rpc ListTaskTypeVersions(TaskTypeKeyReq) returns (ListVersionsResp); // POST /byai_platform/api/v1/task_type/versions
 
-  // 仅开发环境：把草稿直接发布为新版本，跳过变更集与审批（正式发布走 ChangeSetService）。
-  // 需要配置开启 AllowDirectPublish，调用人需有 task_type.publish 权限；草稿有 error 级问题时不发布。
-  rpc PublishTaskTypeDraft(PublishTaskTypeDraftReq) returns (PublishTaskTypeDraftResp); // POST /byai_platform/api/v1/task_type/draft/publish
-}
-
-// 共享组件：卡片模板、分配策略、跨部门协议、提示词模板
-service ComponentService {
-  // 新建共享组件并创建草稿
-  rpc CreateComponent(CreateComponentReq) returns (CreateComponentResp); // POST /byai_platform/api/v1/component/create
-
-  // 组件库列表
-  rpc ListComponents(ListComponentsReq) returns (ListComponentsResp); // POST /byai_platform/api/v1/component/list
-
-  // 获取已发布版本
-  rpc GetComponent(GetComponentReq) returns (GetComponentResp); // POST /byai_platform/api/v1/component/get
-
   // 获取草稿；没有时基于最新发布版本创建
-  rpc GetComponentDraft(ComponentRefReq) returns (GetComponentDraftResp); // POST /byai_platform/api/v1/component/draft/get
+  rpc GetTaskTypeDraft(TaskTypeKeyReq) returns (DraftResp); // POST /byai_platform/api/v1/task_type/draft/get
 
-  // 保存草稿（revision 乐观锁）
-  rpc SaveComponentDraft(SaveComponentDraftReq) returns (SaveComponentDraftResp); // POST /byai_platform/api/v1/component/draft/save
+  // 保存草稿（revision 乐观锁），返回校验问题
+  rpc SaveTaskTypeDraft(SaveTaskTypeDraftReq) returns (SaveTaskTypeDraftResp); // POST /byai_platform/api/v1/task_type/draft/save
 
-  // 丢弃草稿
-  rpc DiscardComponentDraft(DiscardComponentDraftReq) returns (Empty); // POST /byai_platform/api/v1/component/draft/discard
+  // 丢弃草稿；尚未发布过的任务类型一并删除
+  rpc DiscardTaskTypeDraft(TaskTypeKeyReq) returns (Empty); // POST /byai_platform/api/v1/task_type/draft/discard
 
-  // 校验草稿，并检查对引用方的影响
-  rpc ValidateComponentDraft(ComponentRefReq) returns (ValidateResp); // POST /byai_platform/api/v1/component/draft/validate
+  // 完整校验草稿（含团队、数据源连接、业务关系是否存在）
+  rpc ValidateTaskTypeDraft(TaskTypeKeyReq) returns (ValidateResp); // POST /byai_platform/api/v1/task_type/draft/validate
 
-  // 版本历史
-  rpc ListComponentVersions(ComponentRefReq) returns (ListVersionsResp); // POST /byai_platform/api/v1/component/versions
+  // 发布草稿为新版本（需要 task_type.publish 权限；有问题时不发布）
+  rpc PublishTaskTypeDraft(TaskTypeKeyReq) returns (PublishResp); // POST /byai_platform/api/v1/task_type/draft/publish
 
-  // 查看哪些任务类型版本引用了该组件
-  rpc ListDependents(ListDependentsReq) returns (ListDependentsResp); // POST /byai_platform/api/v1/component/dependents
+  // 试跑 SQL：在只读事务中执行，返回列与前 20 行；配置页据此生成字段
+  rpc TrialSql(TrialSqlReq) returns (TrialSqlResp); // POST /byai_platform/api/v1/task_type/trial_sql
+
+  // 用一行样例数据渲染卡片（未保存的草稿也可以预览）
+  rpc PreviewCard(PreviewCardReq) returns (PreviewCardResp); // POST /byai_platform/api/v1/task_type/preview_card
 }
 
-// 变更集：审批与发布的单位；审批由公司审批平台完成
-service ChangeSetService {
-  // 把草稿打包为变更集，并对依赖闭包编译校验
-  rpc CreateChangeSet(CreateChangeSetReq) returns (ChangeSet); // POST /byai_platform/api/v1/change_set/create
-
-  // 为共享组件的引用方一键生成升级草稿并加入变更集
-  rpc AddDependentUpgrades(AddDependentUpgradesReq) returns (ChangeSet); // POST /byai_platform/api/v1/change_set/add_dependents
-
-  // 变更集详情
-  rpc GetChangeSet(ChangeSetIdReq) returns (ChangeSet); // POST /byai_platform/api/v1/change_set/get
-
-  // 变更集列表
-  rpc ListChangeSets(ListChangeSetsReq) returns (ListChangeSetsResp); // POST /byai_platform/api/v1/change_set/list
-
-  // 变更集内各项与其基础版本的差异（审批单链接到此）
-  rpc DiffChangeSet(ChangeSetIdReq) returns (DiffChangeSetResp); // POST /byai_platform/api/v1/change_set/diff
-
-  // 提交审批：快照草稿、锁定、在公司审批平台创建审批实例
-  rpc SubmitChangeSet(ChangeSetIdReq) returns (SubmitChangeSetResp); // POST /byai_platform/api/v1/change_set/submit
-
-  // 撤回审批，草稿解锁
-  rpc WithdrawChangeSet(ChangeSetIdReq) returns (ChangeSet); // POST /byai_platform/api/v1/change_set/withdraw
-
-  // 公司审批平台回调：通过则原子发布，驳回则退回草稿
-  rpc OnApprovalResult(OnApprovalResultReq) returns (OnApprovalResultResp); // POST /byai_platform/api/v1/change_set/approval_callback
-
-  // 下线某个版本；仍被引用的共享组件版本不能下线
-  rpc RetireVersion(RetireVersionReq) returns (Empty); // POST /byai_platform/api/v1/config/version/retire
+// 团队：节点的处理人可以是团队（认领模式或分配模式）
+service TeamService {
+  rpc ListTeams(Empty) returns (ListTeamsResp); // POST /byai_platform/api/v1/team/list
+  rpc GetTeam(TeamKeyReq) returns (Team); // POST /byai_platform/api/v1/team/get
+  // 新建或整体替换团队（含成员）；需要 team.admin 权限
+  rpc SaveTeam(Team) returns (Team); // POST /byai_platform/api/v1/team/save
 }
 
-// 画布与配置表单的数据源
-service CatalogService {
-  // 节点类型目录：配置 schema、UI 提示、端口规则
-  rpc ListNodeTypes(Empty) returns (ListNodeTypesResp); // POST /byai_platform/api/v1/catalog/node_types
-
-  // skill 列表（转发 Skillhub）
-  rpc ListSkills(ListSkillsReq) returns (ListSkillsResp); // POST /byai_platform/api/v1/catalog/skills
-
-  // skill 的输入输出 schema（转发 Skillhub）
-  rpc GetSkillSchema(GetSkillSchemaReq) returns (GetSkillSchemaResp); // POST /byai_platform/api/v1/catalog/skill/schema
-}
-
-// API 来源：外部系统推送标准事件信封
-service IngestService {
-  // 推送事件（按 dedup_key 幂等）
-  rpc PushEvent(PushEventReq) returns (PushEventResp); // POST /byai_platform/api/v1/ingest/event/push
-}
-
-// 工作流运行
-service RunService {
-  // 启动运行（按 biz_key 幂等）
-  rpc StartRun(StartRunReq) returns (StartRunResp); // POST /byai_platform/api/v1/run/start
-
-  // 向等待中的人工节点发送选择。按任务表鉴权，与 Lark 卡片回调共用同一套鉴权：调用人须是任务处理人，
-  // 或任务未分配且调用人在候选人 / 候选组内（无需先认领，做决定的人成为处理人）
-  rpc Signal(SignalReq) returns (SignalResp); // POST /byai_platform/api/v1/run/signal
-
-  // 取消运行
-  rpc CancelRun(CancelRunReq) returns (Empty); // POST /byai_platform/api/v1/run/cancel
-
-  // 运行状态，供运行态画布着色
-  rpc GetRun(RunIdReq) returns (RunView); // POST /byai_platform/api/v1/run/get
-
-  // 按任务、biz_key、状态查运行
-  rpc ListRuns(ListRunsReq) returns (ListRunsResp); // POST /byai_platform/api/v1/run/list
-
-  // 运行事件时间线
-  rpc GetRunEvents(GetRunEventsReq) returns (GetRunEventsResp); // POST /byai_platform/api/v1/run/events
-
-  // 人工干预：重试节点
-  rpc RetryNode(AdminNodeReq) returns (Empty); // POST /byai_platform/api/v1/run/node/retry
-
-  // 人工干预：以指定端口跳过节点
-  rpc SkipNode(AdminNodeReq) returns (Empty); // POST /byai_platform/api/v1/run/node/skip
-}
-
-// 任务处理
+// 任务工作台
 service TaskService {
-  // 任务详情：任务数据、按调用人受众渲染的 web 卡片、当前可执行的流程操作与简化进度（均已按调用人脱敏）
+  // 任务列表：我的任务、团队队列、我经手的
+  rpc ListTasks(ListTasksReq) returns (ListTasksResp); // POST /byai_platform/api/v1/task/list
+
+  // 任务详情：卡片、业务字段、节点链、历史，以及调用人可做的操作
   rpc GetTask(TaskIdReq) returns (TaskDetail); // POST /byai_platform/api/v1/task/get
 
-  // 我的任务，按优先级、截止时间排序；返回轻量摘要，不含 payload
-  rpc ListMyTasks(ListMyTasksReq) returns (ListMyTasksResp); // POST /byai_platform/api/v1/task/my/list
+  // 认领（认领模式的执行者，或分配模式的分配者领给自己）
+  rpc ClaimTask(TaskIdReq) returns (TaskSummary); // POST /byai_platform/api/v1/task/claim
 
-  // 可认领的任务池（unassigned，调用人在候选人或候选组内），排序同上
-  rpc ListClaimableTasks(ListClaimableTasksReq) returns (ListMyTasksResp); // POST /byai_platform/api/v1/task/claimable/list
+  // 分配（分配模式的分配者指定执行者）
+  rpc AssignTask(AssignTaskReq) returns (TaskSummary); // POST /byai_platform/api/v1/task/assign
 
-  // 任务事件时间线
-  rpc GetTaskEvents(GetTaskEventsReq) returns (GetTaskEventsResp); // POST /byai_platform/api/v1/task/events
+  // 开始处理
+  rpc StartProcessing(TaskIdReq) returns (TaskSummary); // POST /byai_platform/api/v1/task/start
 
-  // 认领组任务（unassigned -> pending，CAS）
-  rpc ClaimTask(TaskIdReq) returns (TaskView); // POST /byai_platform/api/v1/task/claim
+  // 节点动作：close、no_response、snooze、escalate（link 在前端打开，不经过后端）
+  rpc ActTask(ActTaskReq) returns (TaskSummary); // POST /byai_platform/api/v1/task/act
 
-  // 开始处理（pending -> processing，不影响流程）
-  rpc StartProcessing(TaskIdReq) returns (TaskView); // POST /byai_platform/api/v1/task/start
+  // 转派（处理人或 task.admin）
+  rpc Reassign(ReassignReq) returns (TaskSummary); // POST /byai_platform/api/v1/task/reassign
 
-  // 调整优先级（原因必填，写 Task Event）
-  rpc UpdatePriority(UpdatePriorityReq) returns (TaskView); // POST /byai_platform/api/v1/task/priority/update
-
-  // 转派（只改变处理人，状态不变）
-  rpc Reassign(ReassignReq) returns (TaskView); // POST /byai_platform/api/v1/task/reassign
+  // 调整优先级（处理人或 task.admin）
+  rpc UpdatePriority(UpdatePriorityReq) returns (TaskSummary); // POST /byai_platform/api/v1/task/priority
 }
 
-// 第三方回调（gateway 透传原始请求体与请求头）
-service CallbackService {
-  // Lark 卡片交互：验签 -> open_id 映射 -> 按任务表鉴权 -> Signal
-  rpc LarkCardCallback(LarkCardCallbackReq) returns (LarkCardCallbackResp); // POST /byai_platform/api/v1/callback/lark/card
+// 配置页的下拉选项
+service CatalogService {
+  // 平台注册的只读数据源连接
+  rpc ListDatasources(Empty) returns (NameList); // POST /byai_platform/api/v1/catalog/datasources
+  // 可用的业务关系（如 vip_rm）
+  rpc ListRelations(Empty) returns (NameList); // POST /byai_platform/api/v1/catalog/relations
 }
 
-// ===========================================================================
+// API 推送来源；Kafka 来源由平台消费固定 topic 后调用同一套逻辑
+service IngestService {
+  rpc Push(PushReq) returns (PushResp); // POST /byai_platform/api/v1/ingest/push
+}
+
+// ============================================================================
 // 公共
-// ===========================================================================
 
 message Empty {}
+
+message PageReq {
+  string cursor = 1;
+  int32 page_size = 2;
+}
+
+message NameList {
+  repeated string names = 1;
+}
 
 // 任务状态。proto3 枚举首值必须为 0，因此用 TASK_STATUS_UNSPECIFIED 占位；
 // 存储与 Go 代码使用 internal/task.TaskStatus（-1/0/1/2/3），转换统一用 StatusToProto / StatusFromProto。
 enum TaskStatus {
   TASK_STATUS_UNSPECIFIED = 0;
-  TASK_STATUS_UNASSIGNED = 1;  // 存储值 -1
+  TASK_STATUS_UNASSIGNED = 1;  // 存储值 -1：在团队队列中
   TASK_STATUS_PENDING = 2;     // 存储值 0
   TASK_STATUS_PROCESSING = 3;  // 存储值 1
   TASK_STATUS_SNOOZED = 4;     // 存储值 2
@@ -217,706 +126,207 @@ enum TaskStatus {
 
 // 任务优先级，数值越小越紧急；与存储值一致。
 enum TaskPriority {
-  TASK_PRIORITY_P0 = 0;  // 立即
-  TASK_PRIORITY_P1 = 1;  // 今日
-  TASK_PRIORITY_P2 = 2;  // 机会
-  TASK_PRIORITY_P3 = 3;  // 维护
+  TASK_PRIORITY_P0 = 0;
+  TASK_PRIORITY_P1 = 1;
+  TASK_PRIORITY_P2 = 2;
+  TASK_PRIORITY_P3 = 3;
 }
 
-// 配置对象类型：任务类型是发布单元，其余为可共享的组件。
-enum ConfigKind {
-  CONFIG_KIND_UNSPECIFIED = 0;
-  CONFIG_KIND_TASK_TYPE = 1;
-  CONFIG_KIND_VIEW = 2;        // 共享卡片模板
-  CONFIG_KIND_ASSIGNMENT = 3;  // 共享分配策略
-  CONFIG_KIND_AGREEMENT = 4;   // 跨部门协议
-  CONFIG_KIND_PROMPT = 5;      // 提示词模板（如 AI 摘要）
-}
-
-message ConfigRef {
-  ConfigKind kind = 1;
-  string key = 2;
-}
-
-message PageReq {
-  string cursor = 1;
-  int32 page_size = 2;
-}
-
-// 编译 / 校验问题，供画布高亮与 AI 校验—修复循环使用。
+// 校验问题。path 是任务类型 JSON 中的路径（如 nodes.1.link），前端据此定位到表单项。
 message Issue {
-  string code = 1;      // cycle / unknown_port / bad_reference / inherit_conflict ...
-  string severity = 2;  // error / warning
-  string path = 3;      // 出问题的位置，如 workflow.nodes.ask_rm.config.timeout
-  string node_id = 4;
-  string edge_id = 5;
-  string message = 6;
+  string path = 1;
+  string message = 2;
 }
 
-message Draft {
-  int32 base_version = 1;          // 0 = 全新
-  int64 revision = 2;              // 乐观锁
-  bytes body_json = 3;
-  int64 locked_by_change_set = 4;  // 非 0 = 审批中，不可编辑
-  string updated_by = 5;
+// ============================================================================
+// 任务类型
+
+message TaskTypeSummary {
+  string key = 1;
+  string namespace = 2;
+  string name = 3;
+  int32 latest_version = 4;  // 0 = 尚未发布
+  bool has_draft = 5;
   int64 updated_at = 6;
-  string content_hash = 7;         // 去掉 ui 字段后的内容哈希；只改画布坐标时不变
+  string source_kind = 7;    // 最新版本的数据源类型：sql / api / kafka
 }
 
 message VersionInfo {
   int32 version = 1;
   string content_hash = 2;
-  string state = 3;  // published / retired
-  int64 change_set_id = 4;
-  string published_by = 5;
-  string approved_by = 6;
-  int64 published_at = 7;
-}
-
-// 发布清单中的一项：自有组件只有内容哈希，共享组件带固定版本。
-message ManifestItem {
-  string item_kind = 1;  // schema / source / workflow / view / assignment / agreement / prompt
-  string item_key = 2;
-  ConfigRef ref = 3;     // 共享组件；自有组件为空
-  int32 ref_version = 4;
-  string content_hash = 5;
-}
-
-// ===========================================================================
-// TaskTypeService：任务类型及其自有组件
-// ===========================================================================
-
-message TaskTypeSummary {
-  string key = 1;
-  string name = 2;
-  string namespace = 3;
-  int32 latest_version = 4;  // 0 = 尚未发布
-  bool has_draft = 5;
-  string status = 6;         // active / retired
-  int64 updated_at = 7;
+  string published_by = 3;
+  int64 published_at = 4;
 }
 
 message CreateTaskTypeReq {
   string key = 1;
-  string name = 2;
-  string namespace = 3;
+  string namespace = 2;
+  string name = 3;
   string description = 4;
-}
-message CreateTaskTypeResp {
-  string key = 1;
-  Draft draft = 2;
 }
 
 message ListTaskTypesReq {
-  string namespace = 1;
-  string keyword = 2;
-  PageReq page = 3;
-}
-message ListTaskTypesResp {
-  repeated TaskTypeSummary items = 1;
-  string next_cursor = 2;
+  string keyword = 1;
+  string namespace = 2;
 }
 
-message GetTaskTypeReq {
-  string key = 1;
-  int32 version = 2;  // 0 = 最新已发布版本
-}
-message GetTaskTypeResp {
-  TaskTypeSummary summary = 1;
-  VersionInfo version = 2;
-  bytes body_json = 3;
-  repeated ManifestItem manifest = 4;
-  // 编译后每个通知 / 人工节点实际使用的卡片模板与处理人（已处理继承）：
-  // {"<node_id>": {"view": ..., "view_from": "self|task_type|<上游人工节点>", "assignment": ..., "assignment_from": ...}}
-  bytes bindings_json = 5;
+message ListTaskTypesResp {
+  repeated TaskTypeSummary items = 1;
 }
 
 message TaskTypeKeyReq {
   string key = 1;
 }
 
-message GetTaskTypeDraftResp {
-  Draft draft = 1;  // 没有草稿时自动基于最新发布版本创建
+message GetTaskTypeReq {
+  string key = 1;
+  int32 version = 2;  // 0 = 最新
 }
 
-message SaveTaskTypeDraftReq {
-  string key = 1;
-  int64 revision = 2;  // 必须等于当前 revision，否则返回冲突
+// SQL 来源的调度状态
+message SourceState {
+  int64 next_run_at = 1;
+  int64 last_run_at = 2;
+  int32 last_rows = 3;
+  int32 last_created = 4;
+  int32 last_closed = 5;
+  string last_error = 6;
+}
+
+message GetTaskTypeResp {
+  TaskTypeSummary summary = 1;
+  VersionInfo version = 2;
   bytes body_json = 3;
-}
-message SaveTaskTypeDraftResp {
-  int64 revision = 1;
-  repeated Issue issues = 2;  // 保存时的快速校验结果，不阻止保存
-}
-
-message DiscardDraftReq {
-  string key = 1;
-  int64 revision = 2;
-}
-
-message ValidateResp {
-  bool ok = 1;
-  repeated Issue issues = 2;
-}
-
-message DryRunTaskTypeDraftReq {
-  string key = 1;
-  repeated bytes sample_json = 2;   // 历史事件样本或手工构造的 payload
-  map<string, string> choices = 3;  // 人工节点预设选择：node_id -> option
-}
-
-// 试运行经过的一步，画布据此高亮路径。
-message DryRunStep {
-  string node_id = 1;
-  int32 iteration = 2;
-  string port = 3;    // 节点完成时走的出口
-  string status = 4;  // succeeded / skipped / failed / waiting
-}
-
-// 试运行中“会发出去”的一次外部动作（不真正执行）。
-message DryRunSend {
-  string node_id = 1;
-  string kind = 2;     // lark_card / send_email / emit_event / skill_call
-  string target = 3;   // 接收人或目标
-  string summary = 4;
-  bytes rendered_json = 5;  // 渲染后的卡片或邮件内容
-}
-
-// 虚拟时钟上的时间点（相对于起点的偏移，不含系统时间）。
-message DryRunTimePoint {
-  string node_id = 1;
-  string kind = 2;          // timer（定时器到期）/ timeout（人工节点超时）
-  int64 offset_ms = 3;
-}
-
-// 每个样本一份报告。
-message DryRunCase {
-  int32 sample_index = 1;
-  repeated DryRunStep path = 2;
-  string assignee_id = 3;
-  repeated DryRunSend sends = 4;
-  repeated DryRunTimePoint timeline = 5;
-  string end_status = 6;  // 流程结束状态；等待中则为 waiting
-  repeated Issue issues = 7;
-}
-
-message DryRunResp {
-  int64 revision = 1;  // 本次试运行针对的草稿 revision
-  string content_hash = 5;  // 本次试运行针对的内容哈希；与草稿当前 content_hash 不同说明结果已过期
-  bool passed = 2;     // 无 error 级问题且流程按预期走完
-  repeated DryRunCase cases = 3;
-  repeated Issue issues = 4;  // 与具体样本无关的问题
-}
-
-message GenerateSamplePayloadReq {
-  string key = 1;
-  bool from_draft = 2;    // true = 按草稿 schema 生成；false = 按最新发布版本
-  bool from_history = 3;  // true = 取一条历史任务并脱敏，否则按 schema 构造
-}
-message GenerateSamplePayloadResp {
-  bytes payload_json = 1;
-}
-
-message PreviewViewReq {
-  string task_type_key = 1;  // 用该任务类型（草稿）的 schema 做脱敏与格式化
-  oneof view {
-    string owned_view_key = 2;  // 任务类型草稿中的自有模板
-    ConfigRef shared_view = 3;  // 共享模板（取其草稿，未有草稿则取最新版本）
-    bytes inline_view_json = 4; // 编辑中尚未保存的模板
-  }
-  string channel = 5;       // lark / web / email
-  bytes payload_json = 6;
-  string audience_dept = 7; // 用于选择受众变体与脱敏级别
-}
-message PreviewViewResp {
-  bytes rendered_json = 1;
-  repeated Issue issues = 2;
-}
-
-message TrialSourceReq {
-  string key = 1;
-  string source_key = 2;   // 草稿中的来源
-  bytes sample_json = 3;   // Kafka / API 来源：样例消息；cron 来源留空，立即试跑一次扫描
-}
-message TrialSourceResp {
-  int32 event_count = 1;
-  repeated bytes sample_task_json = 2;  // 映射后的任务样例
-  repeated Issue issues = 3;
+  SourceState source_state = 4;  // 只有 SQL 来源有
 }
 
 message ListVersionsResp {
   repeated VersionInfo items = 1;
 }
 
-message PublishTaskTypeDraftReq {
+message DraftResp {
   string key = 1;
-  int64 revision = 2;  // 必须等于当前草稿的 revision，避免发布别人刚改过、自己没看到的内容
-}
-message PublishTaskTypeDraftResp {
-  int32 version = 1;          // 发布出的版本；有 error 级问题时为 0
-  repeated Issue issues = 2;
-}
-
-// ===========================================================================
-// ComponentService：共享组件
-// ===========================================================================
-
-message ComponentSummary {
-  ConfigRef ref = 1;
-  string name = 2;
-  string namespace = 3;
-  int32 latest_version = 4;
-  bool has_draft = 5;
-  string status = 6;
-  int64 updated_at = 7;
+  int32 base_version = 2;  // 0 = 尚未发布过
+  int64 revision = 3;
+  bytes body_json = 4;
+  string updated_by = 5;
+  repeated Issue issues = 6;
 }
 
-message CreateComponentReq {
-  ConfigRef ref = 1;
-  string name = 2;
-  string namespace = 3;
-  string description = 4;
-}
-message CreateComponentResp {
-  ComponentSummary summary = 1;
-  Draft draft = 2;
-}
-
-message ListComponentsReq {
-  ConfigKind kind = 1;
-  string namespace = 2;
-  string keyword = 3;
-  PageReq page = 4;
-}
-message ListComponentsResp {
-  repeated ComponentSummary items = 1;
-  string next_cursor = 2;
-}
-
-message GetComponentReq {
-  ConfigRef ref = 1;
-  int32 version = 2;  // 0 = 最新已发布版本
-}
-message GetComponentResp {
-  ComponentSummary summary = 1;
-  VersionInfo version = 2;
-  bytes body_json = 3;
-}
-
-message ComponentRefReq {
-  ConfigRef ref = 1;
-}
-
-message GetComponentDraftResp {
-  Draft draft = 1;
-}
-
-message SaveComponentDraftReq {
-  ConfigRef ref = 1;
+message SaveTaskTypeDraftReq {
+  string key = 1;
   int64 revision = 2;
   bytes body_json = 3;
 }
-message SaveComponentDraftResp {
+
+message SaveTaskTypeDraftResp {
   int64 revision = 1;
   repeated Issue issues = 2;
 }
 
-message DiscardComponentDraftReq {
-  ConfigRef ref = 1;
-  int64 revision = 2;
+message ValidateResp {
+  repeated Issue issues = 1;
 }
 
-message ListDependentsReq {
-  ConfigRef ref = 1;
-  int32 version = 2;  // 0 = 所有版本
-}
-message Dependent {
-  string task_type_key = 1;
-  int32 task_type_version = 2;
-  int32 ref_version = 3;   // 引用的组件版本
-  bool is_latest = 4;      // 是否为该任务类型的最新发布版本
-}
-message ListDependentsResp {
-  repeated Dependent items = 1;
+message PublishResp {
+  VersionInfo version = 1;
+  repeated Issue issues = 2;  // 非空时没有发布
 }
 
-// ===========================================================================
-// ChangeSetService：变更集、审批与发布
-// ===========================================================================
-
-message ChangeSetItem {
-  ConfigRef ref = 1;
-  int64 draft_revision = 2;
-  int32 base_version = 3;
-  int32 target_version = 4;
-  string reason = 5;  // edit / dependent_upgrade
-  bool dry_run_required = 6;  // 任务类型需要试运行，共享组件不需要
-  bool dry_run_passed = 7;    // 最近一次通过的试运行，其 content_hash 与当前草稿一致；只改 ui 坐标不影响
-  int64 dry_run_at = 8;
+message TrialSqlReq {
+  string datasource = 1;
+  string query = 2;
 }
 
-message ChangeSet {
-  int64 id = 1;
-  string namespace = 2;
-  string title = 3;
-  string state = 4;  // open / submitted / published / rejected / withdrawn
-  repeated ChangeSetItem items = 5;
-  string approval_instance_id = 6;
-  string approval_url = 7;
-  string created_by = 8;
-  string decided_by = 9;
-  string decision_comment = 10;
-  repeated Issue issues = 11;  // 对依赖闭包的编译校验结果；存在 error 时不允许提交
-  int64 created_at = 12;
-  int64 updated_at = 13;
+message TrialSqlResp {
+  repeated string columns = 1;  // 不含 key
+  bytes rows_json = 2;          // [{"key": "...", "<列>": "..."}]，最多 20 行
+  bool has_more = 3;
 }
 
-message CreateChangeSetReq {
-  string namespace = 1;
-  string title = 2;
-  repeated ConfigRef items = 3;  // 要加入的草稿
+message PreviewCardReq {
+  bytes body_json = 1;    // 任务类型 JSON（可以是未保存的草稿）
+  string node_id = 2;     // 空 = 第一个节点
+  string key = 3;
+  bytes values_json = 4;  // 一行样例数据：字段名 → 值
 }
 
-message AddDependentUpgradesReq {
-  int64 change_set_id = 1;
-  ConfigRef component = 2;  // 变更集中的共享组件；为其所有引用方的最新版本生成升级草稿并加入
+message PreviewCardResp {
+  Card card = 1;
+  repeated Issue issues = 2;  // 任务类型有问题时卡片可能不完整
 }
 
-message ChangeSetIdReq {
-  int64 id = 1;
+// ============================================================================
+// 团队
+
+message TeamMember {
+  string user_id = 1;
+  string role = 2;  // assigner / executor
 }
 
-message ListChangeSetsReq {
-  string namespace = 1;
-  string state = 2;
-  bool created_by_me = 3;
-  PageReq page = 4;
-}
-message ListChangeSetsResp {
-  repeated ChangeSet items = 1;
-  string next_cursor = 2;
+message Team {
+  string key = 1;
+  string name = 2;
+  string chat_id = 3;  // Lark 群：认领模式的通知发到这里，空则私发给全部成员
+  repeated TeamMember members = 4;
+  string updated_by = 5;
 }
 
-message ItemDiff {
-  ConfigRef ref = 1;
-  int32 base_version = 2;
-  bytes base_json = 3;
-  bytes target_json = 4;
-  int32 target_version = 5;
-}
-message DiffChangeSetResp {
-  repeated ItemDiff items = 1;
+message TeamKeyReq {
+  string key = 1;
 }
 
-message SubmitChangeSetResp {
-  string approval_instance_id = 1;
-  string approval_url = 2;
+message ListTeamsResp {
+  repeated Team items = 1;
 }
 
-// 公司审批平台的回调。gateway 透传原始请求体与请求头，平台按审批平台约定验签后解析。
-message OnApprovalResultReq {
-  bytes raw_body = 1;
-  map<string, string> headers = 2;
-}
-message OnApprovalResultResp {
-  bool accepted = 1;
+// ============================================================================
+// 任务
+
+message KV {
+  string label = 1;
+  string value = 2;
 }
 
-message RetireVersionReq {
-  ConfigRef ref = 1;
-  int32 version = 2;
-  string reason = 3;
+// 渲染后的卡片：工作台、任务详情与 Lark 共用同一份内容，已按字段的 pii 脱敏。
+message Card {
+  string title = 1;
+  string node_name = 2;
+  repeated KV fields = 3;
+  KV link = 4;  // 节点启用 link 时的业务链接：label → url
 }
 
-// ===========================================================================
-// CatalogService：画布与配置表单的数据源
-// ===========================================================================
-
-message NodeType {
-  string type = 1;            // trigger / condition / merge / timer / human_choice / skill_call / llm / ...
-  string category = 2;        // native / action
-  string display_name = 3;
-  string description = 4;
-  string icon = 5;
-  bytes config_schema_json = 6;  // 节点配置的 JSON Schema，前端据此生成表单
-  bytes ui_schema_json = 7;      // 表单布局提示：分组、控件、下拉数据源
-  string port_rule = 8;          // fixed / from_options / from_branches
-  repeated string fixed_ports = 9;
-}
-message ListNodeTypesResp {
-  repeated NodeType items = 1;
+// 调用人在当前节点可以执行的动作
+message ActionOption {
+  string key = 1;                // close / no_response / snooze / escalate / link
+  string label = 2;
+  repeated int64 snooze_ms = 3;  // snooze：可选的推迟时长
+  string url = 4;                // link：渲染后的链接
+  string next_node_name = 5;     // escalate：下一个节点
 }
 
-message ListSkillsReq {
-  string keyword = 1;
-  string category = 2;  // query / reasoning / action
-  PageReq page = 3;
-}
-message Skill {
-  string name = 1;
-  string display_name = 2;
-  string description = 3;
-  string category = 4;
-  bool side_effect = 5;
-  string latest_version = 6;
-}
-message ListSkillsResp {
-  repeated Skill items = 1;
-  string next_cursor = 2;
-}
-
-message GetSkillSchemaReq {
-  string name = 1;
-  string version = 2;  // 空 = 最新
-}
-message GetSkillSchemaResp {
-  bytes input_schema_json = 1;
-  bytes output_schema_json = 2;
-}
-
-// ===========================================================================
-// IngestService：API 来源
-// ===========================================================================
-
-// 标准事件信封；Kafka 来源的消息体与此一致。调用方身份由 gateway 写入 metadata。
-message PushEventReq {
-  string event_type = 1;
-  string subject_type = 2;
-  string subject_id = 3;
-  int64 occurred_at = 4;
-  bytes payload_json = 5;
-  string dedup_key = 6;
-}
-message PushEventResp {
-  bool accepted = 1;
-  bool duplicate = 2;
-}
-
-// ===========================================================================
-// RunService：工作流运行
-// ===========================================================================
-
-message StartRunReq {
-  string task_type_key = 1;
-  int32 task_type_version = 2;  // 0 = 最新已发布版本
-  string biz_key = 3;           // 业务幂等键，如 task:<task_id>
-  bytes trigger_json = 4;
-}
-message StartRunResp {
-  int64 run_id = 1;
-  int32 task_type_version = 2;
-  bool created = 3;  // false = biz_key 已存在，返回已有 run
-}
-
-message SignalReq {
-  int64 run_id = 1;
-  string node_id = 2;
-  int32 iteration = 3;
-  string option = 4;
-  map<string, string> form = 5;  // 人工节点表单的填写值，key 为表单字段 key
-}
-message SignalResp {
-  bool accepted = 1;
-  string reason = 2;  // 被拒绝时的原因，卡片与页面上即时提示
-  // 被拒绝的原因分类，前端据此决定处理方式：
-  //   already_handled：该节点已被处理（如在 Lark 点过），刷新页面
-  //   stale：node_id / iteration 已不是当前等待的节点，刷新页面
-  //   invalid_form：未知选项或必填字段缺失，留在表单中提示
-  //   unsupported：选项暂不可用（如推迟功能未上线）
-  //   forbidden：调用人不是处理人，也不在候选范围内
-  //   not_waiting：流程不在等待状态（已结束或已取消）
-  string code = 3;
-}
-
-message CancelRunReq {
-  int64 run_id = 1;
-  string reason = 2;
-}
-
-message RunIdReq {
-  int64 run_id = 1;
-}
-
-message NodeView {
-  string node_id = 1;
-  int32 iteration = 2;
-  string status = 3;  // pending / ready / running / waiting / succeeded / skipped / failed / cancelled（run 被取消时进行中的节点）
-  string port = 4;
-  int32 attempt = 5;
-  int64 started_at = 6;
-  int64 finished_at = 7;
-  string last_error = 8;  // 最近一次执行失败的错误（之后重试成功的也保留），没有失败过为空
-}
-
-message RunView {
-  int64 run_id = 1;
-  string task_type_key = 2;
-  int32 task_type_version = 3;
-  string status = 4;  // running / succeeded / failed / needs_intervention / cancelled
-  repeated NodeView nodes = 5;
-  bytes graph_json = 6;  // 该版本的 workflow 图，供运行态画布绘制
-  string blocked_node = 7;  // 同 RunSummary
-  string blocked_reason = 8;
-  bytes ui_json = 9;  // 该版本任务类型 JSON 的 ui（含画布坐标 canvas.positions），没有时为空
-}
-
-message ListRunsReq {
-  int64 task_id = 1;
-  string biz_key = 2;
-  string status = 3;
-  PageReq page = 4;
-  string task_type_key = 5;
-  int64 created_after = 6;   // Unix 毫秒，0 = 不限
-  int64 created_before = 7;
-}
-message RunSummary {
-  int64 run_id = 1;
-  string task_type_key = 2;
-  int32 task_type_version = 3;
-  string status = 4;
-  int64 created_at = 5;
-  int64 updated_at = 6;
-  // 需要人工介入（status = needs_intervention）时卡在哪个节点、原因；其余状态为空
-  string blocked_node = 7;
-  string blocked_reason = 8;
-}
-message ListRunsResp {
-  repeated RunSummary items = 1;
-  string next_cursor = 2;
-}
-
-message GetRunEventsReq {
-  int64 run_id = 1;
-  PageReq page = 2;
-}
-message RunEvent {
-  int64 id = 1;
-  string node_id = 2;
-  int32 iteration = 3;
-  string type = 4;
-  bytes payload_json = 5;
-  string actor = 6;
-  int64 created_at = 7;
-}
-message GetRunEventsResp {
-  repeated RunEvent items = 1;
-  string next_cursor = 2;
-}
-
-message AdminNodeReq {
-  int64 run_id = 1;
-  string node_id = 2;
-  string port = 3;  // SkipNode 时指定以哪个端口完成
-  string reason = 4;
-}
-
-// ===========================================================================
-// TaskService：任务处理
-// ===========================================================================
-
-message TaskView {
-  int64 id = 1;
-  string task_type_key = 2;
-  int32 task_type_version = 3;
-  TaskStatus status = 4;
-  TaskPriority priority = 5;
-  string assignee_id = 6;
-  string current_node = 7;
-  string resolution = 8;  // contacted / dismissed / escalated_out / auto_closed
-  string sla_status = 9;  // on_track / at_risk / breached
-  int64 snooze_until = 10;
-  int64 due_at = 11;
-  bytes payload_json = 12;  // 已按调用人脱敏
-  int64 run_id = 13;
-  int64 updated_at = 14;
-  string title = 15;     // 当前显示的卡片（同 TaskDetail.rendered_json）的 title / summary，已按 x-pii 脱敏
-  string subtitle = 16;
-}
-
-// 列表用的轻量摘要，不含 payload。
 message TaskSummary {
   int64 id = 1;
   string task_type_key = 2;
-  string title = 3;
-  string subtitle = 4;
-  TaskStatus status = 5;
-  TaskPriority priority = 6;
-  string assignee_id = 7;
-  string sla_status = 8;
-  int64 snooze_until = 9;
-  int64 due_at = 10;
-  int64 updated_at = 11;
-  string task_type_name = 12;           // 任务类型的显示名称（任务所属版本）
-  // 等待中的人工节点及调用人可选的操作，与 TaskDetail.pending_action 相同；列表卡片据此直接给出操作按钮。
-  // 没有等待中的人工节点时为空。
-  PendingAction pending_action = 13;
-  int64 run_id = 14;                    // 驱动任务的 run，Signal 用；0 = 没有 run
-}
-
-// 人工节点上的一个可选操作，对应 DSL 的 human_choice.options。
-message ActionOption {
-  string key = 1;                         // 即 SignalReq.option
-  string label = 2;
-  string style = 3;                       // primary / default / danger
-  repeated string required_fields = 4;    // 选择该项时必填的表单字段 key
-  int64 snooze_ms = 5;                    // 非 0 = 推迟选项，时长由配置决定，用户不可选
-}
-
-// 人工节点的表单字段，对应 DSL 的 human_choice.form.fields，所有选项共用。
-message FormField {
-  string key = 1;
-  string label = 2;
-  string type = 3;                // text / textarea / select ...
-  repeated string options = 4;    // select 的可选值
-}
-
-// 流程当前在等待的人工节点。没有等待中的人工节点时为空。
-// 同一任务同一时刻至多一个：多人参与时人工节点串联（单人决策）。
-message PendingAction {
-  string node_id = 1;
-  int32 iteration = 2;
-  bool can_signal = 3;            // 调用人可做决定：是处理人，或任务未分配且调用人在候选范围内；false 时只读展示
-  repeated ActionOption options = 4;
-  int64 deadline_at = 5;          // 节点超时时间，0 = 无
-  repeated FormField form_fields = 6;
-}
-
-// 任务详情页上的简化进度，不暴露 attempt、重试等引擎细节。
-message ProgressStep {
-  string node_id = 1;
-  string display_name = 2;
-  string status = 3;  // pending / running / waiting / succeeded / skipped / failed
-}
-
-message TaskDetail {
-  TaskView task = 1;
-  bytes rendered_json = 2;        // 最近一个发卡片的节点实际发出的卡片（不含按钮，按钮见 pending_action）；字段、标签、格式由展示模板决定
-  PendingAction pending_action = 3;
-  repeated ProgressStep progress = 4;
-}
-
-message TaskIdReq {
-  int64 id = 1;
-}
-
-
-message ListMyTasksReq {
-  repeated TaskStatus statuses = 1;
-  string task_type_key = 2;
-  PageReq page = 3;
-  repeated TaskPriority priorities = 4;  // 空 = 全部
-}
-message ListClaimableTasksReq {
-  string task_type_key = 1;
-  repeated TaskPriority priorities = 2;
-  PageReq page = 3;
-}
-message ListMyTasksResp {
-  repeated TaskSummary items = 1;
-  string next_cursor = 2;
-  // 只在第一页（cursor 为空）返回：按 (priority, status) 分组的计数，条件与本次请求相同（不含游标与分页），
-  // 供列表按优先级分区显示准确的总数。只列出计数大于 0 的组合。
-  repeated TaskCount counts = 3;
+  string task_type_name = 3;
+  int32 task_type_version = 4;
+  string biz_key = 5;
+  TaskStatus status = 6;
+  TaskPriority priority = 7;
+  string assignee_id = 8;
+  string team_key = 9;
+  string team_mode = 10;  // claim / assign
+  string node_id = 11;
+  string resolution = 12;
+  int64 snooze_until = 13;
+  int64 created_at = 14;
+  int64 updated_at = 15;
+  Card card = 16;
+  // 调用人可以做的操作（服务端仍会校验）
+  repeated ActionOption actions = 17;
+  bool can_claim = 18;
+  bool can_assign = 19;
+  bool can_start = 20;
 }
 
 message TaskCount {
@@ -925,46 +335,91 @@ message TaskCount {
   int64 count = 3;
 }
 
-message GetTaskEventsReq {
-  int64 id = 1;
-  PageReq page = 2;
-}
-message TaskEvent {
-  int64 id = 1;
-  string type = 2;
-  TaskStatus from_status = 3;
-  TaskStatus to_status = 4;
-  string actor = 5;
-  string reason = 6;
-  bytes detail_json = 7;
-  int64 created_at = 8;
-}
-message GetTaskEventsResp {
-  repeated TaskEvent items = 1;
-  string next_cursor = 2;
+message ListTasksReq {
+  string scope = 1;  // mine（默认）/ queue / involved
+  repeated TaskStatus statuses = 2;
+  repeated TaskPriority priorities = 3;
+  string task_type = 4;
+  PageReq page = 5;
 }
 
-message UpdatePriorityReq {
+message ListTasksResp {
+  repeated TaskSummary items = 1;
+  string next_cursor = 2;
+  repeated TaskCount counts = 3;  // 只在第一页返回，按 (priority, status) 分组，条件与列表相同
+}
+
+message TaskIdReq {
   int64 id = 1;
-  TaskPriority priority = 2;
-  string reason = 3;  // 必填
+}
+
+// 节点链上的一个节点（详情页的流程图）
+message NodeView {
+  string id = 1;
+  string name = 2;
+  string assignee = 3;  // 分配器的文字说明，如「业务关系 vip_rm（用户 UID）」
+  bool current = 4;
+  bool visited = 5;
+  repeated string actions = 6;
+}
+
+message HistoryItem {
+  string kind = 1;  // created / claimed / assigned / started / close / no_response / snooze / escalate / woke / gone / reassigned / priority
+  string actor = 2;
+  string node_id = 3;
+  string node_name = 4;
+  TaskStatus from_status = 5;
+  TaskStatus to_status = 6;
+  bytes detail_json = 7;
+  int64 at = 8;
+}
+
+message TaskDetail {
+  TaskSummary task = 1;
+  repeated KV fields = 2;  // 全部业务字段（已脱敏），按字段顺序
+  repeated NodeView nodes = 3;
+  repeated HistoryItem history = 4;
+  repeated string team_members = 5;  // 分配模式下可选的执行者（调用人是分配者时）
+  bool can_reassign = 6;
+  bool can_update_priority = 7;
+  bool read_only = 8;  // 经手人或团队成员只能查看
+}
+
+message AssignTaskReq {
+  int64 id = 1;
+  string assignee_id = 2;
+}
+
+message ActTaskReq {
+  int64 id = 1;
+  string action = 2;     // close / no_response / snooze / escalate
+  int64 snooze_ms = 3;   // snooze：必须是节点配置的选项之一
+  string note = 4;
+  string expect_node = 5;  // 调用人看到的节点；任务已离开该节点时拒绝，避免误操作
 }
 
 message ReassignReq {
   int64 id = 1;
   string assignee_id = 2;
-  string reason = 3;  // 必填
+  string reason = 3;
 }
 
-// ===========================================================================
-// CallbackService：第三方回调
-// ===========================================================================
-
-// gateway 透传原始请求体与请求头，平台用原始请求体验签。
-message LarkCardCallbackReq {
-  bytes raw_body = 1;
-  map<string, string> headers = 2;
+message UpdatePriorityReq {
+  int64 id = 1;
+  TaskPriority priority = 2;
 }
-message LarkCardCallbackResp {
-  bytes body_json = 1;  // 返回给 Lark 的 toast / 更新后的卡片
+
+// ============================================================================
+// 推送
+
+message PushReq {
+  string task_type = 1;
+  string key = 2;
+  string op = 3;            // upsert / close
+  int64 occurred_at = 4;    // 毫秒；比已应用的消息旧时忽略
+  bytes fields_json = 5;    // upsert：业务字段
+}
+
+message PushResp {
+  bool changed = 1;  // 创建或关闭了任务
 }

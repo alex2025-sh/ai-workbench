@@ -56,7 +56,7 @@ func (fakeTasks) GetTask(ctx context.Context, in *pb.TaskIdReq) (*pb.TaskDetail,
 		return nil, status.Error(codes.NotFound, "task 404 not found")
 	}
 	md, _ := metadata.FromIncomingContext(ctx)
-	return &pb.TaskDetail{Task: &pb.TaskView{Id: in.Id, Title: strings.Join(md.Get(userMetadataKey), ",")}}, nil
+	return &pb.TaskDetail{Task: &pb.TaskSummary{Id: in.Id, AssigneeId: strings.Join(md.Get(userMetadataKey), ",")}}, nil
 }
 
 func newGateway(t *testing.T) http.Handler {
@@ -103,10 +103,10 @@ func TestForwarding(t *testing.T) {
 	}
 	task := out["task"].(map[string]any)
 	// int64 为字符串、字段名为 snake_case、零值字段也输出；身份经 metadata 传给服务端。
-	if task["id"] != "7" || task["title"] != "rm.alice@example.com" {
+	if task["id"] != "7" || task["assignee_id"] != "rm.alice@example.com" {
 		t.Fatalf("task = %v", task)
 	}
-	if _, ok := out["rendered_json"]; !ok {
+	if _, ok := out["team_members"]; !ok {
 		t.Fatalf("snake_case / unpopulated fields missing: %v", out)
 	}
 
@@ -120,7 +120,7 @@ func TestForwarding(t *testing.T) {
 		{http.MethodPost, path, `{"nope":1}`, http.StatusBadRequest, "INVALID_ARGUMENT"},
 		{http.MethodGet, path, ``, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED"},
 		{http.MethodPost, "/byai_platform/api/v1/nope", `{}`, http.StatusNotFound, "NOT_FOUND"},
-		{http.MethodPost, "/byai_platform/api/v1/task/my/list", `{}`, http.StatusNotImplemented, "Unimplemented"},
+		{http.MethodPost, "/byai_platform/api/v1/task/list", `{}`, http.StatusNotImplemented, "Unimplemented"},
 	} {
 		rec, out := call(h, c.method, c.path, "u", c.body)
 		if rec.Code != c.status || out["code"] != c.code {
@@ -134,7 +134,7 @@ func TestForwarding(t *testing.T) {
 }
 
 func TestMockUsers(t *testing.T) {
-	users, err := mockUsers("../../deploy/mock/vip_rm.yaml", "../../deploy/mock/groups.yaml", "../../deploy/mock/permissions.yaml")
+	users, err := mockUsers("../../deploy/mock/vip_rm.yaml", "../../deploy/mock/teams.sql", "../../deploy/mock/permissions.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,10 +145,10 @@ func TestMockUsers(t *testing.T) {
 	if u := got["rm.alice@example.com"]; len(u.Roles) != 1 || u.Roles[0] != "rm" {
 		t.Fatalf("alice = %+v", u)
 	}
-	if u := got["lead@example.com"]; len(u.Groups) != 1 || u.Groups[0] != "vip_cs_leads" {
+	if u := got["lead@example.com"]; len(u.Groups) != 2 || !slices.Contains(u.Groups, "vip_review:assigner") {
 		t.Fatalf("lead = %+v", u)
 	}
-	if u := got["ops@example.com"]; !slices.Contains(u.Permissions, "run.admin") {
+	if u := got["ops@example.com"]; !slices.Contains(u.Permissions, "team.admin") {
 		t.Fatalf("ops = %+v", u)
 	}
 }

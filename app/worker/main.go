@@ -1,5 +1,5 @@
-// Command worker 是引擎进程：注册 xxl-job 执行器，由 wf-ticker 的每次 tick 触发 cron 来源、唤醒到期的定时器与超时。
-// 进程内没有轮询；人工操作与外部状态变化经 gRPC 接口（RunService.Signal / CancelRun）进入，同样就地推进。
+// Command worker 是时钟进程：注册 xxl-job 执行器，wb-ticker 的每次触发执行到期的 SQL 数据源、
+// 唤醒推迟到期的任务、重试失败的 Lark 通知。人工操作经 gRPC 接口进入，不经过这里。
 //
 //	go run ./app/worker -f app/worker/etc/worker.yaml
 package main
@@ -24,7 +24,7 @@ type Config struct {
 	Log    logx.LogConf `json:",optional"`
 	Ticker struct {
 		Mode     string              `json:",default=local,options=local|xxljob"`
-		Interval time.Duration       `json:",default=15s"` // local 模式的触发间隔
+		Interval time.Duration       `json:",default=30s"` // local 模式的触发间隔
 		XxlJob   ticker.XxlJobConfig `json:",optional"`
 	} `json:",optional"`
 }
@@ -52,10 +52,5 @@ func main() {
 		logx.Infof("worker: local ticker every %s", c.Ticker.Interval)
 		ticker.RunLocal(ctx, svc.Ticker, c.Ticker.Interval)
 	}
-	// 退出前等待后台推进结束；超时则取消，被打断的执行放回队列，由其他实例的 tick 接手。
-	sctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	if err := svc.Engine.Close(sctx); err != nil {
-		logx.Errorf("worker: engine close: %v", err)
-	}
+	svc.Notify.Wait() // 等待进行中的通知投递
 }

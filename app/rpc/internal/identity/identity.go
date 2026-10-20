@@ -37,9 +37,9 @@ func Require(ctx context.Context) (string, error) {
 
 // 接口级权限。线上在 BSP 权限平台按接口配置，本地见 deploy/mock/permissions.yaml。
 const (
-	PermTaskAdmin = "task.admin"        // 调整任意任务的优先级、转派
-	PermRunAdmin  = "run.admin"         // 运行干预：取消运行、重试节点、跳过节点
-	PermPublish   = "task_type.publish" // 开发环境直接发布任务类型草稿
+	PermTaskAdmin = "task.admin"        // 查看与转派任意任务、调整优先级
+	PermPublish   = "task_type.publish" // 发布任务类型草稿
+	PermTeamAdmin = "team.admin"        // 维护团队与成员
 )
 
 // Allowed 判断调用人是否有某个接口级权限。

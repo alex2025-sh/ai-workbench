@@ -1,17 +1,18 @@
 # 本地开发配置。平台库与业务 mock 库可以是同一个 MySQL 8.0 / TiDB 实例的不同 database。
 DataSource: root:@tcp(127.0.0.1:3306)/ai_workbench?parseTime=true&loc=UTC&charset=utf8mb4
-BizDataSource: root:@tcp(127.0.0.1:3306)/biz_mock?parseTime=true&loc=UTC&charset=utf8mb4
+# SQL 来源可用的只读连接（线上为只读从库账号）：名字 → DSN
+Datasources:
+  appeal_ro: root:@tcp(127.0.0.1:3306)/biz_mock?charset=utf8mb4
 RelationsFile: deploy/mock/vip_rm.yaml
-Parallelism: 4         # 一次推进（含一次 tick 的每一批）同时执行的 job 数
+WebBase: http://127.0.0.1:5173   # Lark 卡片「在工作台处理」的地址
 
 Log:
   Encoding: plain
 
-# 引擎没有后台轮询：流程由事件（来源、人工操作、外部状态变化）就地推进，
-# ticker 只负责触发 cron 来源和执行到期的定时器、超时、重试。
+# 没有后台轮询：人工操作经 gRPC 就地生效；ticker 只执行到期的 SQL 来源、唤醒推迟到期的任务、重试失败的通知。
 Ticker:
-  Mode: local          # local：进程内定时器（仅本地开发）；xxljob：注册到 xxl-job 调度中心，由 wf-ticker 触发
-  Interval: 15s
+  Mode: local          # local：进程内定时器（仅本地开发）；xxljob：注册到 xxl-job 调度中心，由 wb-ticker 触发
+  Interval: 30s
   XxlJob:
     AdminAddr: http://127.0.0.1:8080/xxl-job-admin
     AppName: ai-workbench

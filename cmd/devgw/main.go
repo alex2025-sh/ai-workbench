@@ -17,6 +17,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"sort"
 	"time"
 
@@ -30,7 +31,7 @@ func main() {
 	target := flag.String("target", "127.0.0.1:9090", "gRPC server address (app/rpc)")
 	protoFile := flag.String("proto", "app/rpc/workbench.proto", "proto file with the HTTP paths")
 	relations := flag.String("relations", "deploy/mock/vip_rm.yaml", "mock relations, for /dev/users")
-	groups := flag.String("groups", "deploy/mock/groups.yaml", "mock groups, for /dev/users")
+	teams := flag.String("teams", "deploy/mock/teams.sql", "mock teams (SQL seed), for /dev/users")
 	permissions := flag.String("permissions", "deploy/mock/permissions.yaml", "mock permissions, for /dev/users")
 	flag.Parse()
 
@@ -42,7 +43,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	users, err := mockUsers(*relations, *groups, *permissions)
+	users, err := mockUsers(*relations, *teams, *permissions)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -60,12 +61,16 @@ func main() {
 type devUser struct {
 	ID          string   `json:"id"`
 	Roles       []string `json:"roles"`       // rm：业务关系表中的处理人
-	Groups      []string `json:"groups"`      // 所属用户组
-	Permissions []string `json:"permissions"` // 接口级权限，如 task.admin、run.admin
+	Groups      []string `json:"groups"`      // 所属团队及角色，如 vip_review:assigner
+	Permissions []string `json:"permissions"` // 接口级权限，如 task.admin
 }
 
-// mockUsers 从 mock 关系表、用户组与权限表中收集人员：关系表中的处理人标为 rm，组成员带上组名，并附上权限。
-func mockUsers(relationsFile, groupsFile, permissionsFile string) ([]devUser, error) {
+// teamMember 匹配 deploy/mock/teams.sql 中 team_member 的一行：('team', 'user', 'role')。
+var teamMember = regexp.MustCompile(`\('([a-z0-9_]+)', '([^']+@[^']+)', '(assigner|executor)'\)`)
+
+// mockUsers 从 mock 关系表、团队种子数据与权限表中收集人员：关系表中的处理人标为 rm，团队成员带上团队与角色，并附上权限。
+// 团队以平台库为准（可在团队页修改），这里只读种子数据，供切换身份时参考。
+func mockUsers(relationsFile, teamsFile, permissionsFile string) ([]devUser, error) {
 	byID := map[string]*devUser{}
 	get := func(id string) *devUser {
 		if byID[id] == nil {
@@ -84,15 +89,13 @@ func mockUsers(relationsFile, groupsFile, permissionsFile string) ([]devUser, er
 			}
 		}
 	}
-	var grp map[string][]string
-	if err := readYAML(groupsFile, &grp); err != nil {
+	seed, err := os.ReadFile(teamsFile)
+	if err != nil {
 		return nil, err
 	}
-	for g, members := range grp {
-		for _, who := range members {
-			u := get(who)
-			u.Groups = append(u.Groups, g)
-		}
+	for _, m := range teamMember.FindAllStringSubmatch(string(seed), -1) {
+		u := get(m[2])
+		u.Groups = append(u.Groups, m[1]+":"+m[3])
 	}
 	var perms map[string][]string
 	if err := readYAML(permissionsFile, &perms); err != nil {
