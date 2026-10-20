@@ -14,8 +14,8 @@ import (
 	"github.com/alex2025-sh/ai-workbench/internal/assign"
 	"github.com/alex2025-sh/ai-workbench/internal/model"
 	"github.com/alex2025-sh/ai-workbench/internal/notify"
-	"github.com/alex2025-sh/ai-workbench/internal/team"
 	"github.com/alex2025-sh/ai-workbench/internal/tasktype"
+	"github.com/alex2025-sh/ai-workbench/internal/team"
 )
 
 // ErrNotFound 表示任务不存在。
@@ -328,4 +328,6 @@ func toRow(t Task) *model.Task {
 	return r
 }
 
-func isDuplicate(err error) bool { return err != nil && strings.Contains(err.Error(), "Duplicate entry") }
+func isDuplicate(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "Duplicate entry")
+}

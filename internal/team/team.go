@@ -41,7 +41,9 @@ type Team struct {
 }
 
 // Assigners 返回分配者。
-func (t *Team) Assigners() []string { return t.users(func(m Member) bool { return m.Role == RoleAssigner }) }
+func (t *Team) Assigners() []string {
+	return t.users(func(m Member) bool { return m.Role == RoleAssigner })
+}
 
 // Executors 返回全部可以执行的人（分配者也是执行者）。
 func (t *Team) Executors() []string { return t.users(func(Member) bool { return true }) }

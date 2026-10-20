@@ -107,8 +107,10 @@ func Build(c Config, now func() time.Time) (*Services, error) {
 // refs 实现 registry.Refs。
 type refs struct{ s *Services }
 
-func (r refs) TeamExists(ctx context.Context, key string) (bool, error) { return r.s.Teams.Exists(ctx, key) }
-func (r refs) DatasourceExists(name string) bool                       { return r.s.Datasources.Exists(name) }
+func (r refs) TeamExists(ctx context.Context, key string) (bool, error) {
+	return r.s.Teams.Exists(ctx, key)
+}
+func (r refs) DatasourceExists(name string) bool { return r.s.Datasources.Exists(name) }
 func (r refs) RelationExists(name string) bool {
 	for _, n := range r.s.Relations.Names() {
 		if n == name {
