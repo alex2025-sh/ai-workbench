@@ -1,5 +1,0 @@
-# 本地开发用的 mock：用户组 → 成员 email，对应分配策略中的 group 解析器与兜底组。
-# 线上来自 BSP 的用户组，实现见 internal/directory 的 Groups。
-vip_cs_leads:
-  - lead@example.com
-  - lead.carol@example.com

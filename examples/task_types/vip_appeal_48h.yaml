@@ -1,0 +1,44 @@
+# VIP 工单已等待 48 小时：提交 48 小时到 7 天仍未审核完成，再次提醒 RM；RM 处理不了时升级给 VIP 客服组长。
+key: vip_appeal_48h
+namespace: cs_vip
+name: VIP 工单已等待 48 小时
+description: VIP 工单提交超过 48 小时仍未审核完成，提醒 RM 跟进，必要时升级给 VIP 客服组长。
+priority: P1
+
+source:
+  kind: sql
+  datasource: appeal_ro
+  schedule: "*/1 * * * *"
+  query: |
+    select concat(appeal_id, ':', commit_time) as `key`,
+           appeal_id, appeal_type, cast(uid as char) as uid, vip_level, order_amount, reviewer, commit_time
+    from appeal
+    where appeal_status = 'COMMITED' and vip_level > 0
+      and commit_time <  unix_timestamp() - 48 * 3600
+      and commit_time >= unix_timestamp() - 7 * 86400
+
+fields:
+  - { name: appeal_id, label: 工单号 }
+  - { name: appeal_type, label: 工单类型 }
+  - { name: uid, label: 用户 UID, pii: mask_middle }
+  - { name: vip_level, label: VIP 等级, type: number }
+  - { name: order_amount, label: 订单金额, type: money }
+  - { name: reviewer, label: 审核人 }
+  - { name: commit_time, label: 提交时间, type: datetime }
+
+card:
+  title: "VIP 工单已等待 48 小时：{appeal_id}"
+  fields: [appeal_type, reviewer, order_amount, commit_time]
+
+nodes:
+  - id: rm
+    name: RM 跟进
+    assignee: { kind: relation, relation: vip_rm, field: uid, fallback_team: vip_cs_leads }
+    actions: [close, snooze, link, escalate]
+    link: { label: 打开工单, url: "https://risk.example.com/appeal/{appeal_id}" }
+    lark: true
+  - id: lead
+    name: VIP 客服组长
+    assignee: { kind: team, team: vip_cs_leads, mode: claim }
+    actions: [close, no_response, snooze]
+    lark: true

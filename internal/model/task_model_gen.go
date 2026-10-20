@@ -27,7 +27,7 @@ type (
 	taskModel interface {
 		Insert(ctx context.Context, data *Task) (sql.Result, error)
 		FindOne(ctx context.Context, id uint64) (*Task, error)
-		FindOneByDedupKey(ctx context.Context, dedupKey string) (*Task, error)
+		FindOneByTaskTypeTrackKey(ctx context.Context, taskType string, trackKey sql.NullString) (*Task, error)
 		Update(ctx context.Context, data *Task) error
 		Delete(ctx context.Context, id uint64) error
 	}
@@ -38,28 +38,25 @@ type (
 	}
 
 	Task struct {
-		Id              uint64       `db:"id"`
-		TaskType        string       `db:"task_type"`
-		TypeVersion     int64        `db:"type_version"` // 绑定 payload schema 版本
-		SubjectType     string       `db:"subject_type"` // vip / ticket / account ...
-		SubjectId       string       `db:"subject_id"`
-		Status          int64        `db:"status"`         // -1 unassigned / 0 pending / 1 processing / 2 snoozed / 3 solved（>=3 终态）
-		Priority        int64        `db:"priority"`       // 0 P0 立即 / 1 P1 今日 / 2 P2 机会 / 3 P3 维护
-		AssigneeId      string       `db:"assignee_id"`    // 当前处理人；空 = 待分配
-		AssigneeGroup   string       `db:"assignee_group"` // 组队列，认领前使用
-		CurrentNode     string       `db:"current_node"`   // 当前所处的人工节点
-		RunId           uint64       `db:"run_id"`         // 驱动该任务的 workflow run
-		Resolution      string       `db:"resolution"`     // contacted / dismissed / escalated_out / auto_closed
-		SlaStatus       string       `db:"sla_status"`     // on_track / at_risk / breached
-		EscalationLevel int64        `db:"escalation_level"`
-		SnoozeUntil     sql.NullTime `db:"snooze_until"` // snoozed 状态的回迁时间
-		DueAt           sql.NullTime `db:"due_at"`
-		DedupKey        string       `db:"dedup_key"` // 如 ticket_id:48h，防止重复建任务
-		Payload         string       `db:"payload"`   // 业务字段，按 task_type@type_version 的 schema 校验
-		Seq             int64        `db:"seq"`       // 引擎同步序号，只接受更大的 seq
-		Version         int64        `db:"version"`   // 乐观锁
-		CreatedAt       time.Time    `db:"created_at"`
-		UpdatedAt       time.Time    `db:"updated_at"`
+		Id          uint64         `db:"id"`
+		TaskType    string         `db:"task_type"`
+		TypeVersion int64          `db:"type_version"` // 创建时的版本，节点链按它走完
+		BizKey      string         `db:"biz_key"`      // 数据源给出的 key
+		TrackKey    sql.NullString `db:"track_key"`    // 跟踪中 = biz_key，否则 NULL；同一类型同一 key 只有一个跟踪中的任务
+		Fields      string         `db:"fields"`       // 业务字段，数据源每次出现时刷新
+		NodeId      string         `db:"node_id"`      // 当前人工节点
+		Status      int64          `db:"status"`       // -1 unassigned / 0 pending / 1 processing / 2 snoozed / 3 solved
+		Priority    int64          `db:"priority"`     // 0 P0 ... 3 P3
+		AssigneeId  string         `db:"assignee_id"`  // 当前处理人；空 = 在团队队列
+		TeamKey     string         `db:"team_key"`     // 当前团队队列
+		TeamMode    string         `db:"team_mode"`    // claim / assign；只在团队队列中有意义
+		SnoozeUntil sql.NullTime   `db:"snooze_until"`
+		Resolution  string         `db:"resolution"` // handled / no_response / auto_closed
+		SourceAt    int64          `db:"source_at"`  // 推送来源的 occurred_at（毫秒），丢弃更旧的消息
+		Version     int64          `db:"version"`    // 每次状态转移加一
+		ClosedAt    sql.NullTime   `db:"closed_at"`
+		CreatedAt   time.Time      `db:"created_at"`
+		UpdatedAt   time.Time      `db:"updated_at"`
 	}
 )
 
@@ -90,10 +87,10 @@ func (m *defaultTaskModel) FindOne(ctx context.Context, id uint64) (*Task, error
 	}
 }
 
-func (m *defaultTaskModel) FindOneByDedupKey(ctx context.Context, dedupKey string) (*Task, error) {
+func (m *defaultTaskModel) FindOneByTaskTypeTrackKey(ctx context.Context, taskType string, trackKey sql.NullString) (*Task, error) {
 	var resp Task
-	query := fmt.Sprintf("select %s from %s where `dedup_key` = ? limit 1", taskRows, m.table)
-	err := m.conn.QueryRowCtx(ctx, &resp, query, dedupKey)
+	query := fmt.Sprintf("select %s from %s where `task_type` = ? and `track_key` = ? limit 1", taskRows, m.table)
+	err := m.conn.QueryRowCtx(ctx, &resp, query, taskType, trackKey)
 	switch err {
 	case nil:
 		return &resp, nil
@@ -105,14 +102,14 @@ func (m *defaultTaskModel) FindOneByDedupKey(ctx context.Context, dedupKey strin
 }
 
 func (m *defaultTaskModel) Insert(ctx context.Context, data *Task) (sql.Result, error) {
-	query := fmt.Sprintf("insert into %s (%s) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", m.table, taskRowsExpectAutoSet)
-	ret, err := m.conn.ExecCtx(ctx, query, data.TaskType, data.TypeVersion, data.SubjectType, data.SubjectId, data.Status, data.Priority, data.AssigneeId, data.AssigneeGroup, data.CurrentNode, data.RunId, data.Resolution, data.SlaStatus, data.EscalationLevel, data.SnoozeUntil, data.DueAt, data.DedupKey, data.Payload, data.Seq, data.Version)
+	query := fmt.Sprintf("insert into %s (%s) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", m.table, taskRowsExpectAutoSet)
+	ret, err := m.conn.ExecCtx(ctx, query, data.TaskType, data.TypeVersion, data.BizKey, data.TrackKey, data.Fields, data.NodeId, data.Status, data.Priority, data.AssigneeId, data.TeamKey, data.TeamMode, data.SnoozeUntil, data.Resolution, data.SourceAt, data.Version, data.ClosedAt)
 	return ret, err
 }
 
 func (m *defaultTaskModel) Update(ctx context.Context, newData *Task) error {
 	query := fmt.Sprintf("update %s set %s where `id` = ?", m.table, taskRowsWithPlaceHolder)
-	_, err := m.conn.ExecCtx(ctx, query, newData.TaskType, newData.TypeVersion, newData.SubjectType, newData.SubjectId, newData.Status, newData.Priority, newData.AssigneeId, newData.AssigneeGroup, newData.CurrentNode, newData.RunId, newData.Resolution, newData.SlaStatus, newData.EscalationLevel, newData.SnoozeUntil, newData.DueAt, newData.DedupKey, newData.Payload, newData.Seq, newData.Version, newData.Id)
+	_, err := m.conn.ExecCtx(ctx, query, newData.TaskType, newData.TypeVersion, newData.BizKey, newData.TrackKey, newData.Fields, newData.NodeId, newData.Status, newData.Priority, newData.AssigneeId, newData.TeamKey, newData.TeamMode, newData.SnoozeUntil, newData.Resolution, newData.SourceAt, newData.Version, newData.ClosedAt, newData.Id)
 	return err
 }
 

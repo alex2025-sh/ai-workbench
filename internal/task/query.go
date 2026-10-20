@@ -6,80 +6,84 @@ import (
 	"time"
 
 	"github.com/alex2025-sh/ai-workbench/internal/model"
-	"github.com/alex2025-sh/ai-workbench/internal/pkg/cursor"
+	"github.com/alex2025-sh/ai-workbench/internal/team"
 )
 
-// ListQuery 是任务列表的查询条件：「我的任务」用 AssigneeID，「可认领」用 Groups。
+// 列表的范围。
+const (
+	ScopeMine     = "mine"     // 我名下的任务
+	ScopeQueue    = "queue"    // 我所在团队的队列：认领模式下待认领、我是分配者的待分配
+	ScopeInvolved = "involved" // 我经手过、现在不在我名下的任务（只读）
+)
+
+// ListQuery 是列表查询条件。
 type ListQuery struct {
-	AssigneeID string
-	Groups     []string // 组队列中尚未分配处理人的任务
+	Scope      string
+	User       string
 	Statuses   []TaskStatus
-	TaskType   string
 	Priorities []TaskPriority
-	Cursor     string // 上一页返回的 next；空 = 第一页
-	PageSize   int
+	TaskType   string
+	After      *model.TaskCursor
+	Limit      int
 }
 
-// Event 是一条任务事件（状态变更、处理人、优先级等）。
-type Event struct {
-	ID        int64
-	Type      string
-	From      *TaskStatus
-	To        *TaskStatus
-	Actor     string
-	Reason    string
-	Detail    json.RawMessage
-	CreatedAt time.Time
-}
-
-// List 按优先级、截止时间（空排最后）、id 排序分页查询任务，返回下一页的游标（空 = 没有更多）。
-func (s *Store) List(ctx context.Context, q ListQuery) ([]Task, string, error) {
-	f := model.TaskFilter{AssigneeID: q.AssigneeID, Groups: q.Groups, TaskType: q.TaskType, Limit: cursor.Size(q.PageSize) + 1}
-	for _, st := range q.Statuses {
-		f.Statuses = append(f.Statuses, int64(st))
-	}
-	for _, p := range q.Priorities {
-		f.Priorities = append(f.Priorities, int64(p))
-	}
-	if q.Cursor != "" {
-		c, err := cursor.Decode(q.Cursor, 3)
-		if err != nil {
-			return nil, "", err
-		}
-		f.After = &model.TaskCursor{Priority: c[0], DueAt: time.UnixMilli(c[1]).UTC(), ID: uint64(c[2])}
-	}
-	rows, err := s.tasks.List(ctx, f)
-	if err != nil {
-		return nil, "", err
-	}
-	var next string
-	if len(rows) == f.Limit {
-		rows = rows[:len(rows)-1]
-		last := rows[len(rows)-1]
-		next = cursor.Encode(last.Priority, model.SortDueAt(last.DueAt).UnixMilli(), int64(last.Id))
-	}
-	out := make([]Task, 0, len(rows))
-	for _, r := range rows {
-		out = append(out, fromRow(r))
-	}
-	return out, next, nil
-}
-
-// Count 是一组 (优先级, 状态) 的任务数。
+// Count 是一组 (priority, status) 的任务数。
 type Count struct {
 	Priority TaskPriority
 	Status   TaskStatus
 	N        int64
 }
 
-// Count 按 (优先级, 状态) 分组计数，条件与 List 相同（忽略游标与分页）。
-func (s *Store) Count(ctx context.Context, q ListQuery) ([]Count, error) {
-	f := model.TaskFilter{AssigneeID: q.AssigneeID, Groups: q.Groups, TaskType: q.TaskType}
-	for _, st := range q.Statuses {
-		f.Statuses = append(f.Statuses, int64(st))
+func (s *Store) filter(ctx context.Context, q ListQuery) (model.TaskFilter, error) {
+	f := model.TaskFilter{TaskType: q.TaskType, After: q.After, Limit: q.Limit}
+	for _, v := range q.Statuses {
+		f.Statuses = append(f.Statuses, int64(v))
 	}
-	for _, p := range q.Priorities {
-		f.Priorities = append(f.Priorities, int64(p))
+	for _, v := range q.Priorities {
+		f.Priorities = append(f.Priorities, int64(v))
+	}
+	switch q.Scope {
+	case ScopeQueue:
+		roles, err := s.Teams.RolesOf(ctx, q.User)
+		if err != nil {
+			return f, err
+		}
+		for key, role := range roles {
+			f.ClaimTeams = append(f.ClaimTeams, key)
+			if role == team.RoleAssigner {
+				f.AssignTeams = append(f.AssignTeams, key)
+			}
+		}
+	case ScopeInvolved:
+		f.Involved = q.User
+	default:
+		f.Assignee = q.User
+	}
+	return f, nil
+}
+
+// List 查询任务列表。
+func (s *Store) List(ctx context.Context, q ListQuery) ([]Task, error) {
+	f, err := s.filter(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.tasks.List(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Task, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, fromRow(r))
+	}
+	return out, nil
+}
+
+// Count 按 (priority, status) 计数，条件与 List 相同。
+func (s *Store) Count(ctx context.Context, q ListQuery) ([]Count, error) {
+	f, err := s.filter(ctx, q)
+	if err != nil {
+		return nil, err
 	}
 	rows, err := s.tasks.Count(ctx, f)
 	if err != nil {
@@ -92,42 +96,54 @@ func (s *Store) Count(ctx context.Context, q ListQuery) ([]Count, error) {
 	return out, nil
 }
 
-// Events 按写入顺序分页返回任务事件。
-func (s *Store) Events(ctx context.Context, taskID int64, after string, size int) ([]Event, string, error) {
-	limit := cursor.Size(size) + 1
-	var from *model.TaskEventCursor
-	if after != "" {
-		c, err := cursor.Decode(after, 2)
-		if err != nil {
-			return nil, "", err
-		}
-		from = &model.TaskEventCursor{CreatedAt: time.UnixMicro(c[0]).UTC(), ID: uint64(c[1])}
-	}
-	rows, err := s.events.ListByTask(ctx, uint64(taskID), from, limit)
+// HistoryItem 是任务历史中的一条。
+type HistoryItem struct {
+	Kind       string
+	Actor      string
+	NodeID     string
+	FromStatus TaskStatus
+	ToStatus   TaskStatus
+	Detail     json.RawMessage
+	At         time.Time
+}
+
+// History 返回任务的全部历史，按发生顺序。
+func (s *Store) History(ctx context.Context, id int64) ([]HistoryItem, error) {
+	rows, err := s.events.ListByTask(ctx, uint64(id))
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	var next string
-	if len(rows) == limit {
-		rows = rows[:len(rows)-1]
-		last := rows[len(rows)-1]
-		next = cursor.Encode(last.CreatedAt.UnixMicro(), int64(last.Id))
-	}
-	out := make([]Event, 0, len(rows))
+	out := make([]HistoryItem, 0, len(rows))
 	for _, r := range rows {
-		e := Event{ID: int64(r.Id), Type: r.Type, Actor: r.Actor, Reason: r.Reason, CreatedAt: r.CreatedAt}
-		if r.FromStatus.Valid {
-			v := TaskStatus(r.FromStatus.Int64)
-			e.From = &v
-		}
-		if r.ToStatus.Valid {
-			v := TaskStatus(r.ToStatus.Int64)
-			e.To = &v
-		}
+		it := HistoryItem{Kind: r.Kind, Actor: r.Actor, NodeID: r.NodeId, FromStatus: TaskStatus(r.FromStatus), ToStatus: TaskStatus(r.ToStatus), At: r.CreatedAt}
 		if r.Detail.Valid {
-			e.Detail = json.RawMessage(r.Detail.String)
+			it.Detail = json.RawMessage(r.Detail.String)
 		}
-		out = append(out, e)
+		out = append(out, it)
 	}
-	return out, next, nil
+	return out, nil
+}
+
+// Access 是调用人对一个任务的权限。
+type Access struct {
+	View bool   // 能看：处理人、经手人、当前团队成员、管理员
+	Role string // 在任务当前团队中的角色
+}
+
+// AccessOf 求调用人对任务的权限。整个流程经手过的人都能看，但只有当前处理人（或队列中能认领的人）能处理。
+func (s *Store) AccessOf(ctx context.Context, t *Task, user string, admin bool) (Access, error) {
+	a := Access{View: admin || (user != "" && t.AssigneeID == user)}
+	if t.TeamKey != "" && user != "" {
+		tm, err := s.Teams.Get(ctx, t.TeamKey)
+		if err == nil {
+			a.Role = tm.Role(user)
+			a.View = a.View || a.Role != ""
+		}
+	}
+	if !a.View && user != "" {
+		if _, err := s.parts.FindOneByTaskIdUserId(ctx, uint64(t.ID), user); err == nil {
+			a.View = true
+		}
+	}
+	return a, nil
 }

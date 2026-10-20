@@ -1,4 +1,4 @@
-// Package task 是任务中心的领域模型：任务状态、优先级、转移规则与服务接口。
+// Package task 是任务中心：任务状态与优先级、状态机（Apply）、存储与查询。
 //
 // 状态与优先级的取值对齐 Morning Brief，设计见 docs/ai-task-platform.md「任务状态」「任务优先级」。
 package task
@@ -11,9 +11,9 @@ import "fmt"
 type TaskStatus int16
 
 const (
-	TaskStatusUnassigned TaskStatus = -1 // 待分配：组队列中待认领，或等待分配服务确定处理人
-	TaskStatusPending    TaskStatus = 0  // 已分配并投递给处理人，等待处理
-	TaskStatusProcessing TaskStatus = 1  // 已接手（点过「开始处理」或外链）
+	TaskStatusUnassigned TaskStatus = -1 // 在团队队列中，等待认领或分配
+	TaskStatusPending    TaskStatus = 0  // 已有处理人，等待处理
+	TaskStatusProcessing TaskStatus = 1  // 处理人点过「开始处理」
 	TaskStatusSnoozed    TaskStatus = 2  // 主动推迟，到期回迁 pending
 	TaskStatusSolved     TaskStatus = 3  // 已完结；>= 此值即终态
 )
@@ -41,8 +41,7 @@ func (s TaskStatus) String() string {
 	}
 }
 
-// TaskPriority 是任务优先级，数值越小越紧急。由业务方在任务类型或订阅中定义，
-// 平台只负责求值、存储，并提供 UpdatePriority 接口调整。
+// TaskPriority 是任务优先级，数值越小越紧急。新任务取任务类型的 priority，处理人或管理员可以调整。
 type TaskPriority int16
 
 const (
@@ -54,22 +53,3 @@ const (
 
 // Valid 报告取值是否为已定义的优先级。
 func (p TaskPriority) Valid() bool { return p >= TaskPriorityP0 && p <= TaskPriorityP3 }
-
-// Resolution 是任务完结时的结果码，与 TaskStatusSolved 搭配使用。
-type Resolution string
-
-const (
-	ResolutionContacted    Resolution = "contacted"
-	ResolutionDismissed    Resolution = "dismissed"
-	ResolutionEscalatedOut Resolution = "escalated_out"
-	ResolutionAutoClosed   Resolution = "auto_closed" // 源工单离开 maker 状态、run 被取消
-)
-
-// SLAStatus 由定时器或扫描更新，不改变主状态。
-type SLAStatus string
-
-const (
-	SLAOnTrack  SLAStatus = "on_track"
-	SLAAtRisk   SLAStatus = "at_risk"
-	SLABreached SLAStatus = "breached"
-)

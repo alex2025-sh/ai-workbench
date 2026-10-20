@@ -1,0 +1,44 @@
+# VIP 工单待审核：VIP 用户的风控工单提交后 48 小时内，提醒专属 RM 跟进。
+#
+# 结果集就是当前待办：工单审核完成（状态不再是 COMMITED）或超过 48 小时（进入下一个任务类型的窗口），
+# 下一轮扫描时任务自动关闭（auto_closed）。三个任务类型的时间窗口互不重叠，同一张工单同一时刻只有一个待办。
+# key 带上提交时间：被驳回后重新提交是一次新的审核，会生成新任务。
+#
+# 数据源目前是 mock（deploy/mock/appeal.sql），「待审核」按 appeal_status = COMMITED、VIP 按 vip_level > 0。
+key: vip_appeal_pending
+namespace: cs_vip
+name: VIP 工单待审核
+description: VIP 用户的风控工单已提交，提醒专属 RM 跟进审核进度。
+priority: P2
+
+source:
+  kind: sql
+  datasource: appeal_ro
+  schedule: "*/1 * * * *"
+  query: |
+    select concat(appeal_id, ':', commit_time) as `key`,
+           appeal_id, appeal_type, cast(uid as char) as uid, vip_level, order_amount, case_group, commit_time
+    from appeal
+    where appeal_status = 'COMMITED' and vip_level > 0
+      and commit_time >= unix_timestamp() - 48 * 3600
+
+fields:
+  - { name: appeal_id, label: 工单号 }
+  - { name: appeal_type, label: 工单类型 }
+  - { name: uid, label: 用户 UID, pii: mask_middle }
+  - { name: vip_level, label: VIP 等级, type: number }
+  - { name: order_amount, label: 订单金额, type: money }
+  - { name: case_group, label: Case 分组 }
+  - { name: commit_time, label: 提交时间, type: datetime }
+
+card:
+  title: "VIP 工单待审核：{appeal_id}"
+  fields: [appeal_type, uid, order_amount, commit_time]
+
+nodes:
+  - id: rm
+    name: RM 跟进
+    assignee: { kind: relation, relation: vip_rm, field: uid, fallback_team: vip_cs_leads }
+    actions: [close, no_response, snooze, link]
+    link: { label: 打开工单, url: "https://risk.example.com/appeal/{appeal_id}" }
+    lark: true

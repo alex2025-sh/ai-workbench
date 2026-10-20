@@ -1,8 +1,8 @@
-# 本地开发用的 mock：VIP 用户 uid → 专属 RM 的 email，对应分配策略中的关系 vip_rm。
-# 线上由 RM-VIP 关系 API 提供（接口待确认），实现见 internal/assign 的 RelationSource。
+# 本地开发用的 mock：VIP 用户 uid → 专属 RM 的 email，对应节点分配器中的关系 vip_rm。
+# 线上由 RM-VIP 关系 API 提供（接口待确认），实现见 internal/assign 的 Relations。
 vip_rm:
   "10000001": rm.alice@example.com
   "10000002": rm.alice@example.com
   "10000003": rm.bob@example.com
   "10000004": rm.bob@example.com
-  # 10000006 没有 RM：分配时走兜底，进入 vip_cs_leads 组队列认领
+  # 10000006 没有 RM：进入节点配置的兜底团队（认领队列）

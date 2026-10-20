@@ -2,7 +2,6 @@ package model
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 	"time"
@@ -20,17 +19,13 @@ type (
 		WithSession(session sqlx.Session) TaskModel
 		// FindOneForUpdate 在事务内锁住任务行。
 		FindOneForUpdate(ctx context.Context, id uint64) (*Task, error)
-		// ApplySync 应用引擎同步：只有 seq 更大时才写入，返回是否生效。
-		ApplySync(ctx context.Context, id uint64, status int64, assignee, group, node, resolution string, snoozeUntil sql.NullTime, seq int64) (bool, error)
-		// SetRun 记录驱动任务的 run（只在尚未设置时写入）。
-		SetRun(ctx context.Context, id, runID uint64) error
-		// CloseUnstarted 关闭尚未启动 run、尚未完结的任务。
-		CloseUnstarted(ctx context.Context, id uint64, status int64, resolution string) error
-		// SetAssignment 改变处理人与状态（认领、开始处理、转派），在锁住任务行的事务内调用。
-		SetAssignment(ctx context.Context, id uint64, status int64, assignee, group string) error
-		// SetPriority 调整优先级，在锁住任务行的事务内调用。
-		SetPriority(ctx context.Context, id uint64, priority int64) error
-		// List 按优先级、截止时间（空排最后）、id 排序分页查询，键集分页。
+		// ListTracked 返回某个任务类型全部跟踪中的任务（数据源对比用）。
+		ListTracked(ctx context.Context, taskType string) ([]*Task, error)
+		// UpdateFields 刷新业务字段与来源时间，不改变状态。
+		UpdateFields(ctx context.Context, id uint64, fields string, sourceAt int64) error
+		// DueSnoozed 返回推迟已到期的任务 id。
+		DueSnoozed(ctx context.Context, now time.Time, limit int) ([]uint64, error)
+		// List 按优先级（P0 在前）、id（新的在前）分页，键集分页。
 		List(ctx context.Context, f TaskFilter) ([]*Task, error)
 		// Count 按 (priority, status) 分组计数，条件与 List 相同（忽略 After 与 Limit）。
 		Count(ctx context.Context, f TaskFilter) ([]TaskCount, error)
@@ -43,21 +38,22 @@ type (
 		N        int64 `db:"n"`
 	}
 
-	// TaskFilter 是任务列表的查询条件。AssigneeID 与 Groups 至少指定一个；同时指定时取并集。
+	// TaskFilter 是任务列表的条件。Assignee、Queue、Involved 三选一。
 	TaskFilter struct {
-		AssigneeID string
-		Groups     []string // 组队列中尚未分配处理人的任务
-		Statuses   []int64  // 空 = 不限
-		TaskType   string
-		Priorities []int64
-		After      *TaskCursor
-		Limit      int
+		Assignee    string   // 我的任务
+		ClaimTeams  []string // 团队队列：这些团队中认领模式的任务
+		AssignTeams []string // 团队队列：这些团队中分配模式的任务（调用人是分配者）
+		Involved    string   // 我经手的：参与过、但现在不在我名下的任务
+		Statuses    []int64
+		Priorities  []int64
+		TaskType    string
+		After       *TaskCursor
+		Limit       int
 	}
 
 	// TaskCursor 是上一页最后一行的排序键。
 	TaskCursor struct {
 		Priority int64
-		DueAt    time.Time // 空截止时间按 noDueAt 参与排序
 		ID       uint64
 	}
 
@@ -78,44 +74,29 @@ func (m *customTaskModel) WithSession(session sqlx.Session) TaskModel {
 }
 
 func (m *customTaskModel) FindOneForUpdate(ctx context.Context, id uint64) (*Task, error) {
-	query := fmt.Sprintf("select %s from %s where `id` = ? limit 1 for update", taskRows, m.table)
-	var resp Task
-	switch err := m.conn.QueryRowCtx(ctx, &resp, query, id); err {
-	case nil:
-		return &resp, nil
-	case sqlx.ErrNotFound:
+	var out Task
+	err := m.conn.QueryRowCtx(ctx, &out, fmt.Sprintf("select %s from %s where `id` = ? for update", taskRows, m.table), id)
+	if err == sqlx.ErrNotFound {
 		return nil, ErrNotFound
-	default:
-		return nil, err
 	}
+	return &out, err
 }
 
-func (m *customTaskModel) ApplySync(ctx context.Context, id uint64, status int64, assignee, group, node, resolution string, snoozeUntil sql.NullTime, seq int64) (bool, error) {
-	query := fmt.Sprintf("update %s set `status` = ?, `assignee_id` = ?, `assignee_group` = ?, `current_node` = ?, `resolution` = ?, `snooze_until` = ?, `seq` = ?, `version` = `version` + 1 where `id` = ? and `seq` < ?", m.table)
-	return affected(m.conn.ExecCtx(ctx, query, status, assignee, group, node, resolution, snoozeUntil, seq, id, seq))
+func (m *customTaskModel) ListTracked(ctx context.Context, taskType string) ([]*Task, error) {
+	var out []*Task
+	q := fmt.Sprintf("select %s from %s where `task_type` = ? and `track_key` is not null", taskRows, m.table)
+	return out, m.conn.QueryRowsCtx(ctx, &out, q, taskType)
 }
 
-func (m *customTaskModel) CloseUnstarted(ctx context.Context, id uint64, status int64, resolution string) error {
-	query := fmt.Sprintf("update %s set `status` = ?, `resolution` = ?, `version` = `version` + 1 where `id` = ? and `run_id` = 0 and `status` < ?", m.table)
-	_, err := m.conn.ExecCtx(ctx, query, status, resolution, id, status)
+func (m *customTaskModel) UpdateFields(ctx context.Context, id uint64, fields string, sourceAt int64) error {
+	_, err := m.conn.ExecCtx(ctx, fmt.Sprintf("update %s set `fields` = ?, `source_at` = greatest(`source_at`, ?) where `id` = ?", m.table), fields, sourceAt, id)
 	return err
 }
 
-func (m *customTaskModel) SetRun(ctx context.Context, id, runID uint64) error {
-	query := fmt.Sprintf("update %s set `run_id` = ? where `id` = ? and `run_id` = 0", m.table)
-	_, err := m.conn.ExecCtx(ctx, query, runID, id)
-	return err
-}
-
-// noDueAt 是空截止时间的排序值：没有截止时间的任务排在同优先级的最后。
-var noDueAt = time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC)
-
-// SortDueAt 返回截止时间的排序值，构造 TaskCursor 时使用。
-func SortDueAt(t sql.NullTime) time.Time {
-	if t.Valid {
-		return t.Time
-	}
-	return noDueAt
+func (m *customTaskModel) DueSnoozed(ctx context.Context, now time.Time, limit int) ([]uint64, error) {
+	var out []uint64
+	q := fmt.Sprintf("select `id` from %s where `status` = 2 and `snooze_until` <= ? order by `snooze_until` limit ?", m.table)
+	return out, m.conn.QueryRowsCtx(ctx, &out, q, now, limit)
 }
 
 func (m *customTaskModel) List(ctx context.Context, f TaskFilter) ([]*Task, error) {
@@ -123,17 +104,13 @@ func (m *customTaskModel) List(ctx context.Context, f TaskFilter) ([]*Task, erro
 	if where == nil {
 		return nil, nil
 	}
-	const dueKey = "coalesce(`due_at`, ?)"
 	if f.After != nil {
-		where = append(where, "(`priority`, "+dueKey+", `id`) > (?, ?, ?)")
-		args = append(args, noDueAt, f.After.Priority, f.After.DueAt, f.After.ID)
+		where = append(where, "(`priority` > ? or (`priority` = ? and `id` < ?))")
+		args = append(args, f.After.Priority, f.After.Priority, f.After.ID)
 	}
-	query := fmt.Sprintf("select %s from %s where %s order by `priority`, %s, `id` limit ?",
-		taskRows, m.table, strings.Join(where, " and "), dueKey)
-	args = append(args, noDueAt, f.Limit)
+	q := fmt.Sprintf("select %s from %s where %s order by `priority`, `id` desc limit ?", taskRows, m.table, strings.Join(where, " and "))
 	var out []*Task
-	err := m.conn.QueryRowsCtx(ctx, &out, query, args...)
-	return out, err
+	return out, m.conn.QueryRowsCtx(ctx, &out, q, append(args, f.Limit)...)
 }
 
 func (m *customTaskModel) Count(ctx context.Context, f TaskFilter) ([]TaskCount, error) {
@@ -141,40 +118,41 @@ func (m *customTaskModel) Count(ctx context.Context, f TaskFilter) ([]TaskCount,
 	if where == nil {
 		return nil, nil
 	}
-	query := fmt.Sprintf("select `priority`, `status`, count(*) as `n` from %s where %s group by `priority`, `status` order by `priority`, `status`",
+	q := fmt.Sprintf("select `priority`, `status`, count(*) as `n` from %s where %s group by `priority`, `status` order by `priority`, `status`",
 		m.table, strings.Join(where, " and "))
 	var out []TaskCount
-	err := m.conn.QueryRowsCtx(ctx, &out, query, args...)
-	return out, err
+	return out, m.conn.QueryRowsCtx(ctx, &out, q, args...)
 }
 
-// where 返回 List 与 Count 共用的条件；没有指定处理人或组时返回 nil（查询结果为空）。
+// where 返回 List 与 Count 共用的条件；没有指定「谁」时返回 nil（结果为空）。
 func (f TaskFilter) where() ([]string, []any) {
-	var who []string
+	var where []string
 	var args []any
-	if f.AssigneeID != "" {
-		who = append(who, "`assignee_id` = ?")
-		args = append(args, f.AssigneeID)
-	}
-	if len(f.Groups) > 0 {
-		who = append(who, "(`assignee_id` = '' and `assignee_group` in ("+placeholders(len(f.Groups))+"))")
-		for _, g := range f.Groups {
-			args = append(args, g)
+	switch {
+	case f.Assignee != "":
+		where, args = append(where, "`assignee_id` = ?"), append(args, f.Assignee)
+	case len(f.ClaimTeams) > 0 || len(f.AssignTeams) > 0:
+		var or []string
+		if len(f.ClaimTeams) > 0 {
+			or = append(or, "(`team_mode` = 'claim' and `team_key` in ("+placeholders(len(f.ClaimTeams))+"))")
+			args = appendStrings(args, f.ClaimTeams)
 		}
-	}
-	if len(who) == 0 {
+		if len(f.AssignTeams) > 0 {
+			or = append(or, "(`team_mode` = 'assign' and `team_key` in ("+placeholders(len(f.AssignTeams))+"))")
+			args = appendStrings(args, f.AssignTeams)
+		}
+		where = append(where, "`status` = -1", "("+strings.Join(or, " or ")+")")
+	case f.Involved != "":
+		where = append(where, "`id` in (select `task_id` from `task_participant` where `user_id` = ?)", "`assignee_id` <> ?")
+		args = append(args, f.Involved, f.Involved)
+	default:
 		return nil, nil
 	}
-	where := []string{"(" + strings.Join(who, " or ") + ")"}
 	if len(f.Statuses) > 0 {
 		where = append(where, "`status` in ("+placeholders(len(f.Statuses))+")")
 		for _, v := range f.Statuses {
 			args = append(args, v)
 		}
-	}
-	if f.TaskType != "" {
-		where = append(where, "`task_type` = ?")
-		args = append(args, f.TaskType)
 	}
 	if len(f.Priorities) > 0 {
 		where = append(where, "`priority` in ("+placeholders(len(f.Priorities))+")")
@@ -182,21 +160,17 @@ func (f TaskFilter) where() ([]string, []any) {
 			args = append(args, v)
 		}
 	}
+	if f.TaskType != "" {
+		where, args = append(where, "`task_type` = ?"), append(args, f.TaskType)
+	}
 	return where, args
 }
 
-func placeholders(n int) string {
-	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
-}
+func placeholders(n int) string { return strings.TrimSuffix(strings.Repeat("?,", n), ",") }
 
-func (m *customTaskModel) SetAssignment(ctx context.Context, id uint64, status int64, assignee, group string) error {
-	query := fmt.Sprintf("update %s set `status` = ?, `assignee_id` = ?, `assignee_group` = ?, `version` = `version` + 1 where `id` = ?", m.table)
-	_, err := m.conn.ExecCtx(ctx, query, status, assignee, group, id)
-	return err
-}
-
-func (m *customTaskModel) SetPriority(ctx context.Context, id uint64, priority int64) error {
-	query := fmt.Sprintf("update %s set `priority` = ?, `version` = `version` + 1 where `id` = ?", m.table)
-	_, err := m.conn.ExecCtx(ctx, query, priority, id)
-	return err
+func appendStrings(args []any, vs []string) []any {
+	for _, v := range vs {
+		args = append(args, v)
+	}
+	return args
 }

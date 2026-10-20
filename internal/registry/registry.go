@@ -1,104 +1,389 @@
-// Package registry 是配置中心：组件的草稿、变更集、审批与发布。
+// Package registry 是任务类型的配置中心：草稿、校验、直接发布与已发布版本。
 //
-// 版本模型（见 docs/ai-task-platform.md「版本管理」）：
-//   - 任务类型是发布单元。schema、来源、workflow 与专属展示模板是它的自有组件，
-//     内嵌在任务类型的版本里，随任务类型一起升版本。
-//   - 共享组件（展示模板、分配策略、跨部门协议、prompt）独立版本化，被任务类型以 key@version 固定引用，
-//     不支持“跟随最新”。
-//   - 每个已发布的任务类型版本都有一份发布清单（manifest），记录解析后的全部依赖与内容哈希，
-//     运行时只按清单取配置。
-//
-// 发布流程：草稿（每个组件一份，revision 乐观锁）→ 变更集（编译依赖闭包）→ 公司审批平台 →
-// 审批通过后重新编译并原子发布。已发布版本不可修改；AI 只能写草稿。
+// 一期没有变更集与审批：有 task_type.publish 权限的人直接发布（审批平台接入放二期）。
+// 发布后版本不可变；在途任务按创建时的版本走完节点链，数据源扫描与字段刷新用最新版本。
 package registry
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/zeromicro/go-zero/core/stores/sqlx"
+
+	"github.com/alex2025-sh/ai-workbench/internal/model"
+	"github.com/alex2025-sh/ai-workbench/internal/tasktype"
 )
 
-// Kind 是可独立版本化的组件类型。
-type Kind string
-
-const (
-	KindTaskType   Kind = "task_type"  // 发布单元，内嵌 schema、来源、workflow 与专属模板
-	KindView       Kind = "view"       // 共享展示模板
-	KindAssignment Kind = "assignment" // 共享分配策略
-	KindAgreement  Kind = "agreement"  // 跨部门协议，由对方部门维护
-	KindPrompt     Kind = "prompt"     // 共享 prompt（如 AI 摘要）
+// 错误。
+var (
+	ErrNotFound     = errors.New("registry: task type not found")
+	ErrExists       = errors.New("registry: task type already exists")
+	ErrConflict     = errors.New("registry: draft was changed by someone else")
+	ErrNoDraft      = errors.New("registry: no draft")
+	ErrUnpublished  = errors.New("registry: task type has no published version")
+	ErrInvalidDraft = errors.New("registry: draft has issues")
 )
 
-// VersionState 是已提交版本的生命周期。
-type VersionState string
-
-const (
-	VersionPublished VersionState = "published"
-	VersionRetired   VersionState = "retired"
-)
-
-// ChangeSetState 是变更集的状态。
-type ChangeSetState string
-
-const (
-	ChangeSetOpen      ChangeSetState = "open"
-	ChangeSetSubmitted ChangeSetState = "submitted" // 已提交审批，草稿被快照并锁定
-	ChangeSetPublished ChangeSetState = "published"
-	ChangeSetRejected  ChangeSetState = "rejected"
-	ChangeSetWithdrawn ChangeSetState = "withdrawn"
-)
-
-// Ref 指向某个组件的某个版本，如 view:vip_ticket_card@3。
-type Ref struct {
-	Kind    Kind
-	Key     string
-	Version int
+// Refs 检查任务类型引用的外部对象是否存在（团队、数据源连接、业务关系）。
+type Refs interface {
+	TeamExists(ctx context.Context, key string) (bool, error)
+	DatasourceExists(name string) bool
+	RelationExists(name string) bool
 }
 
-// Draft 是组件的草稿。每个组件最多一份，保存时校验 Revision。
-type Draft struct {
-	Kind        Kind
+// Summary 是任务类型列表中的一行。
+type Summary struct {
+	Key           string
+	Namespace     string
+	Name          string
+	LatestVersion int
+	HasDraft      bool
+	UpdatedAt     time.Time
+}
+
+// Version 是一个已发布版本。
+type Version struct {
 	Key         string
-	BaseVersion int // 草稿基于的已发布版本，0 表示新组件
+	Version     int
 	Body        json.RawMessage
-	Revision    int64
-	ChangeSetID int64 // 非 0 表示已被提交中的变更集锁定
-}
-
-// ManifestItem 是发布清单的一行：任务类型版本解析后的一个依赖。
-type ManifestItem struct {
-	ItemKind    string // 如 workflow、view、assignment、agreement、prompt
-	ItemKey     string
-	Ref         Ref
 	ContentHash string
+	PublishedBy string
+	PublishedAt time.Time
 }
 
-// Issue 是编译或校验发现的问题。
-type Issue struct {
-	Path     string
-	Code     string
-	Message  string
-	Severity string // error 阻止提交，warning 只提示
+// Draft 是草稿。
+type Draft struct {
+	Key         string
+	BaseVersion int // 0 = 尚未发布过
+	Revision    int64
+	Body        json.RawMessage
+	UpdatedBy   string
 }
 
-// Registry 管理草稿、变更集与发布。调用者身份从请求上下文获取，不作为参数传入。
-type Registry interface {
-	GetDraft(ctx context.Context, kind Kind, key string) (*Draft, error)
-	// SaveDraft 在 revision 不匹配时返回冲突错误。
-	SaveDraft(ctx context.Context, kind Kind, key string, body json.RawMessage, revision int64) (*Draft, error)
-	DiscardDraft(ctx context.Context, kind Kind, key string) error
+// Registry 读写任务类型。
+type Registry struct {
+	conn     sqlx.SqlConn
+	types    model.TaskTypeModel
+	versions model.TaskTypeVersionModel
+	sources  model.SourceStateModel
+	Refs     Refs
 
-	// CreateChangeSet 把一组草稿纳入变更集，并编译其依赖闭包。
-	CreateChangeSet(ctx context.Context, namespace, title string, drafts []Ref) (changeSetID int64, issues []Issue, err error)
-	// AddDependentUpgrades 把引用了变更中共享组件的任务类型一并升级到新版本引用。
-	AddDependentUpgrades(ctx context.Context, changeSetID int64, taskTypeKeys []string) ([]Issue, error)
-	// Submit 快照草稿并发起公司审批平台的审批实例。
-	Submit(ctx context.Context, changeSetID int64) (approvalInstanceID string, err error)
-	Withdraw(ctx context.Context, changeSetID int64) error
-	// OnApproval 处理审批结果：通过则重新编译并原子发布，驳回则解锁草稿。重复回调必须幂等。
-	OnApproval(ctx context.Context, approvalInstanceID string, approved bool, approver string) error
+	mu    sync.RWMutex
+	cache map[string]*tasktype.TaskType // key@version → 解析后的定义（版本不可变，可以永久缓存）
+}
 
-	Manifest(ctx context.Context, taskTypeKey string, version int) ([]ManifestItem, error)
-	// Dependents 返回引用了某个共享组件版本的任务类型版本。
-	Dependents(ctx context.Context, ref Ref) ([]Ref, error)
-	Retire(ctx context.Context, ref Ref) error
+// New 创建 Registry。
+func New(conn sqlx.SqlConn, refs Refs) *Registry {
+	return &Registry{conn: conn, types: model.NewTaskTypeModel(conn), versions: model.NewTaskTypeVersionModel(conn),
+		sources: model.NewSourceStateModel(conn), Refs: refs, cache: map[string]*tasktype.TaskType{}}
+}
+
+// Load 返回某个已发布版本的定义。
+func (r *Registry) Load(ctx context.Context, key string, version int) (*tasktype.TaskType, error) {
+	ck := fmt.Sprintf("%s@%d", key, version)
+	r.mu.RLock()
+	t := r.cache[ck]
+	r.mu.RUnlock()
+	if t != nil {
+		return t, nil
+	}
+	row, err := r.versions.FindOneByTypeKeyVersion(ctx, key, int64(version))
+	if errors.Is(err, model.ErrNotFound) {
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, ck)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if t, err = tasktype.Parse([]byte(row.Body)); err != nil {
+		return nil, fmt.Errorf("registry: %s: %w", ck, err)
+	}
+	r.mu.Lock()
+	r.cache[ck] = t
+	r.mu.Unlock()
+	return t, nil
+}
+
+// Latest 返回最新发布版本的定义与版本号。
+func (r *Registry) Latest(ctx context.Context, key string) (*tasktype.TaskType, int, error) {
+	row, err := r.types.FindOneByTypeKey(ctx, key)
+	if errors.Is(err, model.ErrNotFound) {
+		return nil, 0, fmt.Errorf("%w: %s", ErrNotFound, key)
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	if row.LatestVersion == 0 {
+		return nil, 0, fmt.Errorf("%w: %s", ErrUnpublished, key)
+	}
+	t, err := r.Load(ctx, key, int(row.LatestVersion))
+	return t, int(row.LatestVersion), err
+}
+
+// List 返回任务类型列表。
+func (r *Registry) List(ctx context.Context, keyword, namespace string) ([]Summary, error) {
+	rows, err := r.types.List(ctx, keyword, namespace)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Summary, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, Summary{Key: row.TypeKey, Namespace: row.Namespace, Name: row.Name, LatestVersion: int(row.LatestVersion),
+			HasDraft: row.Draft.Valid, UpdatedAt: row.UpdatedAt})
+	}
+	return out, nil
+}
+
+// Get 返回任务类型的摘要。
+func (r *Registry) Get(ctx context.Context, key string) (*Summary, error) {
+	row, err := r.types.FindOneByTypeKey(ctx, key)
+	if errors.Is(err, model.ErrNotFound) {
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, key)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &Summary{Key: row.TypeKey, Namespace: row.Namespace, Name: row.Name, LatestVersion: int(row.LatestVersion),
+		HasDraft: row.Draft.Valid, UpdatedAt: row.UpdatedAt}, nil
+}
+
+// Version 返回某个已发布版本；version 为 0 时返回最新版本。
+func (r *Registry) Version(ctx context.Context, key string, version int) (*Version, error) {
+	if version == 0 {
+		s, err := r.Get(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		if s.LatestVersion == 0 {
+			return nil, fmt.Errorf("%w: %s", ErrUnpublished, key)
+		}
+		version = s.LatestVersion
+	}
+	row, err := r.versions.FindOneByTypeKeyVersion(ctx, key, int64(version))
+	if errors.Is(err, model.ErrNotFound) {
+		return nil, fmt.Errorf("%w: %s@%d", ErrNotFound, key, version)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return toVersion(row), nil
+}
+
+// Versions 返回全部已发布版本，新版本在前。
+func (r *Registry) Versions(ctx context.Context, key string) ([]Version, error) {
+	rows, err := r.versions.ListByKey(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Version, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, *toVersion(row))
+	}
+	return out, nil
+}
+
+func toVersion(row *model.TaskTypeVersion) *Version {
+	return &Version{Key: row.TypeKey, Version: int(row.Version), Body: json.RawMessage(row.Body), ContentHash: row.ContentHash,
+		PublishedBy: row.PublishedBy, PublishedAt: row.PublishedAt}
+}
+
+// Published 返回全部已发布任务类型的最新定义（数据源调度用）。
+func (r *Registry) Published(ctx context.Context) (map[string]*tasktype.TaskType, error) {
+	rows, err := r.types.List(ctx, "", "")
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]*tasktype.TaskType{}
+	for _, row := range rows {
+		if row.LatestVersion == 0 {
+			continue
+		}
+		t, err := r.Load(ctx, row.TypeKey, int(row.LatestVersion))
+		if err != nil {
+			return nil, err
+		}
+		out[row.TypeKey] = t
+	}
+	return out, nil
+}
+
+// Create 新建任务类型，生成一份最小草稿：SQL 来源、一个字段、一个节点。
+func (r *Registry) Create(ctx context.Context, key, namespace, name, description, actor string) (*Draft, error) {
+	body := tasktype.TaskType{
+		Key: key, Namespace: namespace, Name: name, Description: description, Priority: "P2",
+		Source: tasktype.Source{Kind: tasktype.SourceSQL, Schedule: "*/5 * * * *",
+			Query: "select id as `key`, title from your_table where status = 'pending'"},
+		Fields: []tasktype.Field{{Name: "title", Label: "标题"}},
+		Card:   tasktype.Card{Title: name + "：{title}", Fields: []string{"title"}},
+		Nodes: []tasktype.Node{{ID: "handle", Name: "处理", Actions: []string{tasktype.ActionClose, tasktype.ActionSnooze},
+			Assignee: tasktype.Assignee{Kind: tasktype.AssigneeTeam, Mode: tasktype.ModeClaim}, Lark: true}},
+	}
+	raw, _ := json.Marshal(body)
+	_, err := r.types.Insert(ctx, &model.TaskType{TypeKey: key, Namespace: namespace, Name: name, CreatedBy: actor,
+		Draft: nullString(string(raw)), DraftUpdatedBy: actor})
+	if err != nil {
+		if isDuplicate(err) {
+			return nil, fmt.Errorf("%w: %s", ErrExists, key)
+		}
+		return nil, err
+	}
+	return r.GetDraft(ctx, key, actor)
+}
+
+// GetDraft 返回草稿；没有草稿时基于最新发布版本创建一份。
+func (r *Registry) GetDraft(ctx context.Context, key, actor string) (*Draft, error) {
+	row, err := r.types.FindOneByTypeKey(ctx, key)
+	if errors.Is(err, model.ErrNotFound) {
+		return nil, fmt.Errorf("%w: %s", ErrNotFound, key)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !row.Draft.Valid {
+		v, err := r.Version(ctx, key, int(row.LatestVersion))
+		if err != nil {
+			return nil, err
+		}
+		if _, err := r.types.SaveDraft(ctx, key, row.DraftRevision, string(v.Body), actor); err != nil {
+			return nil, err
+		}
+		if row, err = r.types.FindOneByTypeKey(ctx, key); err != nil {
+			return nil, err
+		}
+	}
+	return &Draft{Key: key, BaseVersion: int(row.LatestVersion), Revision: row.DraftRevision, Body: json.RawMessage(row.Draft.String),
+		UpdatedBy: row.DraftUpdatedBy}, nil
+}
+
+// SaveDraft 保存草稿（乐观锁），返回新 revision 与校验问题。key 不能修改。
+func (r *Registry) SaveDraft(ctx context.Context, key string, revision int64, body json.RawMessage, actor string) (int64, []tasktype.Issue, error) {
+	var probe struct {
+		Key string `json:"key"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return 0, nil, fmt.Errorf("registry: body is not JSON: %w", err)
+	}
+	if probe.Key != key {
+		return 0, nil, fmt.Errorf("registry: key cannot be changed (%q → %q)", key, probe.Key)
+	}
+	ok, err := r.types.SaveDraft(ctx, key, revision, string(body), actor)
+	if err != nil {
+		return 0, nil, err
+	}
+	if !ok {
+		return 0, nil, ErrConflict
+	}
+	_, issues := r.Validate(ctx, body)
+	return revision + 1, issues, nil
+}
+
+// DiscardDraft 丢弃草稿。尚未发布过的任务类型连同记录一起删除。
+func (r *Registry) DiscardDraft(ctx context.Context, key string) error {
+	row, err := r.types.FindOneByTypeKey(ctx, key)
+	if errors.Is(err, model.ErrNotFound) {
+		return fmt.Errorf("%w: %s", ErrNotFound, key)
+	}
+	if err != nil {
+		return err
+	}
+	if row.LatestVersion == 0 {
+		return r.types.Delete(ctx, row.Id)
+	}
+	return r.types.ClearDraft(ctx, key)
+}
+
+// Validate 完整校验：结构、语义与外部引用（团队、数据源连接、业务关系）。
+func (r *Registry) Validate(ctx context.Context, body json.RawMessage) (*tasktype.TaskType, []tasktype.Issue) {
+	t, issues := tasktype.Validate(body)
+	if t == nil || r.Refs == nil {
+		return t, issues
+	}
+	if t.Source.Kind == tasktype.SourceSQL && !r.Refs.DatasourceExists(t.Source.Datasource) {
+		issues = append(issues, tasktype.Issue{Path: "source.datasource", Message: fmt.Sprintf("数据源连接 %s 不存在", t.Source.Datasource)})
+	}
+	for i, n := range t.Nodes {
+		team, path := n.Assignee.Team, fmt.Sprintf("nodes.%d.assignee.team", i)
+		if n.Assignee.Kind == tasktype.AssigneeRelation {
+			team, path = n.Assignee.FallbackTeam, fmt.Sprintf("nodes.%d.assignee.fallback_team", i)
+			if !r.Refs.RelationExists(n.Assignee.Relation) {
+				issues = append(issues, tasktype.Issue{Path: fmt.Sprintf("nodes.%d.assignee.relation", i), Message: fmt.Sprintf("业务关系 %s 不存在", n.Assignee.Relation)})
+			}
+		}
+		if ok, err := r.Refs.TeamExists(ctx, team); err != nil || !ok {
+			issues = append(issues, tasktype.Issue{Path: path, Message: fmt.Sprintf("团队 %s 不存在", team)})
+		}
+	}
+	return t, issues
+}
+
+// Publish 校验草稿并发布为新版本，删除草稿。SQL 来源在发布后立即参与调度。
+func (r *Registry) Publish(ctx context.Context, key, actor string, now time.Time) (*Version, []tasktype.Issue, error) {
+	d, err := r.GetDraft(ctx, key, actor)
+	if err != nil {
+		return nil, nil, err
+	}
+	t, issues := r.Validate(ctx, d.Body)
+	if len(issues) > 0 {
+		return nil, issues, ErrInvalidDraft
+	}
+	v, err := r.publish(ctx, t, d.Body, actor, now)
+	return v, nil, err
+}
+
+// PublishBody 直接发布一份任务类型 JSON（命令行与测试用，任务类型不存在时创建）。
+func (r *Registry) PublishBody(ctx context.Context, body json.RawMessage, actor string, now time.Time) (*Version, []tasktype.Issue, error) {
+	t, issues := r.Validate(ctx, body)
+	if len(issues) > 0 {
+		return nil, issues, ErrInvalidDraft
+	}
+	if _, err := r.types.FindOneByTypeKey(ctx, t.Key); errors.Is(err, model.ErrNotFound) {
+		if _, err := r.types.Insert(ctx, &model.TaskType{TypeKey: t.Key, Namespace: t.Namespace, Name: t.Name, CreatedBy: actor}); err != nil && !isDuplicate(err) {
+			return nil, nil, err
+		}
+	} else if err != nil {
+		return nil, nil, err
+	}
+	v, err := r.publish(ctx, t, body, actor, now)
+	return v, nil, err
+}
+
+func (r *Registry) publish(ctx context.Context, t *tasktype.TaskType, body json.RawMessage, actor string, now time.Time) (*Version, error) {
+	canonical, err := json.Marshal(t) // 去掉未知格式差异，内容哈希只看语义
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(canonical)
+	var out *Version
+	err = r.conn.TransactCtx(ctx, func(ctx context.Context, session sqlx.Session) error {
+		types, versions := r.types.WithSession(session), r.versions.WithSession(session)
+		row, err := types.FindOneForUpdate(ctx, t.Key)
+		if err != nil {
+			return err
+		}
+		next := row.LatestVersion + 1
+		v := &model.TaskTypeVersion{TypeKey: t.Key, Version: next, Body: string(canonical), ContentHash: hex.EncodeToString(sum[:]),
+			PublishedBy: actor, PublishedAt: now}
+		if _, err := versions.Insert(ctx, v); err != nil {
+			return err
+		}
+		if err := types.SetPublished(ctx, t.Key, next, t.Name, t.Namespace); err != nil {
+			return err
+		}
+		out = toVersion(v)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if t.Source.Kind == tasktype.SourceSQL {
+		if err := r.sources.Ensure(ctx, t.Key, now); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }

@@ -39,11 +39,11 @@ type (
 	TaskEvent struct {
 		Id         uint64         `db:"id"`
 		TaskId     uint64         `db:"task_id"`
-		Type       string         `db:"type"` // status_changed / reassigned / priority_changed / claimed / summary_failed ...
-		FromStatus sql.NullInt64  `db:"from_status"`
-		ToStatus   sql.NullInt64  `db:"to_status"`
-		Actor      string         `db:"actor"` // 操作人；引擎同步为 engine
-		Reason     string         `db:"reason"`
+		Kind       string         `db:"kind"`  // created / claimed / assigned / started / snoozed / woke / escalated / closed / reassigned / priority / refreshed
+		Actor      string         `db:"actor"` // 操作人；系统为 system
+		NodeId     string         `db:"node_id"`
+		FromStatus int64          `db:"from_status"`
+		ToStatus   int64          `db:"to_status"`
 		Detail     sql.NullString `db:"detail"`
 		CreatedAt  time.Time      `db:"created_at"`
 	}
@@ -78,13 +78,13 @@ func (m *defaultTaskEventModel) FindOne(ctx context.Context, id uint64) (*TaskEv
 
 func (m *defaultTaskEventModel) Insert(ctx context.Context, data *TaskEvent) (sql.Result, error) {
 	query := fmt.Sprintf("insert into %s (%s) values (?, ?, ?, ?, ?, ?, ?)", m.table, taskEventRowsExpectAutoSet)
-	ret, err := m.conn.ExecCtx(ctx, query, data.TaskId, data.Type, data.FromStatus, data.ToStatus, data.Actor, data.Reason, data.Detail)
+	ret, err := m.conn.ExecCtx(ctx, query, data.TaskId, data.Kind, data.Actor, data.NodeId, data.FromStatus, data.ToStatus, data.Detail)
 	return ret, err
 }
 
 func (m *defaultTaskEventModel) Update(ctx context.Context, data *TaskEvent) error {
 	query := fmt.Sprintf("update %s set %s where `id` = ?", m.table, taskEventRowsWithPlaceHolder)
-	_, err := m.conn.ExecCtx(ctx, query, data.TaskId, data.Type, data.FromStatus, data.ToStatus, data.Actor, data.Reason, data.Detail, data.Id)
+	_, err := m.conn.ExecCtx(ctx, query, data.TaskId, data.Kind, data.Actor, data.NodeId, data.FromStatus, data.ToStatus, data.Detail, data.Id)
 	return err
 }
 

@@ -1,578 +1,147 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://schemas.ai-workbench/task_type.schema.json",
-  "title": "任务类型定义",
-  "description": "任务类型是发布单元：payload schema、来源、workflow、自有卡片模板都内嵌在这一份文档里。前端画布、仓库中的 YAML、AI 生成的配置都提交这同一种 JSON（SaveTaskTypeDraft.body_json），由同一个编译器校验。\n\n表达式与模板：标注为「表达式」的字段（when、anchor、filter、subject、expr、exclude）直接写表达式，如 `payload.vip_level >= 3`；其他字符串是模板，用 `{{ 表达式 }}` 插值，如 `VIP 工单 {{ payload.appeal_id }}`。\n\n表达式可用的命名空间：payload（任务 payload）、task（任务公共字段：id、priority、assignee）、nodes.<节点id>.output（上游节点输出，节点必须在当前节点的上游）、loop.iteration（环内轮次）；来源的 mapping / filter 中只能用 record（扫描或消息的原始记录）；展示模板的 variants 中额外可用 viewer（查看者：dept、roles）。表达式是纯函数，不能读取当前时间。",
+  "$id": "https://ai-workbench/schema/task_type.schema.json",
+  "title": "任务类型",
+  "description": "任务类型 = 数据源 + 业务字段 + 人工节点链 + 卡片。字段说明见 docs/task-type-spec.md。",
   "type": "object",
   "additionalProperties": false,
-  "required": ["key", "name", "schema", "workflow"],
+  "required": ["key", "name", "source", "fields", "card", "nodes"],
   "properties": {
-    "key": {
-      "description": "任务类型标识，创建后不可修改。",
-      "$ref": "#/$defs/key"
-    },
-    "namespace": {
-      "description": "所属命名空间（团队或业务域），如 cs_vip。",
-      "$ref": "#/$defs/key"
-    },
-    "name": { "type": "string", "minLength": 1, "maxLength": 64, "description": "显示名称。" },
-    "description": {
-      "type": "string",
-      "maxLength": 2000,
-      "description": "这是什么任务、处理目标是什么。同时作为 AI 摘要的场景说明。"
-    },
-    "default_priority": {
-      "$ref": "#/$defs/priority",
-      "description": "新任务的默认优先级，默认 P2。"
-    },
-    "schema": { "$ref": "#/$defs/payload_schema" },
-    "sources": {
+    "key": { "$ref": "#/$defs/id", "description": "任务类型标识，创建后不可修改。" },
+    "namespace": { "type": "string", "maxLength": 64, "description": "所属团队或业务域，如 cs_vip。" },
+    "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "description": { "type": "string", "maxLength": 2000 },
+    "priority": { "enum": ["P0", "P1", "P2", "P3"], "default": "P2", "description": "新任务的优先级。" },
+    "source": { "$ref": "#/$defs/source" },
+    "fields": {
       "type": "array",
-      "description": "任务来源。多个来源可以对应同一个任务类型，共用 dedup_key。",
-      "items": { "$ref": "#/$defs/source" }
+      "description": "业务字段，顺序即配置页与详情页的显示顺序。SQL 来源的字段名就是查询结果的列名（key 列除外）。",
+      "items": { "$ref": "#/$defs/field" }
     },
-    "dedup_key": {
-      "type": "string",
-      "minLength": 1,
-      "description": "去重键模板，基于 payload 计算，如 `{{ payload.appeal_id }}`。同一去重键在任务未终结前只创建一个任务。"
-    },
-    "views": {
-      "type": "object",
-      "description": "本任务类型可用的卡片模板：名称 → 内嵌模板（自有组件），或 `组件@版本`（共享组件）。",
-      "propertyNames": { "$ref": "#/$defs/local_name" },
-      "additionalProperties": {
-        "oneOf": [{ "$ref": "#/$defs/component_ref" }, { "$ref": "#/$defs/view_template" }]
-      }
-    },
-    "view": {
-      "$ref": "#/$defs/view_binding",
-      "description": "默认卡片模板。人工节点和通知节点不写 view 时，沿用上一个人工节点的配置，最前面的节点回退到这里。"
-    },
-    "assignment": {
-      "$ref": "#/$defs/assignment_binding",
-      "description": "默认分配策略，继承规则同 view。"
-    },
-    "workflow": { "$ref": "#/$defs/workflow" },
-    "ui": {
-      "type": "object",
-      "description": "前端专用数据（画布坐标、折叠状态等）。后端原样保存，编译器忽略。"
+    "card": { "$ref": "#/$defs/card" },
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 10,
+      "description": "人工节点链：任务创建时进入第一个节点，escalate 进入下一个，close / no_response 结束。",
+      "items": { "$ref": "#/$defs/node" }
     }
   },
-
   "$defs": {
-    "key": { "type": "string", "pattern": "^[a-z][a-z0-9_]{1,63}$" },
-    "local_name": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
-    "component_ref": {
-      "type": "string",
-      "pattern": "^[a-z][a-z0-9_]{1,63}@[1-9][0-9]*$",
-      "description": "共享组件引用，固定版本，如 vip_rm_policy@4。不支持跟随最新版本。"
-    },
-    "priority": { "type": "string", "enum": ["P0", "P1", "P2", "P3"] },
-    "duration": {
-      "type": "string",
-      "pattern": "^([0-9]+(\\.[0-9]+)?(ms|s|m|h|d))+$",
-      "description": "时长，如 30s、15m、48h、7d、1d12h。"
-    },
-    "expression": { "type": "string", "minLength": 1, "description": "表达式，不带 {{ }}。" },
-    "template": { "type": "string", "description": "字符串模板，可用 {{ 表达式 }} 插值。" },
-    "template_map": {
-      "type": "object",
-      "description": "参数映射：键 → 模板字符串或字面值。",
-      "propertyNames": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
-      "additionalProperties": true
-    },
-
-    "payload_schema": {
-      "type": "object",
-      "description": "任务 payload 的 JSON Schema（draft 2020-12）。顶层必须是 object。字段的 title / description 同时用于表单标签、卡片字段名和 AI 摘要的字段说明。平台扩展：x-pii（mask_middle / hash / drop）、x-format（money / percent / duration / datetime）、x-currency-field、x-enum-source、x-enum-labels。金额必须是 string。",
-      "required": ["type", "properties"],
-      "properties": {
-        "type": { "const": "object" },
-        "properties": { "type": "object" }
-      }
-    },
-
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+    "template": { "type": "string", "maxLength": 1000, "description": "文本模板，{字段名} 替换为字段值，{key} 为数据源给出的 key。" },
+    "duration": { "type": "string", "pattern": "^([0-9]+(ms|s|m|h|d))+$", "description": "时长，如 30m、4h、1d。" },
     "source": {
       "type": "object",
-      "required": ["id", "kind"],
-      "properties": {
-        "id": { "$ref": "#/$defs/local_name" },
-        "kind": { "enum": ["cron", "kafka", "api"] }
-      },
+      "required": ["kind"],
+      "properties": { "kind": { "enum": ["sql", "api", "kafka"] } },
       "allOf": [
-        { "if": { "properties": { "kind": { "const": "cron" } } }, "then": { "$ref": "#/$defs/source_cron" } },
-        { "if": { "properties": { "kind": { "const": "kafka" } } }, "then": { "$ref": "#/$defs/source_event" } },
-        { "if": { "properties": { "kind": { "const": "api" } } }, "then": { "$ref": "#/$defs/source_event" } }
+        {
+          "if": { "properties": { "kind": { "const": "sql" } } },
+          "then": {
+            "additionalProperties": false,
+            "required": ["kind", "datasource", "schedule", "query"],
+            "properties": {
+              "kind": true,
+              "datasource": { "type": "string", "minLength": 1, "description": "平台注册的只读数据源连接名。" },
+              "schedule": { "type": "string", "minLength": 9, "description": "5 段 cron，如 */1 * * * *。" },
+              "timezone": { "type": "string", "default": "Asia/Shanghai" },
+              "query": { "type": "string", "minLength": 1, "maxLength": 20000, "description": "单条 SELECT，必须有一列叫 key。结果集就是当前待办：新出现的 key 创建任务，消失的 key 自动关闭任务。" }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "kind": { "enum": ["api", "kafka"] } } },
+          "then": { "additionalProperties": false, "properties": { "kind": true } }
+        }
       ]
     },
-    "source_cron": {
-      "description": "平台按 cron 调用查询 skill 扫描数据。skill 入参会额外收到上次返回的 cursor，出参为 { items: [...], next_cursor }，items 中每条记录映射为一个任务。",
+    "field": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "kind", "schedule", "skill", "mapping"],
+      "required": ["name"],
       "properties": {
-        "id": true,
-        "kind": true,
-        "schedule": { "type": "string", "minLength": 9, "description": "5 段 cron 表达式，如 */1 * * * *。" },
-        "timezone": { "type": "string", "default": "Asia/Shanghai" },
-        "skill": { "$ref": "#/$defs/skill_name" },
-        "input": { "$ref": "#/$defs/template_map" },
-        "filter": { "$ref": "#/$defs/expression", "description": "表达式，基于 record；为 true 时创建任务（已存在则跳过），为 false 的记录丢弃。" },
-        "close_when": { "$ref": "#/$defs/expression", "description": "表达式，基于 record；为 true 时按去重键找到未完结的任务，取消它的 run，任务以 auto_closed 完结。先于 filter 求值。" },
-        "mapping": { "$ref": "#/$defs/mapping" }
+        "name": { "$ref": "#/$defs/id" },
+        "label": { "type": "string", "maxLength": 64 },
+        "type": { "enum": ["text", "number", "money", "datetime", "enum"], "default": "text" },
+        "pii": { "enum": ["mask_middle", "hash", "drop"], "description": "脱敏方式，工作台与 Lark 都按此显示。" },
+        "options": {
+          "type": "array",
+          "description": "enum 字段的取值与显示名。",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["value", "label"],
+            "properties": { "value": { "type": "string" }, "label": { "type": "string" } }
+          }
+        }
       }
     },
-    "source_event": {
-      "description": "Kafka 或 API 来源：生产方按平台的标准事件信封生产，信封中的 event_type 决定路由到哪个任务类型。",
+    "card": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "kind", "event_type", "mapping"],
-      "properties": {
-        "id": true,
-        "kind": true,
-        "event_type": { "type": "string", "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$", "description": "如 appeal.created。" },
-        "filter": { "$ref": "#/$defs/expression", "description": "表达式，基于 record（信封中的 data）。" },
-        "close_when": { "$ref": "#/$defs/expression", "description": "表达式，基于 record；为 true 时取消同一去重键下未完结任务的 run。" },
-        "mapping": { "$ref": "#/$defs/mapping" }
-      }
-    },
-    "mapping": {
-      "type": "object",
-      "description": "payload 字段 → 表达式（基于 record）。映射结果按 schema 校验。",
-      "minProperties": 1,
-      "additionalProperties": { "$ref": "#/$defs/expression" }
-    },
-    "skill_name": {
-      "type": "string",
-      "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)*$",
-      "description": "Skillhub 中的 skill 名称，或平台内置 skill（如 appeal.scan_vip）。"
-    },
-
-    "view_template": {
-      "type": "object",
-      "description": "卡片模板（与渠道无关，渲染到 Lark 卡片 / Web / 邮件）。按钮由节点的 options 生成，模板只描述内容。",
-      "additionalProperties": false,
-      "required": ["title", "fields"],
+      "required": ["title"],
       "properties": {
         "title": { "$ref": "#/$defs/template" },
-        "color": { "enum": ["blue", "green", "orange", "red", "grey"], "default": "blue" },
-        "summary": { "$ref": "#/$defs/template", "description": "标题下的一行说明。" },
-        "fields": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["value"],
-            "properties": {
-              "label": { "type": "string", "description": "缺省时取 schema 中字段的 title。" },
-              "value": { "$ref": "#/$defs/template" },
-              "short": { "type": "boolean", "description": "是否半宽展示，默认 true。" }
-            }
-          }
-        },
-        "links": {
-          "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["label", "url"],
-            "properties": { "label": { "type": "string" }, "url": { "$ref": "#/$defs/template" } }
-          }
-        },
-        "ai_summary": { "$ref": "#/$defs/ai_summary" }
-      }
-    },
-    "ai_summary": {
-      "type": "object",
-      "description": "可选的 AI 摘要：卡片先发出，摘要异步生成后更新卡片；失败时不显示。",
-      "additionalProperties": false,
-      "required": ["enabled"],
-      "properties": {
-        "enabled": { "type": "boolean" },
-        "prompt": { "$ref": "#/$defs/component_ref" },
-        "inputs": { "type": "array", "items": { "type": "string" }, "description": "送给模型的 payload 字段，先按 x-pii 脱敏。" },
-        "max_chars": { "type": "integer", "minimum": 20, "maximum": 2000, "default": 200 },
-        "timeout": { "$ref": "#/$defs/duration", "default": "5s" }
-      }
-    },
-    "view_binding": {
-      "description": "引用卡片模板：views 中的名称、共享组件 `组件@版本`，或带受众变体的对象。",
-      "oneOf": [
-        { "$ref": "#/$defs/local_name" },
-        { "$ref": "#/$defs/component_ref" },
-        {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["default"],
-          "properties": {
-            "default": { "$ref": "#/$defs/view_name" },
-            "variants": {
-              "type": "array",
-              "description": "按查看者选择模板，按顺序匹配第一个。",
-              "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["when", "view"],
-                "properties": {
-                  "when": { "$ref": "#/$defs/expression", "description": "表达式，可用 viewer.dept、viewer.roles。" },
-                  "view": { "$ref": "#/$defs/view_name" }
-                }
-              }
-            }
-          }
-        }
-      ]
-    },
-    "view_name": {
-      "oneOf": [{ "$ref": "#/$defs/local_name" }, { "$ref": "#/$defs/component_ref" }]
-    },
-
-    "assignment_binding": {
-      "description": "分配策略：内嵌策略，或共享组件 `组件@版本`。",
-      "oneOf": [{ "$ref": "#/$defs/component_ref" }, { "$ref": "#/$defs/assignment" }]
-    },
-    "assignment": {
-      "type": "object",
-      "description": "策略链：按顺序尝试解析器得到候选人 → 过滤 → 按策略选一个 → 都失败时走兜底。",
-      "additionalProperties": false,
-      "required": ["resolvers"],
-      "properties": {
-        "resolvers": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/resolver" } },
-        "filters": {
-          "type": "array",
-          "items": { "enum": ["active", "not_on_leave", "not_maker", "within_capacity"] }
-        },
-        "strategy": { "enum": ["first", "least_load", "round_robin", "claim"], "default": "first" },
-        "exclude": {
-          "type": "array",
-          "description": "职责分离：表达式列表，结果中的人不能成为处理人，如 nodes.rm_review.output.assignee。",
-          "items": { "$ref": "#/$defs/expression" }
-        },
-        "fallback": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["group"],
-          "properties": {
-            "group": { "type": "string", "minLength": 1 },
-            "strategy": { "enum": ["claim", "least_load", "round_robin"], "default": "claim" }
-          }
-        }
-      }
-    },
-    "resolver": {
-      "type": "object",
-      "required": ["type"],
-      "properties": { "type": { "enum": ["relation", "user", "group", "agreement", "previous_assignee", "expr"] } },
-      "allOf": [
-        {
-          "if": { "properties": { "type": { "const": "relation" } } },
-          "then": {
-            "additionalProperties": false,
-            "required": ["type", "relation", "subject"],
-            "properties": {
-              "type": true,
-              "relation": { "type": "string", "description": "关系名，如 vip_rm（VIP 用户 → RM）。" },
-              "subject": { "$ref": "#/$defs/expression", "description": "表达式，关系的主体，如 payload.uid。" }
-            }
-          }
-        },
-        {
-          "if": { "properties": { "type": { "const": "user" } } },
-          "then": {
-            "additionalProperties": false,
-            "required": ["type", "users"],
-            "properties": { "type": true, "users": { "type": "array", "minItems": 1, "items": { "type": "string", "format": "email" } } }
-          }
-        },
-        {
-          "if": { "properties": { "type": { "const": "group" } } },
-          "then": {
-            "additionalProperties": false,
-            "required": ["type", "group"],
-            "properties": { "type": true, "group": { "type": "string", "minLength": 1 } }
-          }
-        },
-        {
-          "if": { "properties": { "type": { "const": "agreement" } } },
-          "then": {
-            "additionalProperties": false,
-            "required": ["type", "agreement"],
-            "properties": { "type": true, "agreement": { "$ref": "#/$defs/component_ref" } }
-          }
-        },
-        {
-          "if": { "properties": { "type": { "const": "previous_assignee" } } },
-          "then": {
-            "additionalProperties": false,
-            "properties": { "type": true, "node": { "$ref": "#/$defs/local_name", "description": "取哪个上游人工节点的处理人，缺省为上一个人工节点。" } }
-          }
-        },
-        {
-          "if": { "properties": { "type": { "const": "expr" } } },
-          "then": {
-            "additionalProperties": false,
-            "required": ["type", "expr"],
-            "properties": { "type": true, "expr": { "$ref": "#/$defs/expression", "description": "表达式，结果为 email 或 email 列表。" } }
-          }
-        }
-      ]
-    },
-
-    "workflow": {
-      "type": "object",
-      "description": "图模型：节点 + 端口 + 连线。普通连线必须构成有向无环图；退回用显式的 rework 边。",
-      "additionalProperties": false,
-      "required": ["nodes", "edges"],
-      "properties": {
-        "nodes": { "type": "array", "minItems": 2, "items": { "$ref": "#/$defs/node" } },
-        "edges": { "type": "array", "items": { "$ref": "#/$defs/edge" } }
+        "fields": { "type": "array", "items": { "$ref": "#/$defs/id" }, "description": "卡片上的 KV，字段名，顺序即显示顺序。" }
       }
     },
     "node": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "type"],
+      "required": ["id", "name", "assignee", "actions"],
       "properties": {
-        "id": { "$ref": "#/$defs/local_name" },
-        "type": {
-          "enum": ["trigger", "condition", "merge", "timer", "human_choice", "skill_call", "llm", "lark_card", "send_email", "emit_event", "end"]
-        },
-        "name": { "type": "string", "maxLength": 64 },
-        "config": { "type": "object" },
-        "retry": { "$ref": "#/$defs/retry" },
-        "side_effects": { "type": "array", "items": { "$ref": "#/$defs/side_effect" } }
-      },
-      "allOf": [
-        { "if": { "properties": { "type": { "const": "trigger" } } }, "then": { "properties": { "config": { "$ref": "#/$defs/config_empty" } } } },
-        { "if": { "properties": { "type": { "const": "condition" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/config_condition" } } } },
-        { "if": { "properties": { "type": { "const": "merge" } } }, "then": { "properties": { "config": { "$ref": "#/$defs/config_merge" } } } },
-        { "if": { "properties": { "type": { "const": "timer" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/config_timer" } } } },
-        { "if": { "properties": { "type": { "const": "human_choice" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/config_human_choice" } } } },
-        { "if": { "properties": { "type": { "const": "skill_call" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/config_skill_call" } } } },
-        { "if": { "properties": { "type": { "const": "llm" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/config_llm" } } } },
-        { "if": { "properties": { "type": { "const": "lark_card" } } }, "then": { "properties": { "config": { "$ref": "#/$defs/config_lark_card" } } } },
-        { "if": { "properties": { "type": { "const": "send_email" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/config_send_email" } } } },
-        { "if": { "properties": { "type": { "const": "emit_event" } } }, "then": { "required": ["config"], "properties": { "config": { "$ref": "#/$defs/config_emit_event" } } } },
-        { "if": { "properties": { "type": { "const": "end" } } }, "then": { "properties": { "config": { "$ref": "#/$defs/config_end" } } } }
-      ]
-    },
-    "edge": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["id", "from", "port", "to"],
-      "properties": {
-        "id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,64}$" },
-        "from": { "$ref": "#/$defs/local_name" },
-        "port": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$", "description": "源节点的输出端口。" },
-        "to": { "$ref": "#/$defs/local_name" },
-        "kind": { "enum": ["normal", "rework"], "default": "normal" },
-        "max_iterations": { "type": "integer", "minimum": 1, "maximum": 20, "description": "rework 边必填。" },
-        "on_exhausted": { "$ref": "#/$defs/local_name", "description": "rework 边必填：超过次数后的去向节点。" }
-      },
-      "if": { "properties": { "kind": { "const": "rework" } }, "required": ["kind"] },
-      "then": { "required": ["max_iterations", "on_exhausted"] },
-      "else": { "not": { "anyOf": [{ "required": ["max_iterations"] }, { "required": ["on_exhausted"] }] } }
-    },
-    "retry": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "重试策略。各节点类型有默认值，这里只能在平台允许的范围内覆盖。",
-      "properties": {
-        "initial_interval": { "$ref": "#/$defs/duration" },
-        "backoff_coefficient": { "type": "number", "minimum": 1, "maximum": 10 },
-        "max_interval": { "$ref": "#/$defs/duration" },
-        "max_attempts": { "type": "integer", "minimum": 1, "maximum": 20 },
-        "non_retryable_errors": { "type": "array", "items": { "type": "string" } }
-      }
-    },
-    "side_effect": {
-      "type": "object",
-      "description": "挂在节点上的旁路动作，不影响主路径的走向。",
-      "required": ["action", "config"],
-      "properties": {
-        "action": { "enum": ["lark_card", "send_email", "emit_event", "skill_call", "llm"] },
-        "config": { "type": "object" },
-        "mode": { "enum": ["async", "await"], "default": "async" },
-        "on_failure": { "enum": ["fail", "alert", "ignore"], "default": "alert" }
-      },
-      "additionalProperties": false,
-      "allOf": [
-        { "if": { "properties": { "action": { "const": "lark_card" } } }, "then": { "properties": { "config": { "$ref": "#/$defs/config_lark_card" } } } },
-        { "if": { "properties": { "action": { "const": "send_email" } } }, "then": { "properties": { "config": { "$ref": "#/$defs/config_send_email" } } } },
-        { "if": { "properties": { "action": { "const": "emit_event" } } }, "then": { "properties": { "config": { "$ref": "#/$defs/config_emit_event" } } } },
-        { "if": { "properties": { "action": { "const": "skill_call" } } }, "then": { "properties": { "config": { "$ref": "#/$defs/config_skill_call" } } } },
-        { "if": { "properties": { "action": { "const": "llm" } } }, "then": { "properties": { "config": { "$ref": "#/$defs/config_llm" } } } }
-      ]
-    },
-
-    "config_empty": { "type": "object", "additionalProperties": false },
-    "config_condition": {
-      "title": "条件分支",
-      "description": "按顺序求值，选中第一个为 true 的分支；都不满足走 default 端口。",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["branches"],
-      "properties": {
-        "branches": {
+        "id": { "$ref": "#/$defs/id" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "assignee": { "$ref": "#/$defs/assignee" },
+        "actions": {
           "type": "array",
           "minItems": 1,
-          "items": {
-            "type": "object",
+          "uniqueItems": true,
+          "items": { "enum": ["close", "no_response", "snooze", "link", "escalate"] }
+        },
+        "link": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["label", "url"],
+          "description": "启用 link 时必填。",
+          "properties": { "label": { "type": "string", "minLength": 1, "maxLength": 32 }, "url": { "$ref": "#/$defs/template" } }
+        },
+        "snooze": { "type": "array", "items": { "$ref": "#/$defs/duration" }, "maxItems": 6, "description": "可选的推迟时长，缺省为 1h、4h、1d。" },
+        "lark": { "type": "boolean", "default": false, "description": "进入节点、分配到人、推迟到期时发 Lark 通知。" }
+      }
+    },
+    "assignee": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": { "kind": { "enum": ["relation", "team"] } },
+      "allOf": [
+        {
+          "if": { "properties": { "kind": { "const": "relation" } } },
+          "then": {
             "additionalProperties": false,
-            "required": ["port", "when"],
+            "required": ["kind", "relation", "field", "fallback_team"],
             "properties": {
-              "port": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$", "not": { "const": "default" } },
-              "label": { "type": "string" },
-              "when": { "$ref": "#/$defs/expression" }
-            }
-          }
-        }
-      }
-    },
-    "config_merge": {
-      "title": "汇合",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "mode": {
-          "enum": ["all", "any"],
-          "default": "all",
-          "description": "all：所有入边都有结论且至少一条触发；any：任一入边触发即执行，之后到达的忽略。"
-        }
-      }
-    },
-    "config_timer": {
-      "title": "定时等待",
-      "description": "等待到 anchor + after。不写 anchor 时从节点开始执行的时刻算起。",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["after"],
-      "properties": {
-        "after": { "$ref": "#/$defs/duration" },
-        "anchor": { "$ref": "#/$defs/expression", "description": "表达式，结果为 Unix 毫秒或 RFC3339 时间，如 payload.commit_time_ms。" }
-      }
-    },
-    "config_human_choice": {
-      "title": "人工选择",
-      "description": "确定处理人 → 发送卡片 → 等待选择。每个选项是一个输出端口；配置 timeout 时另有 timeout 端口。",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["options"],
-      "properties": {
-        "view": { "$ref": "#/$defs/view_binding" },
-        "assignment": { "$ref": "#/$defs/assignment_binding" },
-        "options": {
-          "type": "array",
-          "minItems": 1,
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["key", "label"],
-            "properties": {
-              "key": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$", "not": { "const": "timeout" } },
-              "label": { "type": "string", "minLength": 1 },
-              "style": { "enum": ["primary", "default", "danger"], "default": "default" },
-              "required_fields": { "type": "array", "items": { "type": "string" }, "description": "选择该选项时必填的表单字段（form.fields 的 key）。" },
-              "snooze": { "$ref": "#/$defs/duration", "description": "设置后该选项表示推迟：节点继续等待，到期重新提醒；不产生输出端口。" }
+              "kind": true,
+              "relation": { "type": "string", "minLength": 1, "description": "业务关系名，如 vip_rm（VIP → RM）。" },
+              "field": { "$ref": "#/$defs/id", "description": "关系的主体字段，如 uid。" },
+              "fallback_team": { "$ref": "#/$defs/id", "description": "关系查不到人时进入该团队的认领队列。" }
             }
           }
         },
-        "form": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["fields"],
-          "properties": {
-            "fields": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["key", "label", "type"],
-                "properties": {
-                  "key": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
-                  "label": { "type": "string" },
-                  "type": { "enum": ["text", "textarea", "select", "datetime"] },
-                  "options": { "type": "array", "items": { "type": "string" }, "description": "type 为 select 时的候选值。" }
-                }
-              }
+        {
+          "if": { "properties": { "kind": { "const": "team" } } },
+          "then": {
+            "additionalProperties": false,
+            "required": ["kind", "team", "mode"],
+            "properties": {
+              "kind": true,
+              "team": { "$ref": "#/$defs/id" },
+              "mode": { "enum": ["claim", "assign"], "description": "claim：执行者认领；assign：分配者指定执行者。" }
             }
           }
-        },
-        "timeout": { "$ref": "#/$defs/duration", "description": "可选；不配置则一直等待。" },
-        "remind": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": ["every", "max"],
-          "properties": { "every": { "$ref": "#/$defs/duration" }, "max": { "type": "integer", "minimum": 1, "maximum": 20 } }
         }
-      }
-    },
-    "config_skill_call": {
-      "title": "调用 Skill",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["skill"],
-      "properties": {
-        "skill": { "$ref": "#/$defs/skill_name" },
-        "version": { "type": "string", "description": "skill 版本，缺省为发布时解析到的版本。" },
-        "input": { "$ref": "#/$defs/template_map" },
-        "timeout": { "$ref": "#/$defs/duration" }
-      }
-    },
-    "config_llm": {
-      "title": "LLM",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["prompt"],
-      "properties": {
-        "prompt": { "$ref": "#/$defs/component_ref" },
-        "inputs": { "$ref": "#/$defs/template_map" },
-        "model": { "type": "string" },
-        "max_tokens": { "type": "integer", "minimum": 1, "maximum": 32000 },
-        "timeout": { "$ref": "#/$defs/duration" }
-      }
-    },
-    "config_lark_card": {
-      "title": "发送 Lark 卡片（通知）",
-      "description": "只通知、不等待选择。不写 view / to 时按继承规则取上一个人工节点或任务类型默认值。",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "view": { "$ref": "#/$defs/view_binding" },
-        "to": { "$ref": "#/$defs/assignment_binding", "description": "接收人，按分配策略求值。" }
-      }
-    },
-    "config_send_email": {
-      "title": "发送邮件",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["to", "subject"],
-      "properties": {
-        "to": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/template" } },
-        "cc": { "type": "array", "items": { "$ref": "#/$defs/template" } },
-        "subject": { "$ref": "#/$defs/template" },
-        "body": { "$ref": "#/$defs/template" },
-        "view": { "$ref": "#/$defs/view_name", "description": "用卡片模板渲染正文，与 body 二选一。" }
-      }
-    },
-    "config_emit_event": {
-      "title": "发出事件",
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["event_type"],
-      "properties": {
-        "event_type": { "type": "string", "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$" },
-        "payload": { "$ref": "#/$defs/template_map" }
-      }
-    },
-    "config_end": {
-      "title": "结束",
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "resolution": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$", "description": "任务的处理结论，写入任务表的 resolution。" }
-      }
+      ]
     }
   }
 }

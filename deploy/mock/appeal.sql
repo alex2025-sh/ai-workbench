@@ -1,6 +1,6 @@
 -- 本地开发用的 mock：业务方的风控工单表 appeal，以及几条样例数据。
 --
--- 这张表属于业务系统，不归平台管理；平台只通过内置 skill appeal.scan_vip / appeal.get_status 只读访问（读从库）。
+-- 这张表属于业务系统，不归平台管理；平台只通过 SQL 数据源（只读从库连接 appeal_ro）查询。
 -- 不放在 deploy/sql/ 下，避免被 goctl model 生成到平台的数据访问层。
 --
 -- 与线上 DDL 的差异：去掉了与本场景无关的索引和列级字符集声明；transaction_created_at 的默认值由 '0000-00-00 00:00:00' 改为 '1970-01-01 00:00:01'，
@@ -49,13 +49,14 @@ CREATE TABLE IF NOT EXISTS `appeal` (
   KEY `idx_vip_label_type` (`vip_label_type`)
 ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '风控工单（mock）';
 
--- 样例数据。commit_time 用相对时间，便于本地观察 48h / 7d 两档提醒：
---   A1001  VIP3，刚提交                → 通知 RM
---   A1002  VIP5，提交 50 小时前仍待审核  → 通知 RM，并立即触发 48h 提醒
---   A1003  VIP2，提交 8 天前仍待审核     → 通知 RM，48h 提醒，7d 升级
---   A1004  VIP4，提交 3 天前已审核通过   → 通知 RM 后，48h 检查时发现已完成，直接结束
---   A1005  非 VIP                      → 被来源的 filter 过滤
---   A1006  VIP1，尚未提交（PENDING）     → 被过滤
+-- 样例数据。commit_time 用相对时间，对应 examples/task_types 下三个任务类型的时间窗口：
+--   A1001  VIP3，刚提交                → 「VIP 工单待审核」，RM rm.alice
+--   A1002  VIP5，提交 50 小时前仍待审核  → 「VIP 工单已等待 48 小时」，RM rm.alice
+--   A1003  VIP2，提交 8 天前仍待审核     → 「VIP 工单超过 7 天」，审核小组 vip_review（分配模式）
+--   A1004  VIP4，已审核通过             → 不在任何结果里
+--   A1005  非 VIP                      → 不在任何结果里
+--   A1006  VIP1，尚未提交（PENDING）     → 不在任何结果里
+--   A1007  VIP1，1 小时前提交，uid 没有 RM → 「VIP 工单待审核」，进入兜底团队 vip_cs_leads 的认领队列
 INSERT INTO `appeal`
   (`appeal_type`, `appeal_id`, `appeal_status`, `documents`, `uid`, `biz_code`, `source`, `channel`, `expire_time`, `transaction_id`, `ext`,
    `order_amount`, `business`, `biz_site_id`, `reviewer`, `case_group`, `commit_time`, `vip_label_type`, `vip_level`)
@@ -65,4 +66,5 @@ VALUES
   ('deposit_review',  'A1003', 'COMMITED', 'proof_of_funds', 10000003, 'fiat_deposit', 'risk', 'web', 0, 'T9003', '{}', '9800.00', 'fiat', 'global', 'reviewer_a', 'vip_queue', UNIX_TIMESTAMP() - 8 * 86400,     'vip', 2),
   ('deposit_review',  'A1004', 'PASS',     'proof_of_funds', 10000004, 'fiat_deposit', 'risk', 'web', 0, 'T9004', '{}', '56000.00', 'fiat', 'global', 'reviewer_c', 'vip_queue', UNIX_TIMESTAMP() - 3 * 86400,    'vip', 4),
   ('withdraw_review', 'A1005', 'COMMITED', 'id_card', 10000005, 'fiat_withdraw', 'risk', 'app', 0, 'T9005', '{}', '120.00', 'fiat', 'global', 'reviewer_b', 'normal_queue', UNIX_TIMESTAMP(),                  '', 0),
-  ('withdraw_review', 'A1006', 'PENDING',  'id_card', 10000006, 'fiat_withdraw', 'risk', 'app', 0, 'T9006', '{}', '3000.00', 'fiat', 'global', '', 'vip_queue', 0,                                             'vip', 1);
+  ('withdraw_review', 'A1006', 'PENDING',  'id_card', 10000006, 'fiat_withdraw', 'risk', 'app', 0, 'T9006', '{}', '3000.00', 'fiat', 'global', '', 'vip_queue', 0,                                             'vip', 1),
+  ('withdraw_review', 'A1007', 'COMMITED', 'id_card', 10000006, 'fiat_withdraw', 'risk', 'app', 0, 'T9007', '{}', '4200.00', 'fiat', 'global', 'reviewer_c', 'vip_queue', UNIX_TIMESTAMP() - 3600,         'vip', 1);

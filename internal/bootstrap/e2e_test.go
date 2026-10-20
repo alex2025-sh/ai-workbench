@@ -2,281 +2,292 @@ package bootstrap
 
 import (
 	"context"
-	"os"
-	"path/filepath"
-	"runtime"
-	"strings"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
-	"github.com/alex2025-sh/ai-workbench/internal/flow/engine"
+	"github.com/alex2025-sh/ai-workbench/internal/notify"
 	"github.com/alex2025-sh/ai-workbench/internal/pkg/testdb"
-	"github.com/alex2025-sh/ai-workbench/internal/registry"
-	"github.com/alex2025-sh/ai-workbench/internal/spec"
+	"github.com/alex2025-sh/ai-workbench/internal/source"
 	"github.com/alex2025-sh/ai-workbench/internal/task"
+	"github.com/alex2025-sh/ai-workbench/internal/tasktype"
 )
 
-func repoFile(t *testing.T, rel string) string {
-	_, file, _, _ := runtime.Caller(0)
-	return filepath.Join(filepath.Dir(file), "..", "..", rel)
+func tick(t *testing.T, e *TestEnv) {
+	t.Helper()
+	e.Advance(time.Minute)
+	if err := e.Ticker.Tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 }
 
-type harness struct {
-	t     *testing.T
-	ctx   context.Context
-	clock *engine.FakeClock
-	svc   *Services
-	biz   string
-}
-
-func newHarness(t *testing.T) *harness {
-	platform := testdb.New(t, "deploy/sql/*.sql")
-	biz := testdb.New(t, "deploy/mock/appeal.sql")
-	// 扫描只读取 60 秒（lag_seconds）之前更新的行，把样例数据的更新时间往前拨。
-	testdb.Exec(t, biz, "UPDATE appeal SET updated_at = updated_at - INTERVAL 5 MINUTE")
-
-	clock := engine.NewFakeClock(time.Now())
-	svc, err := Build(Config{DataSource: platform, BizDataSource: biz, RelationsFile: repoFile(t, "deploy/mock/vip_rm.yaml"), Owner: "test"}, clock)
+// open 返回某个任务类型中 appeal 的跟踪中任务。
+func open(t *testing.T, e *TestEnv, taskType, appeal string) *task.Task {
+	t.Helper()
+	tracked, err := e.Tasks.ListTracked(context.Background(), taskType)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &harness{t: t, ctx: context.Background(), clock: clock, svc: svc, biz: biz}
-}
-
-func (h *harness) publish(path string) {
-	h.t.Helper()
-	raw, err := os.ReadFile(repoFile(h.t, path))
-	if err != nil {
-		h.t.Fatal(err)
-	}
-	body, err := spec.FromYAML(raw)
-	if err != nil {
-		h.t.Fatal(err)
-	}
-	res, err := registry.PublishDirect(h.ctx, h.svc.Conn, body, "test", h.clock.Now())
-	if err != nil {
-		h.t.Fatal(err)
-	}
-	if res.Version != 1 {
-		h.t.Fatalf("publish: version=%d issues=%+v", res.Version, res.Issues)
-	}
-}
-
-// tick 把时钟拨到 d 之后，执行一次 wf-ticker：触发到期的来源，执行到期的定时器、超时与重试。
-// 引擎没有后台轮询，两次 tick 之间流程只由事件（启动、人工操作、取消）推进。
-func (h *harness) tick(d time.Duration) {
-	h.t.Helper()
-	h.clock.Advance(d)
-	if err := h.svc.Ticker.Tick(h.ctx, struct{ Index, Total int }{0, 1}); err != nil {
-		h.t.Fatal(err)
-	}
-}
-
-// tasks 返回工单的全部任务，按创建顺序。去重键是「工单号:提交时间」，重新提交的工单会有新任务。
-func (h *harness) tasks(appealID string) []*task.Task {
-	h.t.Helper()
-	var ids []int64
-	if err := h.svc.Conn.QueryRowsCtx(h.ctx, &ids, "select id from task where task_type = 'vip_appeal_alert' and subject_id like ? order by id", appealID+":%"); err != nil {
-		h.t.Fatal(err)
-	}
-	var out []*task.Task
-	for _, id := range ids {
-		tk, err := h.svc.Tasks.Get(h.ctx, id)
-		if err != nil {
-			h.t.Fatal(err)
-		}
-		out = append(out, tk)
-	}
-	return out
-}
-
-// task 返回工单最新的任务。
-func (h *harness) task(appealID string) *task.Task {
-	h.t.Helper()
-	ts := h.tasks(appealID)
-	if len(ts) == 0 {
-		h.t.Fatalf("no task for %s", appealID)
-	}
-	return ts[len(ts)-1]
-}
-
-func (h *harness) run(appealID string) *engine.RunView {
-	h.t.Helper()
-	v, err := h.svc.Engine.GetRun(h.ctx, h.task(appealID).RunID)
-	if err != nil {
-		h.t.Fatal(err)
-	}
-	return v
-}
-
-func (h *harness) node(appealID, nodeID string) engine.NodeRun {
-	for _, n := range h.run(appealID).Nodes {
-		if n.NodeID == nodeID {
-			return n
+	for i := range tracked {
+		if v := tasktype.DecodeValues(tracked[i].Fields)["appeal_id"]; fmt.Sprint(v) == appeal {
+			return &tracked[i]
 		}
 	}
-	h.t.Fatalf("node %s not found", nodeID)
-	return engine.NodeRun{}
+	return nil
 }
 
-func (h *harness) cards(appealID string) []string {
-	var out []string
-	for _, c := range h.svc.Lark.Sent() {
-		if strings.Contains(c.Card.Title, appealID) {
-			out = append(out, c.Card.Title)
+func sent(e *TestEnv, target string) []notify.Sent {
+	var out []notify.Sent
+	for _, s := range e.Lark.Sent() {
+		if s.Target == target {
+			out = append(out, s)
 		}
 	}
 	return out
 }
 
-// TestVIPAppealAlert 按 deploy/mock/appeal.sql 的样例数据跑通 examples/task_types/vip_appeal_alert.yaml：
-// 扫描 → 建任务 → 通知 RM → 48 小时提醒 → 7 天升级 → 组长处理，以及工单中途审核完成时自动关闭；
-// 时间用可快进的时钟推进。
-func TestVIPAppealAlert(t *testing.T) {
-	h := newHarness(t)
-	h.publish("examples/task_types/vip_appeal_alert.yaml")
+func TestVIPAppeal(t *testing.T) {
+	e := NewTestEnv(t)
+	ctx := context.Background()
+	tick(t, e)
 
-	// 第一次触发：cron 是每分钟一次，拨到下一分钟。
-	h.tick(time.Minute)
-
-	// 只有 VIP 且待审核的 A1001 / A1002 / A1003 建任务；A1004 已通过，A1005 非 VIP，A1006 未提交。
-	for _, id := range []string{"A1004", "A1005", "A1006"} {
-		if ts := h.tasks(id); len(ts) != 0 {
-			t.Errorf("%s should be filtered", id)
-		}
+	// 首次扫描：每张待审核的工单按提交时间落进一个任务类型。
+	a1 := open(t, e, "vip_appeal_pending", "A1001")
+	a7 := open(t, e, "vip_appeal_pending", "A1007")
+	a2 := open(t, e, "vip_appeal_48h", "A1002")
+	a3 := open(t, e, "vip_appeal_7d", "A1003")
+	switch {
+	case a1 == nil || a1.AssigneeID != "rm.alice@example.com" || a1.Status != task.TaskStatusPending || a1.Priority != task.TaskPriorityP2:
+		t.Fatalf("A1001 = %+v", a1)
+	case a7 == nil || !a7.InQueue() || a7.TeamKey != "vip_cs_leads" || a7.TeamMode != "claim":
+		t.Fatalf("A1007 (no RM) = %+v", a7)
+	case a2 == nil || a2.AssigneeID != "rm.alice@example.com" || a2.NodeID != "rm" || a2.Priority != task.TaskPriorityP1:
+		t.Fatalf("A1002 = %+v", a2)
+	case a3 == nil || !a3.InQueue() || a3.TeamKey != "vip_review" || a3.TeamMode != "assign":
+		t.Fatalf("A1003 = %+v", a3)
 	}
-
-	// A1001 刚提交：通知了 RM，等 48 小时。
-	if c := h.cards("A1001"); len(c) != 1 || !strings.Contains(c[0], "待审核") {
-		t.Fatalf("A1001 cards = %v", c)
-	}
-	if tk := h.task("A1001"); tk.Status != task.TaskStatusPending || tk.AssigneeID != "rm.alice@example.com" || tk.CurrentNode != "notify_rm" {
-		t.Fatalf("A1001 task = %+v", tk)
-	}
-	if n := h.node("A1001", "wait_48h"); n.Status != engine.NodeWaiting {
-		t.Fatalf("A1001 wait_48h = %s", n.Status)
-	}
-
-	// A1002 已提交 50 小时：通知后立即触发 48 小时提醒，然后等到 7 天。
-	if c := h.cards("A1002"); len(c) != 2 || !strings.Contains(c[1], "48 小时") {
-		t.Fatalf("A1002 cards = %v", c)
-	}
-	if n := h.node("A1002", "wait_7d"); n.Status != engine.NodeWaiting {
-		t.Fatalf("A1002 wait_7d = %s", n.Status)
-	}
-
-	// A1003 已提交 8 天：通知、提醒后升级给 VIP 客服组长，进入组队列待认领。
-	if c := h.cards("A1003"); len(c) != 3 || !strings.Contains(c[2], "超过 7 天") {
-		t.Fatalf("A1003 cards = %v", c)
-	}
-	tk := h.task("A1003")
-	if tk.Status != task.TaskStatusUnassigned || tk.AssigneeGroup != "vip_cs_leads" || tk.CurrentNode != "escalate" {
-		t.Fatalf("A1003 task = %+v", tk)
-	}
-	esc := h.node("A1003", "escalate")
-	if esc.Status != engine.NodeWaiting {
-		t.Fatalf("A1003 escalate = %s", esc.Status)
-	}
-
-	// 卡片上的 uid 已按 x-pii 脱敏。
-	for _, c := range h.svc.Lark.Sent() {
-		for _, f := range c.Card.Fields {
-			if f.Label == "用户 UID" && !strings.Contains(f.Value, "*") {
-				t.Fatalf("uid not masked: %q", f.Value)
+	for _, other := range []string{"A1004", "A1005", "A1006"} {
+		for _, tt := range []string{"vip_appeal_pending", "vip_appeal_48h", "vip_appeal_7d"} {
+			if open(t, e, tt, other) != nil {
+				t.Errorf("%s should not have a task in %s", other, tt)
 			}
 		}
 	}
-
-	// 再触发一次：数据没有变化，不会重复建任务或重复发卡片。
-	before := len(h.svc.Lark.Sent())
-	h.tick(time.Minute)
-	if after := len(h.svc.Lark.Sent()); after != before {
-		t.Fatalf("duplicate cards: %d → %d", before, after)
+	// 通知：RM 私聊两条；认领模式发到组长群；分配模式私发给分配者。
+	if got := sent(e, "rm.alice@example.com"); len(got) != 2 {
+		t.Fatalf("alice got %d cards", len(got))
+	}
+	if got := sent(e, "oc_vip_cs_leads"); len(got) != 1 || got[0].Kind != notify.KindChat {
+		t.Fatalf("leads chat = %+v", got)
+	}
+	card := sent(e, "lead@example.com")
+	if len(card) != 1 || card[0].Card.NodeName != "VIP 审核小组" || card[0].Card.TaskURL != fmt.Sprintf("http://wb.local/tasks/%d", a3.ID) {
+		t.Fatalf("assigner card = %+v", card)
+	}
+	if f := card[0].Card.Fields; len(f) == 0 || f[0].Label != "工单类型" {
+		t.Fatalf("card fields = %+v", f)
 	}
 
-	// 组长处理 A1003：未知选项被拒绝；推迟后任务置为已推迟、记在组长名下，节点继续等待；
-	// 推迟期间仍可直接处理，处理后流程结束、任务完结。推迟到期的重新提醒由引擎测试覆盖。
-	runID := h.task("A1003").RunID
-	res, err := h.svc.Engine.Signal(h.ctx, engine.SignalCmd{RunID: runID, NodeID: "escalate", Option: "nope", Actor: "lead@example.com"})
-	if err != nil || res.Accepted || res.Code != engine.RejectInvalidForm {
-		t.Fatalf("signal nope: %+v %v", res, err)
-	}
-	res, err = h.svc.Engine.Signal(h.ctx, engine.SignalCmd{RunID: runID, NodeID: "escalate", Option: "snooze", Actor: "lead@example.com"})
-	if err != nil || !res.Accepted {
-		t.Fatalf("signal snooze: %+v %v", res, err)
-	}
-	if tk := h.task("A1003"); tk.Status != task.TaskStatusSnoozed || tk.SnoozeUntil == nil || tk.AssigneeID != "lead@example.com" {
-		t.Fatalf("A1003 snoozed task = %+v", tk)
-	}
-	if n := h.node("A1003", "escalate"); n.Status != engine.NodeWaiting {
-		t.Fatalf("A1003 escalate after snooze = %s", n.Status)
-	}
-	res, err = h.svc.Engine.Signal(h.ctx, engine.SignalCmd{RunID: runID, NodeID: "escalate", Option: "handled", Actor: "lead@example.com"})
-	if err != nil || !res.Accepted {
-		t.Fatalf("signal handled: %+v %v", res, err)
-	}
-	res, _ = h.svc.Engine.Signal(h.ctx, engine.SignalCmd{RunID: runID, NodeID: "escalate", Option: "handled", Actor: "lead@example.com"})
-	if res.Accepted || res.Code != engine.RejectNotWaiting {
-		t.Fatalf("second click must be rejected as not_waiting: %+v", res)
-	}
-	// 人工操作是事件：Signal 返回时流程已经推进到结束，不需要等 tick。
-	if v := h.run("A1003"); v.Run.Status != engine.RunSucceeded {
-		t.Fatalf("A1003 run = %s", v.Run.Status)
-	}
-	// 做决定的组长成为任务的处理人：组任务没人认领，也能记下是谁处理的。
-	if tk := h.task("A1003"); tk.Status != task.TaskStatusSolved || tk.Resolution != "escalated" || tk.AssigneeID != "lead@example.com" || tk.AssigneeGroup != "" {
-		t.Fatalf("A1003 task = %+v", tk)
+	// 再扫一次：没有变化，不重复建任务、不重发通知。
+	before := len(e.Lark.Sent())
+	tick(t, e)
+	if got := len(e.Lark.Sent()); got != before {
+		t.Fatalf("second scan sent %d new cards", got-before)
 	}
 
-	// 48 小时后：A1001 仍待审核，提醒 RM。
-	h.tick(48 * time.Hour)
-	if c := h.cards("A1001"); len(c) != 2 {
-		t.Fatalf("A1001 cards after 48h = %v", c)
-	}
-
-	// A1001 在等待 7 天期间审核通过：下一次扫描命中 close_when，取消 run，任务以 auto_closed 完结，
-	// 7 天定时器随之撤销，不再检查或升级。
-	testdb.Exec(t, h.biz, "UPDATE appeal SET appeal_status = 'PASS', updated_at = NOW() - INTERVAL 3 MINUTE WHERE appeal_id = 'A1001'")
-	h.tick(time.Minute)
-	if v := h.run("A1001"); v.Run.Status != engine.RunCancelled {
-		t.Fatalf("A1001 run = %s", v.Run.Status)
-	}
-	// 自动关闭不改处理人：任务仍记在原 RM 名下。
-	if tk := h.task("A1001"); tk.Status != task.TaskStatusSolved || tk.Resolution != "auto_closed" || tk.AssigneeID != "rm.alice@example.com" {
-		t.Fatalf("A1001 task = %+v", tk)
-	}
-	var pending int
-	if err := h.svc.Conn.QueryRowCtx(h.ctx, &pending, "select count(*) from wf_job where run_id = ? and status = 'pending'", h.task("A1001").RunID); err != nil {
+	// A1002：RM 升级给组长 → 进入 vip_cs_leads 认领队列，通知发到组长群。
+	if _, err := e.Tasks.Do(ctx, a2.ID, task.Event{Kind: task.EvAct, Actor: "rm.alice@example.com", Action: "escalate", ExpectNode: "rm",
+		Target: targetOf(t, e, "vip_appeal_48h", "lead")}); err != nil {
 		t.Fatal(err)
 	}
-	if pending != 0 {
-		t.Fatalf("A1001 still has %d pending jobs", pending)
+	if got := sent(e, "oc_vip_cs_leads"); len(got) != 2 || got[1].Card.NodeName != "VIP 客服组长" {
+		t.Fatalf("escalation card = %+v", got)
+	}
+	// 组员认领；原 RM 仍能看到（经手人），但不能再处理。
+	if _, err := e.Tasks.Do(ctx, a2.ID, task.Event{Kind: task.EvClaim, Actor: "lead.carol@example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	cur, _ := e.Tasks.Get(ctx, a2.ID)
+	if acc, _ := e.Tasks.AccessOf(ctx, cur, "rm.alice@example.com", false); !acc.View {
+		t.Fatal("previous handler should still see the task")
+	}
+	if acc, _ := e.Tasks.AccessOf(ctx, cur, "stranger@example.com", false); acc.View {
+		t.Fatal("stranger should not see the task")
+	}
+	if _, err := e.Tasks.Do(ctx, a2.ID, task.Event{Kind: task.EvAct, Actor: "rm.alice@example.com", Action: "close"}); !errors.Is(err, task.ErrForbidden) {
+		t.Fatalf("previous handler close: %v", err)
+	}
+	if _, err := e.Tasks.Do(ctx, a2.ID, task.Event{Kind: task.EvAct, Actor: "lead.carol@example.com", Action: "close"}); err != nil {
+		t.Fatal(err)
+	}
+	// 手工完结后工单仍在结果里：不重建。
+	tick(t, e)
+	if got := open(t, e, "vip_appeal_48h", "A1002"); got == nil || got.ID != a2.ID || got.Status != task.TaskStatusSolved {
+		t.Fatalf("closed A1002 should stay tracked: %+v", got)
+	}
+	mine, _ := e.Tasks.List(ctx, task.ListQuery{Scope: task.ScopeInvolved, User: "rm.alice@example.com", Limit: 20})
+	if len(mine) != 1 || mine[0].ID != a2.ID {
+		t.Fatalf("alice involved = %+v", mine)
 	}
 
-	h.tick(6 * 24 * time.Hour)
-	if c := h.cards("A1001"); len(c) != 2 {
-		t.Fatalf("A1001 must not escalate: %v", c)
+	// A1003：组长分配给组员；组员推迟 1 小时，到期回到待处理并重新通知。
+	queue, _ := e.Tasks.List(ctx, task.ListQuery{Scope: task.ScopeQueue, User: "lead@example.com", Limit: 20})
+	if len(queue) != 2 { // A1007（组长是 vip_cs_leads 成员）与 A1003（vip_review 分配者）
+		t.Fatalf("lead queue = %d", len(queue))
+	}
+	if q, _ := e.Tasks.List(ctx, task.ListQuery{Scope: task.ScopeQueue, User: "reviewer.dave@example.com", Limit: 20}); len(q) != 0 {
+		t.Fatalf("executor should not see assign-mode queue: %+v", q)
+	}
+	if _, err := e.Tasks.Do(ctx, a3.ID, task.Event{Kind: task.EvAssign, Actor: "reviewer.dave@example.com", Assignee: "reviewer.dave@example.com"}); !errors.Is(err, task.ErrForbidden) {
+		t.Fatalf("executor assign: %v", err)
+	}
+	if _, err := e.Tasks.Do(ctx, a3.ID, task.Event{Kind: task.EvAssign, Actor: "lead@example.com", Assignee: "outsider@example.com"}); !errors.Is(err, task.ErrState) {
+		t.Fatalf("assign outsider: %v", err)
+	}
+	if _, err := e.Tasks.Do(ctx, a3.ID, task.Event{Kind: task.EvAssign, Actor: "lead@example.com", Assignee: "reviewer.dave@example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := sent(e, "reviewer.dave@example.com"); len(got) != 1 {
+		t.Fatalf("dave cards = %d", len(got))
+	}
+	if _, err := e.Tasks.Do(ctx, a3.ID, task.Event{Kind: task.EvAct, Actor: "reviewer.dave@example.com", Action: "snooze", Snooze: time.Hour}); err != nil {
+		t.Fatal(err)
+	}
+	tick(t, e)
+	if cur, _ := e.Tasks.Get(ctx, a3.ID); cur.Status != task.TaskStatusSnoozed {
+		t.Fatalf("woke too early: %+v", cur)
+	}
+	e.Advance(time.Hour)
+	tick(t, e)
+	if cur, _ := e.Tasks.Get(ctx, a3.ID); cur.Status != task.TaskStatusPending || cur.AssigneeID != "reviewer.dave@example.com" {
+		t.Fatalf("after wake: %+v", cur)
+	}
+	if got := sent(e, "reviewer.dave@example.com"); len(got) != 2 {
+		t.Fatalf("dave should be notified again on wake, got %d", len(got))
 	}
 
-	// A1002 到 7 天时仍待审核：升级给组长。
-	if c := h.cards("A1002"); len(c) != 3 {
-		t.Fatalf("A1002 cards after 7d = %v", c)
-	}
-	if n := h.node("A1002", "escalate"); n.Status != engine.NodeWaiting {
-		t.Fatalf("A1002 escalate = %s", n.Status)
+	// A1001 审核通过：下一轮扫描自动关闭。
+	testdb.Exec(t, e.Biz, "UPDATE appeal SET appeal_status = 'PASS' WHERE appeal_id = 'A1001'")
+	tick(t, e)
+	if cur, _ := e.Tasks.Get(ctx, a1.ID); cur.Status != task.TaskStatusSolved || cur.Resolution != task.ResolutionAutoClosed || cur.Tracked {
+		t.Fatalf("A1001 = %+v", cur)
 	}
 
-	// A1001 被驳回后重新提交：提交时间变了，是一次新的审核，建新任务并重新通知 RM；旧任务保持自动关闭。
-	testdb.Exec(t, h.biz, "UPDATE appeal SET appeal_status = 'COMMITED', commit_time = ?, updated_at = NOW() - INTERVAL 2 MINUTE WHERE appeal_id = 'A1001'", h.clock.Now().Unix())
-	h.tick(time.Minute)
-	ts := h.tasks("A1001")
-	if len(ts) != 2 || ts[0].Resolution != "auto_closed" || ts[1].Status != task.TaskStatusPending || ts[1].AssigneeID != "rm.alice@example.com" {
-		t.Fatalf("A1001 tasks after resubmission = %d", len(ts))
+	// A1007 跨过 48 小时窗口：离开「待审核」（自动关闭），进入「已等待 48 小时」成为新任务。
+	testdb.Exec(t, e.Biz, "UPDATE appeal SET commit_time = commit_time - 49 * 3600 WHERE appeal_id = 'A1007'")
+	tick(t, e)
+	if cur, _ := e.Tasks.Get(ctx, a7.ID); cur.Resolution != task.ResolutionAutoClosed {
+		t.Fatalf("A1007 old window = %+v", cur)
 	}
-	if c := h.cards("A1001"); len(c) != 3 || !strings.Contains(c[2], "待审核") {
-		t.Fatalf("A1001 cards after resubmission = %v", c)
+	if got := open(t, e, "vip_appeal_48h", "A1007"); got == nil || got.TeamKey != "vip_cs_leads" {
+		t.Fatalf("A1007 new window = %+v", got)
 	}
-	if n := h.node("A1001", "wait_48h"); n.Status != engine.NodeWaiting {
-		t.Fatalf("resubmitted A1001 wait_48h = %s", n.Status)
+
+	// A1002 审核完成后被驳回重新提交：先离开结果（解除跟踪），再以新的提交时间出现，生成新任务。
+	testdb.Exec(t, e.Biz, "UPDATE appeal SET appeal_status = 'REJECTED' WHERE appeal_id = 'A1002'")
+	tick(t, e)
+	testdb.Exec(t, e.Biz, "UPDATE appeal SET appeal_status = 'COMMITED', commit_time = commit_time + 60 WHERE appeal_id = 'A1002'")
+	tick(t, e)
+	if got := open(t, e, "vip_appeal_48h", "A1002"); got == nil || got.ID == a2.ID || got.Status != task.TaskStatusPending {
+		t.Fatalf("resubmitted A1002 = %+v", got)
+	}
+
+	// 任务历史。
+	hist, _ := e.Tasks.History(ctx, a2.ID)
+	var kinds []string
+	for _, h := range hist {
+		kinds = append(kinds, h.Kind)
+	}
+	if fmt.Sprint(kinds) != "[created escalate claimed close gone]" {
+		t.Fatalf("A1002 history = %v", kinds)
+	}
+}
+
+// targetOf 求某个节点的去向（escalate 前由调用方在事务外求好）。
+func targetOf(t *testing.T, e *TestEnv, key, node string) (to struct{ Assignee, Team, Mode string }) {
+	t.Helper()
+	def, _, err := e.Registry.Latest(context.Background(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, _, _ := def.Node(node)
+	to.Team, to.Mode = n.Assignee.Team, n.Assignee.Mode
+	return to
+}
+
+func TestOutboxRetry(t *testing.T) {
+	e := NewTestEnv(t)
+	fail := true
+	e.Lark.Fail = func(kind, target string) error {
+		if fail {
+			return errors.New("lark down")
+		}
+		return nil
+	}
+	retryTick(e)
+	if n := len(e.Lark.Sent()); n != 0 {
+		t.Fatalf("sent %d while lark is down", n)
+	}
+	// 第一次失败后 1 分钟重试；仍失败则退避翻倍（2 分钟）。
+	retryTick(e)
+	if n := len(e.Lark.Sent()); n != 0 {
+		t.Fatalf("sent %d while lark is down", n)
+	}
+	fail = false
+	tick(t, e) // 距上次失败 1 分钟，第二次的 2 分钟退避未到
+	if n := len(e.Lark.Sent()); n != 0 {
+		t.Fatalf("retried before backoff: %d", n)
+	}
+	retryTick(e)
+	if n := len(e.Lark.Sent()); n != 4 {
+		t.Fatalf("after retry sent %d, want 4", n)
+	}
+}
+
+// retryTick 拨动时钟并触发一次 tick，忽略投递失败（Tick 会把失败报出来）。
+func retryTick(e *TestEnv) {
+	e.Advance(time.Minute)
+	_ = e.Ticker.Tick(context.Background())
+}
+
+func TestPush(t *testing.T) {
+	e := NewTestEnv(t)
+	ctx := context.Background()
+	body := []byte(`{"key":"kyc_review","name":"KYC 复核","source":{"kind":"api"},
+		"fields":[{"name":"uid","label":"用户","pii":"mask_middle"},{"name":"amount","label":"金额","type":"money"}],
+		"card":{"title":"KYC 复核：{key}","fields":["uid","amount"]},
+		"nodes":[{"id":"ops","name":"运营","assignee":{"kind":"team","team":"vip_cs_leads","mode":"claim"},"actions":["close"]}]}`)
+	if _, issues, err := e.Registry.PublishBody(ctx, body, "test", e.Now()); err != nil {
+		t.Fatal(err, issues)
+	}
+	push := func(op string, at int64, fields string) bool {
+		t.Helper()
+		changed, err := e.Sources.Push(ctx, source.Envelope{TaskType: "kyc_review", Key: "K1", Op: op, OccurredAt: at, Fields: []byte(fields)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return changed
+	}
+	if !push("upsert", 100, `{"uid":"10086","amount":"12.50"}`) {
+		t.Fatal("first upsert should create")
+	}
+	push("upsert", 300, `{"uid":"10086","amount":"99.00"}`)
+	push("upsert", 200, `{"uid":"10086","amount":"50.00"}`) // 旧消息：忽略
+	tr, _ := e.Tasks.ListTracked(ctx, "kyc_review")
+	if len(tr) != 1 || fmt.Sprint(tasktype.DecodeValues(tr[0].Fields)["amount"]) != "99.00" {
+		t.Fatalf("tracked = %+v", tr)
+	}
+	if push("close", 250, "") {
+		t.Fatal("stale close should be ignored")
+	}
+	if !push("close", 400, "") {
+		t.Fatal("close should close the task")
+	}
+	if _, err := e.Sources.Push(ctx, source.Envelope{TaskType: "kyc_review", Key: "K2", Op: "upsert", OccurredAt: 1, Fields: []byte(`{"nope":1}`)}); !errors.Is(err, source.ErrBadEnvelope) {
+		t.Fatalf("unknown field: %v", err)
+	}
+	if _, err := e.Sources.Push(ctx, source.Envelope{TaskType: "vip_appeal_pending", Key: "K", Op: "upsert", OccurredAt: 1}); !errors.Is(err, source.ErrBadEnvelope) {
+		t.Fatalf("push to sql source: %v", err)
 	}
 }
