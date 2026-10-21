@@ -106,11 +106,12 @@ var ActionLabels = map[string]string{
 
 // Perms 是调用人对任务的操作权限。
 type Perms struct {
-	View, Act, Start bool
+	View, Act, Start, Claim, Transfer bool
 }
 
 // PermsOf 求调用人对任务的操作权限，规则与 task.Apply 一致（Apply 仍会再校验）。
-func PermsOf(ctx context.Context, s *svc.ServiceContext, t *task.Task, c Caller) (Perms, error) {
+func PermsOf(ctx context.Context, s *svc.ServiceContext, def *tasktype.TaskType, t *task.Task, c Caller) (Perms, error) {
+	node, _, _ := def.Node(t.NodeID)
 	view, err := s.Tasks.CanView(ctx, t, c.User, c.Admin)
 	if err != nil {
 		return Perms{}, err
@@ -119,8 +120,11 @@ func PermsOf(ctx context.Context, s *svc.ServiceContext, t *task.Task, c Caller)
 	if t.Status.IsTerminal() {
 		return p, nil
 	}
-	p.Act = t.AssigneeID == c.User
-	p.Start = t.Status == task.TaskStatusPending && t.AssigneeID == c.User
+	mine := t.AssigneeID != "" && t.AssigneeID == c.User
+	p.Act = mine
+	p.Start = t.Status == task.TaskStatusPending && mine
+	p.Claim = t.Status == task.TaskStatusUnassigned && node.Claim()
+	p.Transfer = c.Admin || (mine && node.Has(tasktype.ActionTransfer))
 	return p, nil
 }
 
@@ -130,7 +134,7 @@ func Summary(ctx context.Context, s *svc.ServiceContext, t *task.Task, c Caller)
 	if err != nil {
 		return nil, err
 	}
-	p, err := PermsOf(ctx, s, t, c)
+	p, err := PermsOf(ctx, s, def, t, c)
 	if err != nil {
 		return nil, err
 	}
@@ -145,12 +149,13 @@ func summary(def *tasktype.TaskType, t *task.Task, p Perms) *pb.TaskSummary {
 		AssigneeId: t.AssigneeID, NodeId: t.NodeID, Resolution: string(t.Resolution),
 		SnoozeUntil: Millis(t.SnoozeUntil), CreatedAt: t.CreatedAt.UnixMilli(), UpdatedAt: t.UpdatedAt.UnixMilli(),
 		Card:     CardPB(def.RenderCard(t.NodeID, t.BizKey, vals, "")),
-		CanStart: p.Start,
+		CanStart: p.Start, CanClaim: p.Claim, CanTransfer: p.Transfer,
 	}
 	node, _, ok := def.Node(t.NodeID)
 	if !ok {
 		return out
 	}
+	out.ClaimNode = node.Claim()
 	for _, a := range tasktype.Actions {
 		if !node.Has(a) {
 			continue
@@ -161,6 +166,8 @@ func summary(def *tasktype.TaskType, t *task.Task, p Perms) *pb.TaskSummary {
 				out.Actions = append(out.Actions, &pb.ActionOption{Key: a, Label: node.Link.Label, Url: out.Card.GetLink().GetValue()})
 			}
 			continue
+		case tasktype.ActionTransfer:
+			continue // 见 can_transfer
 		}
 		if !p.Act {
 			continue
@@ -189,7 +196,7 @@ func Detail(ctx context.Context, s *svc.ServiceContext, t *task.Task, c Caller) 
 	if err != nil {
 		return nil, err
 	}
-	p, err := PermsOf(ctx, s, t, c)
+	p, err := PermsOf(ctx, s, def, t, c)
 	if err != nil {
 		return nil, err
 	}
@@ -202,15 +209,17 @@ func Detail(ctx context.Context, s *svc.ServiceContext, t *task.Task, c Caller) 
 	}
 	out := &pb.TaskDetail{
 		Task:              summary(def, t, p),
-		CanReassign:       !t.Status.IsTerminal() && (t.AssigneeID == c.User || c.Admin),
-		CanUpdatePriority: !t.Status.IsTerminal() && (t.AssigneeID == c.User || c.Admin),
+		CanUpdatePriority: !t.Status.IsTerminal() && ((t.AssigneeID != "" && t.AssigneeID == c.User) || c.Admin),
 	}
-	out.ReadOnly = !p.Act && !out.CanReassign
+	out.ReadOnly = !p.Act && !p.Claim && !p.Transfer
 	for _, kv := range def.Masked(t.BizKey, tasktype.DecodeValues(t.Fields)) {
 		out.Fields = append(out.Fields, &pb.KV{Label: kv.Label, Value: kv.Value})
 	}
 	visited := map[string]bool{t.NodeID: true}
 	for _, h := range hist {
+		if h.Kind == string(task.EvTransfer) {
+			out.TransferCount++
+		}
 		visited[h.NodeID] = true
 		name := h.NodeID
 		if n, _, ok := def.Node(h.NodeID); ok {
@@ -238,6 +247,11 @@ func AssigneeText(def *tasktype.TaskType, a tasktype.Assignee) string {
 		return fmt.Sprintf("业务关系 %s（%s），查不到时交给 %s", a.Relation, field, a.Fallback)
 	case tasktype.AssigneePool:
 		return fmt.Sprintf("从 %s 中随机分配", strings.Join(a.Users, "、"))
+	case tasktype.AssigneeClaim:
+		if a.RemindAfter != "" {
+			return fmt.Sprintf("通知到群 %s 认领，%s 无人认领再提醒一次", a.Chat, a.RemindAfter)
+		}
+		return fmt.Sprintf("通知到群 %s 认领", a.Chat)
 	}
 	return ""
 }

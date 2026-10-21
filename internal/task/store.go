@@ -105,7 +105,7 @@ func (s *Store) Create(ctx context.Context, cmd CreateCmd) (*Task, bool, error) 
 	return &t, true, nil
 }
 
-// Do 对任务应用一次事件。成员关系等身份信息在锁内按任务当前的团队求值。
+// Do 对任务应用一次事件：锁任务行 → Apply → 写回，提交后投递通知。
 func (s *Store) Do(ctx context.Context, id int64, ev Event) (*Task, error) {
 	if ev.Now.IsZero() {
 		ev.Now = s.Now()
@@ -182,8 +182,12 @@ func (s *Store) record(ctx context.Context, session sqlx.Session, def *tasktype.
 	ob := s.outbox.WithSession(session)
 	var ids []uint64
 	for _, n := range res.Notify {
-		key := fmt.Sprintf("%d:%d:%s:%s", to.ID, to.Version, notify.KindUser, n.User)
-		if err := ob.Add(ctx, &model.Outbox{TaskId: uint64(to.ID), Kind: notify.KindUser, Target: n.User, Payload: string(payload), IdemKey: key, NextAt: s.Now()}); err != nil {
+		kind, target := notify.KindUser, n.User
+		if n.Chat != "" {
+			kind, target = notify.KindChat, n.Chat
+		}
+		key := fmt.Sprintf("%d:%d:%s:%s", to.ID, to.Version, kind, target)
+		if err := ob.Add(ctx, &model.Outbox{TaskId: uint64(to.ID), Kind: kind, Target: target, Payload: string(payload), IdemKey: key, NextAt: s.Now()}); err != nil {
 			return nil, err
 		}
 		o, err := ob.FindOneByIdemKey(ctx, key)
@@ -213,18 +217,23 @@ func (s *Store) RefreshFields(ctx context.Context, id int64, fields json.RawMess
 	return s.tasks.UpdateFields(ctx, uint64(id), string(fields), sourceAt)
 }
 
-// WakeDue 把推迟到期的任务回迁待处理，返回处理条数。
+// WakeDue 把推迟到期的任务回迁待处理，并给到了再次提醒时间的待认领任务再发一次群通知，返回处理条数。
 func (s *Store) WakeDue(ctx context.Context, limit int) (int, error) {
-	ids, err := s.tasks.DueSnoozed(ctx, s.Now(), limit)
-	if err != nil {
-		return 0, err
-	}
 	n := 0
-	for _, id := range ids {
-		if _, err := s.Do(ctx, int64(id), Event{Kind: EvWake}); err != nil && !errors.Is(err, ErrState) {
+	for _, due := range []struct {
+		find func(context.Context, time.Time, int) ([]uint64, error)
+		kind EventKind
+	}{{s.tasks.DueSnoozed, EvWake}, {s.tasks.DueReminders, EvRemind}} {
+		ids, err := due.find(ctx, s.Now(), limit)
+		if err != nil {
 			return n, err
 		}
-		n++
+		for _, id := range ids {
+			if _, err := s.Do(ctx, int64(id), Event{Kind: due.kind}); err != nil && !errors.Is(err, ErrState) {
+				return n, err
+			}
+			n++
+		}
 	}
 	return n, nil
 }
@@ -243,6 +252,10 @@ func fromRow(r *model.Task) Task {
 	if r.ClosedAt.Valid {
 		v := r.ClosedAt.Time
 		t.ClosedAt = &v
+	}
+	if r.RemindAt.Valid {
+		v := r.RemindAt.Time
+		t.RemindAt = &v
 	}
 	return t
 }
@@ -264,6 +277,9 @@ func toRow(t Task) *model.Task {
 	}
 	if t.ClosedAt != nil {
 		r.ClosedAt = sql.NullTime{Time: *t.ClosedAt, Valid: true}
+	}
+	if t.RemindAt != nil {
+		r.RemindAt = sql.NullTime{Time: *t.RemindAt, Valid: true}
 	}
 	return r
 }

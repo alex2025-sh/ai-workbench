@@ -47,8 +47,9 @@ type (
 		NodeId      string         `db:"node_id"`      // 当前人工节点
 		Status      int64          `db:"status"`       // -1 unassigned / 0 pending / 1 processing / 2 snoozed / 3 solved
 		Priority    int64          `db:"priority"`     // 0 P0 ... 3 P3
-		AssigneeId  string         `db:"assignee_id"`  // 当前处理人
+		AssigneeId  string         `db:"assignee_id"`  // 当前处理人；待认领时为空
 		SnoozeUntil sql.NullTime   `db:"snooze_until"`
+		RemindAt    sql.NullTime   `db:"remind_at"`  // 待认领时再次提醒群的时间（节点配置了 remind_after），提醒一次后清空
 		Resolution  string         `db:"resolution"` // handled / no_response / auto_closed
 		SourceAt    int64          `db:"source_at"`  // 推送来源的 occurred_at（毫秒），丢弃更旧的消息
 		Version     int64          `db:"version"`    // 每次状态转移加一
@@ -100,14 +101,14 @@ func (m *defaultTaskModel) FindOneByTaskTypeTrackKey(ctx context.Context, taskTy
 }
 
 func (m *defaultTaskModel) Insert(ctx context.Context, data *Task) (sql.Result, error) {
-	query := fmt.Sprintf("insert into %s (%s) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", m.table, taskRowsExpectAutoSet)
-	ret, err := m.conn.ExecCtx(ctx, query, data.TaskType, data.TypeVersion, data.BizKey, data.TrackKey, data.Fields, data.NodeId, data.Status, data.Priority, data.AssigneeId, data.SnoozeUntil, data.Resolution, data.SourceAt, data.Version, data.ClosedAt)
+	query := fmt.Sprintf("insert into %s (%s) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", m.table, taskRowsExpectAutoSet)
+	ret, err := m.conn.ExecCtx(ctx, query, data.TaskType, data.TypeVersion, data.BizKey, data.TrackKey, data.Fields, data.NodeId, data.Status, data.Priority, data.AssigneeId, data.SnoozeUntil, data.RemindAt, data.Resolution, data.SourceAt, data.Version, data.ClosedAt)
 	return ret, err
 }
 
 func (m *defaultTaskModel) Update(ctx context.Context, newData *Task) error {
 	query := fmt.Sprintf("update %s set %s where `id` = ?", m.table, taskRowsWithPlaceHolder)
-	_, err := m.conn.ExecCtx(ctx, query, newData.TaskType, newData.TypeVersion, newData.BizKey, newData.TrackKey, newData.Fields, newData.NodeId, newData.Status, newData.Priority, newData.AssigneeId, newData.SnoozeUntil, newData.Resolution, newData.SourceAt, newData.Version, newData.ClosedAt, newData.Id)
+	_, err := m.conn.ExecCtx(ctx, query, newData.TaskType, newData.TypeVersion, newData.BizKey, newData.TrackKey, newData.Fields, newData.NodeId, newData.Status, newData.Priority, newData.AssigneeId, newData.SnoozeUntil, newData.RemindAt, newData.Resolution, newData.SourceAt, newData.Version, newData.ClosedAt, newData.Id)
 	return err
 }
 

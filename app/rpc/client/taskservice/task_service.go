@@ -23,24 +23,26 @@ type (
 	ListTasksResp     = pb.ListTasksResp
 	NodeView          = pb.NodeView
 	PageReq           = pb.PageReq
-	ReassignReq       = pb.ReassignReq
 	TaskCount         = pb.TaskCount
 	TaskDetail        = pb.TaskDetail
 	TaskIdReq         = pb.TaskIdReq
 	TaskSummary       = pb.TaskSummary
+	TransferTaskReq   = pb.TransferTaskReq
 	UpdatePriorityReq = pb.UpdatePriorityReq
 
 	TaskService interface {
-		// 任务列表：我的任务、我经手的
+		// 任务列表：我的任务、待认领（所有人可见）、我经手的
 		ListTasks(ctx context.Context, in *ListTasksReq, opts ...grpc.CallOption) (*ListTasksResp, error)
 		// 任务详情：卡片、业务字段、节点链、历史，以及调用人可做的操作
 		GetTask(ctx context.Context, in *TaskIdReq, opts ...grpc.CallOption) (*TaskDetail, error)
+		// 认领：认领节点上的待认领任务，任何人都可以认领，先到先得
+		ClaimTask(ctx context.Context, in *TaskIdReq, opts ...grpc.CallOption) (*TaskSummary, error)
 		// 开始处理
 		StartProcessing(ctx context.Context, in *TaskIdReq, opts ...grpc.CallOption) (*TaskSummary, error)
 		// 节点动作：close、no_response、snooze、escalate（link 在前端打开，不经过后端）
 		ActTask(ctx context.Context, in *ActTaskReq, opts ...grpc.CallOption) (*TaskSummary, error)
-		// 转派（处理人或 task.admin）
-		Reassign(ctx context.Context, in *ReassignReq, opts ...grpc.CallOption) (*TaskSummary, error)
+		// 转交：同一节点内交给另一个人，或放回待认领（只限认领节点）。处理人（节点启用了 transfer）或 task.admin，必须写原因
+		TransferTask(ctx context.Context, in *TransferTaskReq, opts ...grpc.CallOption) (*TaskSummary, error)
 		// 调整优先级（处理人或 task.admin）
 		UpdatePriority(ctx context.Context, in *UpdatePriorityReq, opts ...grpc.CallOption) (*TaskSummary, error)
 	}
@@ -56,7 +58,7 @@ func NewTaskService(cli zrpc.Client) TaskService {
 	}
 }
 
-// 任务列表：我的任务、我经手的
+// 任务列表：我的任务、待认领（所有人可见）、我经手的
 func (m *defaultTaskService) ListTasks(ctx context.Context, in *ListTasksReq, opts ...grpc.CallOption) (*ListTasksResp, error) {
 	client := pb.NewTaskServiceClient(m.cli.Conn())
 	return client.ListTasks(ctx, in, opts...)
@@ -66,6 +68,12 @@ func (m *defaultTaskService) ListTasks(ctx context.Context, in *ListTasksReq, op
 func (m *defaultTaskService) GetTask(ctx context.Context, in *TaskIdReq, opts ...grpc.CallOption) (*TaskDetail, error) {
 	client := pb.NewTaskServiceClient(m.cli.Conn())
 	return client.GetTask(ctx, in, opts...)
+}
+
+// 认领：认领节点上的待认领任务，任何人都可以认领，先到先得
+func (m *defaultTaskService) ClaimTask(ctx context.Context, in *TaskIdReq, opts ...grpc.CallOption) (*TaskSummary, error) {
+	client := pb.NewTaskServiceClient(m.cli.Conn())
+	return client.ClaimTask(ctx, in, opts...)
 }
 
 // 开始处理
@@ -80,10 +88,10 @@ func (m *defaultTaskService) ActTask(ctx context.Context, in *ActTaskReq, opts .
 	return client.ActTask(ctx, in, opts...)
 }
 
-// 转派（处理人或 task.admin）
-func (m *defaultTaskService) Reassign(ctx context.Context, in *ReassignReq, opts ...grpc.CallOption) (*TaskSummary, error) {
+// 转交：同一节点内交给另一个人，或放回待认领（只限认领节点）。处理人（节点启用了 transfer）或 task.admin，必须写原因
+func (m *defaultTaskService) TransferTask(ctx context.Context, in *TransferTaskReq, opts ...grpc.CallOption) (*TaskSummary, error) {
 	client := pb.NewTaskServiceClient(m.cli.Conn())
-	return client.Reassign(ctx, in, opts...)
+	return client.TransferTask(ctx, in, opts...)
 }
 
 // 调整优先级（处理人或 task.admin）

@@ -1,8 +1,9 @@
-# VIP 工单超过 7 天：提交超过 7 天仍未审核完成，随机交给 VIP 审核小组的一位组员处理。
+# VIP 工单超过 7 天：提交超过 7 天仍未审核完成，发到 VIP 审核群，由组员打开链接自己认领。
+# 2 小时内没人认领时再提醒一次群；认领后处理不了可以放回待认领，或转交给具体的人。
 key: vip_appeal_7d
 namespace: cs_vip
 name: VIP 工单超过 7 天
-description: VIP 工单提交超过 7 天仍未审核完成，随机交给 VIP 审核小组的一位组员处理。
+description: VIP 工单提交超过 7 天仍未审核完成，发到 VIP 审核群认领处理。
 priority: P0
 
 source:
@@ -32,7 +33,7 @@ card:
 nodes:
   - id: review
     name: VIP 审核小组
-    assignee: { kind: pool, users: [reviewer.dave@example.com, reviewer.erin@example.com], strategy: random }
-    actions: [close, no_response, snooze, link]
+    assignee: { kind: claim, chat: oc_vip_review, remind_after: 2h }   # Lark 群 chat_id（本地 mock）
+    actions: [close, no_response, snooze, link, transfer]
     link: { label: 打开工单, url: "https://risk.example.com/appeal/{appeal_id}" }
     lark: true

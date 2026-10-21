@@ -25,6 +25,8 @@ type (
 		UpdateFields(ctx context.Context, id uint64, fields string, sourceAt int64) error
 		// DueSnoozed 返回推迟已到期的任务 id。
 		DueSnoozed(ctx context.Context, now time.Time, limit int) ([]uint64, error)
+		// DueReminders 返回待认领、到了再次提醒时间的任务 id。
+		DueReminders(ctx context.Context, now time.Time, limit int) ([]uint64, error)
 		// List 按优先级（P0 在前）、id（新的在前）分页，键集分页。
 		List(ctx context.Context, f TaskFilter) ([]*Task, error)
 		// Count 按 (priority, status) 分组计数，条件与 List 相同（忽略 After 与 Limit）。
@@ -38,10 +40,11 @@ type (
 		N        int64 `db:"n"`
 	}
 
-	// TaskFilter 是任务列表的条件。Assignee、Involved 二选一。
+	// TaskFilter 是任务列表的条件。Assignee、Involved、Claimable 三选一。
 	TaskFilter struct {
 		Assignee   string // 我的任务
 		Involved   string // 我经手的：参与过、但现在不在我名下的任务
+		Claimable  bool   // 待认领：认领节点上还没有人认领的任务（所有人可见）
 		Statuses   []int64
 		Priorities []int64
 		TaskType   string
@@ -97,6 +100,12 @@ func (m *customTaskModel) DueSnoozed(ctx context.Context, now time.Time, limit i
 	return out, m.conn.QueryRowsCtx(ctx, &out, q, now, limit)
 }
 
+func (m *customTaskModel) DueReminders(ctx context.Context, now time.Time, limit int) ([]uint64, error) {
+	var out []uint64
+	q := fmt.Sprintf("select `id` from %s where `status` = -1 and `remind_at` <= ? order by `remind_at` limit ?", m.table)
+	return out, m.conn.QueryRowsCtx(ctx, &out, q, now, limit)
+}
+
 func (m *customTaskModel) List(ctx context.Context, f TaskFilter) ([]*Task, error) {
 	where, args := f.where()
 	if where == nil {
@@ -129,6 +138,8 @@ func (f TaskFilter) where() ([]string, []any) {
 	switch {
 	case f.Assignee != "":
 		where, args = append(where, "`assignee_id` = ?"), append(args, f.Assignee)
+	case f.Claimable:
+		where = append(where, "`status` = -1")
 	case f.Involved != "":
 		where = append(where, "`id` in (select `task_id` from `task_participant` where `user_id` = ?)", "`assignee_id` <> ?")
 		args = append(args, f.Involved, f.Involved)

@@ -541,9 +541,10 @@ var TaskTypeService_ServiceDesc = grpc.ServiceDesc{
 const (
 	TaskService_ListTasks_FullMethodName       = "/workbench.v1.TaskService/ListTasks"
 	TaskService_GetTask_FullMethodName         = "/workbench.v1.TaskService/GetTask"
+	TaskService_ClaimTask_FullMethodName       = "/workbench.v1.TaskService/ClaimTask"
 	TaskService_StartProcessing_FullMethodName = "/workbench.v1.TaskService/StartProcessing"
 	TaskService_ActTask_FullMethodName         = "/workbench.v1.TaskService/ActTask"
-	TaskService_Reassign_FullMethodName        = "/workbench.v1.TaskService/Reassign"
+	TaskService_TransferTask_FullMethodName    = "/workbench.v1.TaskService/TransferTask"
 	TaskService_UpdatePriority_FullMethodName  = "/workbench.v1.TaskService/UpdatePriority"
 )
 
@@ -553,16 +554,18 @@ const (
 //
 // 任务工作台
 type TaskServiceClient interface {
-	// 任务列表：我的任务、我经手的
+	// 任务列表：我的任务、待认领（所有人可见）、我经手的
 	ListTasks(ctx context.Context, in *ListTasksReq, opts ...grpc.CallOption) (*ListTasksResp, error)
 	// 任务详情：卡片、业务字段、节点链、历史，以及调用人可做的操作
 	GetTask(ctx context.Context, in *TaskIdReq, opts ...grpc.CallOption) (*TaskDetail, error)
+	// 认领：认领节点上的待认领任务，任何人都可以认领，先到先得
+	ClaimTask(ctx context.Context, in *TaskIdReq, opts ...grpc.CallOption) (*TaskSummary, error)
 	// 开始处理
 	StartProcessing(ctx context.Context, in *TaskIdReq, opts ...grpc.CallOption) (*TaskSummary, error)
 	// 节点动作：close、no_response、snooze、escalate（link 在前端打开，不经过后端）
 	ActTask(ctx context.Context, in *ActTaskReq, opts ...grpc.CallOption) (*TaskSummary, error)
-	// 转派（处理人或 task.admin）
-	Reassign(ctx context.Context, in *ReassignReq, opts ...grpc.CallOption) (*TaskSummary, error)
+	// 转交：同一节点内交给另一个人，或放回待认领（只限认领节点）。处理人（节点启用了 transfer）或 task.admin，必须写原因
+	TransferTask(ctx context.Context, in *TransferTaskReq, opts ...grpc.CallOption) (*TaskSummary, error)
 	// 调整优先级（处理人或 task.admin）
 	UpdatePriority(ctx context.Context, in *UpdatePriorityReq, opts ...grpc.CallOption) (*TaskSummary, error)
 }
@@ -595,6 +598,16 @@ func (c *taskServiceClient) GetTask(ctx context.Context, in *TaskIdReq, opts ...
 	return out, nil
 }
 
+func (c *taskServiceClient) ClaimTask(ctx context.Context, in *TaskIdReq, opts ...grpc.CallOption) (*TaskSummary, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(TaskSummary)
+	err := c.cc.Invoke(ctx, TaskService_ClaimTask_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *taskServiceClient) StartProcessing(ctx context.Context, in *TaskIdReq, opts ...grpc.CallOption) (*TaskSummary, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(TaskSummary)
@@ -615,10 +628,10 @@ func (c *taskServiceClient) ActTask(ctx context.Context, in *ActTaskReq, opts ..
 	return out, nil
 }
 
-func (c *taskServiceClient) Reassign(ctx context.Context, in *ReassignReq, opts ...grpc.CallOption) (*TaskSummary, error) {
+func (c *taskServiceClient) TransferTask(ctx context.Context, in *TransferTaskReq, opts ...grpc.CallOption) (*TaskSummary, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(TaskSummary)
-	err := c.cc.Invoke(ctx, TaskService_Reassign_FullMethodName, in, out, cOpts...)
+	err := c.cc.Invoke(ctx, TaskService_TransferTask_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -641,16 +654,18 @@ func (c *taskServiceClient) UpdatePriority(ctx context.Context, in *UpdatePriori
 //
 // 任务工作台
 type TaskServiceServer interface {
-	// 任务列表：我的任务、我经手的
+	// 任务列表：我的任务、待认领（所有人可见）、我经手的
 	ListTasks(context.Context, *ListTasksReq) (*ListTasksResp, error)
 	// 任务详情：卡片、业务字段、节点链、历史，以及调用人可做的操作
 	GetTask(context.Context, *TaskIdReq) (*TaskDetail, error)
+	// 认领：认领节点上的待认领任务，任何人都可以认领，先到先得
+	ClaimTask(context.Context, *TaskIdReq) (*TaskSummary, error)
 	// 开始处理
 	StartProcessing(context.Context, *TaskIdReq) (*TaskSummary, error)
 	// 节点动作：close、no_response、snooze、escalate（link 在前端打开，不经过后端）
 	ActTask(context.Context, *ActTaskReq) (*TaskSummary, error)
-	// 转派（处理人或 task.admin）
-	Reassign(context.Context, *ReassignReq) (*TaskSummary, error)
+	// 转交：同一节点内交给另一个人，或放回待认领（只限认领节点）。处理人（节点启用了 transfer）或 task.admin，必须写原因
+	TransferTask(context.Context, *TransferTaskReq) (*TaskSummary, error)
 	// 调整优先级（处理人或 task.admin）
 	UpdatePriority(context.Context, *UpdatePriorityReq) (*TaskSummary, error)
 	mustEmbedUnimplementedTaskServiceServer()
@@ -669,14 +684,17 @@ func (UnimplementedTaskServiceServer) ListTasks(context.Context, *ListTasksReq) 
 func (UnimplementedTaskServiceServer) GetTask(context.Context, *TaskIdReq) (*TaskDetail, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetTask not implemented")
 }
+func (UnimplementedTaskServiceServer) ClaimTask(context.Context, *TaskIdReq) (*TaskSummary, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method ClaimTask not implemented")
+}
 func (UnimplementedTaskServiceServer) StartProcessing(context.Context, *TaskIdReq) (*TaskSummary, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method StartProcessing not implemented")
 }
 func (UnimplementedTaskServiceServer) ActTask(context.Context, *ActTaskReq) (*TaskSummary, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ActTask not implemented")
 }
-func (UnimplementedTaskServiceServer) Reassign(context.Context, *ReassignReq) (*TaskSummary, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method Reassign not implemented")
+func (UnimplementedTaskServiceServer) TransferTask(context.Context, *TransferTaskReq) (*TaskSummary, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method TransferTask not implemented")
 }
 func (UnimplementedTaskServiceServer) UpdatePriority(context.Context, *UpdatePriorityReq) (*TaskSummary, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method UpdatePriority not implemented")
@@ -738,6 +756,24 @@ func _TaskService_GetTask_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
+func _TaskService_ClaimTask_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TaskIdReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TaskServiceServer).ClaimTask(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TaskService_ClaimTask_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TaskServiceServer).ClaimTask(ctx, req.(*TaskIdReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _TaskService_StartProcessing_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(TaskIdReq)
 	if err := dec(in); err != nil {
@@ -774,20 +810,20 @@ func _TaskService_ActTask_Handler(srv interface{}, ctx context.Context, dec func
 	return interceptor(ctx, in, info, handler)
 }
 
-func _TaskService_Reassign_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(ReassignReq)
+func _TaskService_TransferTask_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(TransferTaskReq)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(TaskServiceServer).Reassign(ctx, in)
+		return srv.(TaskServiceServer).TransferTask(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: TaskService_Reassign_FullMethodName,
+		FullMethod: TaskService_TransferTask_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(TaskServiceServer).Reassign(ctx, req.(*ReassignReq))
+		return srv.(TaskServiceServer).TransferTask(ctx, req.(*TransferTaskReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -826,6 +862,10 @@ var TaskService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _TaskService_GetTask_Handler,
 		},
 		{
+			MethodName: "ClaimTask",
+			Handler:    _TaskService_ClaimTask_Handler,
+		},
+		{
 			MethodName: "StartProcessing",
 			Handler:    _TaskService_StartProcessing_Handler,
 		},
@@ -834,8 +874,8 @@ var TaskService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _TaskService_ActTask_Handler,
 		},
 		{
-			MethodName: "Reassign",
-			Handler:    _TaskService_Reassign_Handler,
+			MethodName: "TransferTask",
+			Handler:    _TaskService_TransferTask_Handler,
 		},
 		{
 			MethodName: "UpdatePriority",

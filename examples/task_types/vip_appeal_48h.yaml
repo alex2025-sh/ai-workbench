@@ -34,11 +34,11 @@ nodes:
   - id: rm
     name: RM 跟进
     assignee: { kind: relation, relation: vip_rm, field: uid, fallback: lead@example.com }
-    actions: [close, snooze, link, escalate]
+    actions: [close, snooze, link, escalate, transfer]
     link: { label: 打开工单, url: "https://risk.example.com/appeal/{appeal_id}" }
     lark: true
   - id: lead
     name: VIP 客服组长
     assignee: { kind: pool, users: [lead@example.com, lead.carol@example.com], strategy: random }   # 两位组长中随机一位
-    actions: [close, no_response, snooze]
+    actions: [close, no_response, snooze, transfer]
     lark: true

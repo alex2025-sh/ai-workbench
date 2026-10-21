@@ -11,8 +11,9 @@ import (
 
 // 列表的范围。
 const (
-	ScopeMine     = "mine"     // 我名下的任务
-	ScopeInvolved = "involved" // 我经手过、现在不在我名下的任务（只读）
+	ScopeMine      = "mine"      // 我名下的任务
+	ScopeInvolved  = "involved"  // 我经手过、现在不在我名下的任务（只读）
+	ScopeClaimable = "claimable" // 待认领：认领节点上还没有人认领的任务，所有人可见
 )
 
 // ListQuery 是列表查询条件。
@@ -44,6 +45,8 @@ func (s *Store) filter(ctx context.Context, q ListQuery) (model.TaskFilter, erro
 	switch q.Scope {
 	case ScopeInvolved:
 		f.Involved = q.User
+	case ScopeClaimable:
+		f.Claimable = true
 	default:
 		f.Assignee = q.User
 	}
@@ -112,14 +115,17 @@ func (s *Store) History(ctx context.Context, id int64) ([]HistoryItem, error) {
 	return out, nil
 }
 
-// CanView 报告调用人能否查看任务：当前处理人、经手人（升级或转派前处理过的人）与 task.admin。
-// 只有当前处理人能处理。
+// CanView 报告调用人能否查看任务：当前处理人、经手人（升级或转交前处理过的人）与 task.admin；
+// 待认领的任务所有人都能查看（认领不限人员）。只有当前处理人能处理。
 func (s *Store) CanView(ctx context.Context, t *Task, user string, admin bool) (bool, error) {
 	if admin || (user != "" && t.AssigneeID == user) {
 		return true, nil
 	}
 	if user == "" {
 		return false, nil
+	}
+	if t.Status == TaskStatusUnassigned {
+		return true, nil
 	}
 	_, err := s.parts.FindOneByTaskIdUserId(ctx, uint64(t.ID), user)
 	if errors.Is(err, model.ErrNotFound) {

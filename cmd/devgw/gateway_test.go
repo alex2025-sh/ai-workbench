@@ -106,7 +106,7 @@ func TestForwarding(t *testing.T) {
 	if task["id"] != "7" || task["assignee_id"] != "rm.alice@example.com" {
 		t.Fatalf("task = %v", task)
 	}
-	if _, ok := out["can_reassign"]; !ok {
+	if _, ok := out["transfer_count"]; !ok {
 		t.Fatalf("snake_case / unpopulated fields missing: %v", out)
 	}
 

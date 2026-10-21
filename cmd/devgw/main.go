@@ -70,7 +70,7 @@ type devUser struct {
 }
 
 // mockUsers 从 mock 关系表、示例任务类型与权限表中收集人员：关系表中的处理人标为 rm，
-// 示例节点的候选人与兜底人带上所在节点，并附上权限。线上以发布的任务类型为准，这里只供切换身份时参考。
+// 示例节点的候选人与兜底人带上所在节点，并附上权限（权限表里也列了只用来认领的人）。线上以发布的任务类型为准，这里只供切换身份时参考。
 func mockUsers(relationsFile, examplesGlob, permissionsFile string) ([]devUser, error) {
 	byID := map[string]*devUser{}
 	get := func(id string) *devUser {

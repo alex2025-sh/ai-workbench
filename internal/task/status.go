@@ -11,7 +11,7 @@ import "fmt"
 type TaskStatus int16
 
 const (
-	TaskStatusUnassigned TaskStatus = -1 // 在团队队列中，等待认领或分配
+	TaskStatusUnassigned TaskStatus = -1 // 待认领：认领节点上还没有人认领
 	TaskStatusPending    TaskStatus = 0  // 已有处理人，等待处理
 	TaskStatusProcessing TaskStatus = 1  // 处理人点过「开始处理」
 	TaskStatusSnoozed    TaskStatus = 2  // 主动推迟，到期回迁 pending

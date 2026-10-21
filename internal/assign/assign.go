@@ -1,8 +1,9 @@
-// Package assign 求值节点的分配器：任务进入节点时直接分配给一个人。
+// Package assign 求值节点的分配器：任务进入节点时交给谁。
 //
-// 一期支持两种分配器（tasktype.Assignee.Kind）：
+// 一期支持三种分配器（tasktype.Assignee.Kind）：
 //   - relation：按业务关系找到一个人（如 VIP → RM），查不到时交给配置的兜底人；
-//   - pool：从配置的一批人中按策略选一个（目前只有 random）。
+//   - pool：从配置的一批人中按策略选一个（目前只有 random）；
+//   - claim：不指定人，任务进入「待认领」并通知到 Lark 群，由打开链接的人自己认领（Target.Assignee 为空）。
 //
 // 扩展点：
 //   - 新的分配方式实现 Resolver 并注册到 Service（如按组织架构、按排班表）；
@@ -20,7 +21,7 @@ import (
 // Target 是分配结果：处理人，以及是怎么分到的（写进任务历史）。
 type Target struct {
 	Assignee string
-	By       string // relation / fallback / random ...
+	By       string // relation / fallback / random / claim ...
 }
 
 // Resolver 是一种分配方式。实现只读取、没有副作用，在事务外调用。
@@ -58,6 +59,7 @@ func New(rel Relations, pickers ...Picker) *Service {
 		pool.Pickers[p.Strategy()] = p
 	}
 	s.Register(pool)
+	s.Register(ClaimResolver{})
 	return s
 }
 
@@ -74,7 +76,7 @@ func (s *Service) Resolve(ctx context.Context, n tasktype.Node, vals tasktype.Va
 	if err != nil {
 		return Target{}, err
 	}
-	if t.Assignee == "" {
+	if t.Assignee == "" && n.Assignee.Kind != tasktype.AssigneeClaim {
 		return Target{}, fmt.Errorf("assign: node %s resolved to nobody", n.ID)
 	}
 	return t, nil
@@ -133,6 +135,17 @@ func (r PoolResolver) Resolve(ctx context.Context, a tasktype.Assignee, vals tas
 	}
 	u, err := p.Pick(ctx, a.Users, key)
 	return Target{Assignee: u, By: strategy}, err
+}
+
+// ClaimResolver：认领模式，不指定处理人，任务进入待认领。
+type ClaimResolver struct{}
+
+// Kind 实现 Resolver。
+func (ClaimResolver) Kind() string { return tasktype.AssigneeClaim }
+
+// Resolve 实现 Resolver。
+func (ClaimResolver) Resolve(context.Context, tasktype.Assignee, tasktype.Values) (Target, error) {
+	return Target{By: tasktype.AssigneeClaim}, nil
 }
 
 // WithKey 把任务的去重 key 放进分配器可见的字段（按 key 选人的策略会用到），不写进任务。

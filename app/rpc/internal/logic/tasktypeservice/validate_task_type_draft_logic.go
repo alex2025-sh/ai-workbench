@@ -25,7 +25,7 @@ func NewValidateTaskTypeDraftLogic(ctx context.Context, svcCtx *svc.ServiceConte
 	}
 }
 
-// 完整校验草稿（含团队、数据源连接、业务关系是否存在）
+// 完整校验草稿（含数据源连接、业务关系是否存在）
 func (l *ValidateTaskTypeDraftLogic) ValidateTaskTypeDraft(in *pb.TaskTypeKeyReq) (*pb.ValidateResp, error) {
 	user, err := identity.Require(l.ctx)
 	if err != nil {

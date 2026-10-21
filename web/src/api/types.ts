@@ -61,8 +61,11 @@ export interface TaskSummary {
   created_at: Int64;
   updated_at: Int64;
   card: Card | null;
-  actions: ActionOption[];
+  actions: ActionOption[]; // 节点动作（不含转交，见 can_transfer）
   can_start: boolean;
+  can_claim: boolean; // 待认领，调用人可以认领
+  can_transfer: boolean;
+  claim_node: boolean; // 当前节点是认领节点：转交时可以放回待认领
 }
 
 export interface TaskCount {
@@ -71,7 +74,7 @@ export interface TaskCount {
   count: Int64;
 }
 
-export type Scope = 'mine' | 'involved';
+export type Scope = 'mine' | 'claimable' | 'involved';
 
 export interface ListTasksResp {
   items: TaskSummary[];
@@ -104,9 +107,9 @@ export interface TaskDetail {
   fields: KV[];
   nodes: NodeView[];
   history: HistoryItem[];
-  can_reassign: boolean;
   can_update_priority: boolean;
   read_only: boolean;
+  transfer_count: number;
 }
 
 // ---- 任务类型
@@ -163,7 +166,7 @@ export interface TrialSqlResp {
 
 export type SourceKind = 'sql' | 'api' | 'kafka';
 export type FieldType = 'text' | 'number' | 'money' | 'datetime' | 'enum';
-export type ActionKey = 'close' | 'no_response' | 'snooze' | 'link' | 'escalate';
+export type ActionKey = 'close' | 'no_response' | 'snooze' | 'link' | 'escalate' | 'transfer';
 
 export interface TTField {
   name: string;
@@ -173,14 +176,19 @@ export interface TTField {
   options?: { value: string; label: string }[];
 }
 
-/** 处理人：relation 按业务关系查人，查不到交给 fallback；pool 从 users 中按 strategy 选一人。 */
+/**
+ * 处理人：relation 按业务关系查人，查不到交给 fallback；pool 从 users 中按 strategy 选一人；
+ * claim 通知到 Lark 群 chat，任何人打开链接后认领，remind_after 后仍无人认领再提醒一次。
+ */
 export interface TTAssignee {
-  kind: 'relation' | 'pool';
+  kind: 'relation' | 'pool' | 'claim';
   relation?: string;
   field?: string;
   fallback?: string;
   users?: string[];
   strategy?: 'random';
+  chat?: string;
+  remind_after?: string;
 }
 
 export interface TTNode {

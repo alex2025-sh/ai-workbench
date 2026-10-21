@@ -27,6 +27,7 @@ type Task struct {
 	Priority    TaskPriority
 	AssigneeID  string
 	SnoozeUntil *time.Time
+	RemindAt    *time.Time // 待认领时再次提醒群的时间
 	Resolution  Resolution
 	SourceAt    int64
 	Version     int64

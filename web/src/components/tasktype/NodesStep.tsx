@@ -1,5 +1,5 @@
 // 第 3 步：人工节点链。画布显示 start → 节点 → end，连线由动作生成（escalate 连下一个节点，close / no_response 连 end），
-// 不能手画；点节点在下方编辑：名称、处理人（业务关系 + 兜底人，或一批人中随机）、可用的动作、业务链接、推迟时长、是否发 Lark。
+// 不能手画；点节点在下方编辑：名称、处理人（业务关系 + 兜底人 / 一批人中随机 / 群里认领）、可用的动作、业务链接、推迟时长、是否发 Lark。
 // 节点 id 由前端自动生成且不展示：任务行记录所在节点的 id，改名、调整顺序都不影响在途任务。
 import { ArrowLeftOutlined, ArrowRightOutlined, DeleteOutlined } from '@ant-design/icons';
 import { Button, Card, Checkbox, Col, Descriptions, Empty, Form, Input, Popconfirm, Radio, Row, Select, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd';
@@ -21,10 +21,16 @@ export function newNodeId(taken: string[]): string {
 }
 
 const emptyAssignee = (kind: TTAssignee['kind'], relations: string[]): TTAssignee =>
-  kind === 'relation' ? { kind, relation: relations[0] ?? '', field: '', fallback: '' } : { kind, users: [], strategy: 'random' };
+  kind === 'relation'
+    ? { kind, relation: relations[0] ?? '', field: '', fallback: '' }
+    : kind === 'claim'
+      ? { kind, chat: '', remind_after: '2h' }
+      : { kind, users: [], strategy: 'random' };
+
+const remindChoices = ['', '30m', '1h', '2h', '4h', '1d'];
 
 function newNode(taken: string[]): TTNode {
-  return { id: newNodeId(taken), name: '新节点', assignee: emptyAssignee('pool', []), actions: ['close'], lark: true };
+  return { id: newNodeId(taken), name: '新节点', assignee: emptyAssignee('pool', []), actions: ['close', 'transfer'], lark: true };
 }
 
 const emailLike = /^[^\s@]+@[^\s@]+$/;
@@ -150,6 +156,7 @@ export function NodesStep(props: { body: TaskTypeBody; onChange?: (b: TaskTypeBo
                   options={[
                     { value: 'relation', label: '按业务关系' },
                     { value: 'pool', label: '一批人中随机' },
+                    { value: 'claim', label: '群里认领' },
                   ]}
                 />
               </Form.Item>
@@ -169,6 +176,19 @@ export function NodesStep(props: { body: TaskTypeBody; onChange?: (b: TaskTypeBo
                     style={{ marginBottom: 12, width: 260 }}
                   >
                     <Input value={a!.fallback} onChange={(e) => update({ assignee: { ...a!, fallback: e.target.value.trim() } })} placeholder="lead@example.com" />
+                  </Form.Item>
+                </Space>
+              ) : a!.kind === 'claim' ? (
+                <Space wrap align="start">
+                  <Form.Item label="Lark 群" tooltip="进入节点时把卡片发到这个群；任何人打开链接后都可以认领，先到先得" style={{ marginBottom: 12, width: 260 }}>
+                    <Input value={a!.chat} onChange={(e) => update({ assignee: { ...a!, chat: e.target.value.trim() } })} placeholder="群 chat_id，如 oc_vip_review" />
+                  </Form.Item>
+                  <Form.Item label="无人认领时" tooltip="超过这个时间仍没人认领，再提醒一次群（不会自动升级）" style={{ marginBottom: 12, width: 200 }}>
+                    <Select
+                      value={a!.remind_after ?? ''}
+                      onChange={(v: string) => update({ assignee: { ...a!, remind_after: v || undefined } })}
+                      options={remindChoices.map((c) => ({ value: c, label: c ? `${snoozeText(c)}后再提醒` : '不再提醒' }))}
+                    />
                   </Form.Item>
                 </Space>
               ) : (
@@ -226,7 +246,7 @@ export function NodesStep(props: { body: TaskTypeBody; onChange?: (b: TaskTypeBo
                   />
                 </Form.Item>
               )}
-              <Form.Item label="Lark 通知" tooltip="进入节点、转派、推迟到期时发给处理人" style={{ marginBottom: 12 }}>
+              <Form.Item label="Lark 通知" tooltip={a!.kind === 'claim' ? '认领节点进入时总是发到群；这里控制转交、推迟到期时是否私聊处理人' : '分配到人、转交、推迟到期时私聊处理人'} style={{ marginBottom: 12 }}>
                 <Switch checked={!!node.lark} onChange={(v) => update({ lark: v })} />
               </Form.Item>
             </Form>

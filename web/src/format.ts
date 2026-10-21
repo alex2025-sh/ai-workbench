@@ -43,14 +43,16 @@ export const resolutionLabel: Record<string, string> = {
 /** 动作的中文名（历史记录用）。 */
 export const historyLabel: Record<string, string> = {
   created: '创建',
+  claimed: '认领',
   started: '开始处理',
   close: '已处理',
   no_response: '无需处理',
   snooze: '推迟',
   escalate: '升级',
   woke: '推迟到期',
+  reminded: '无人认领，再次提醒群',
   gone: '数据源中消失，自动关闭',
-  reassigned: '转派',
+  transferred: '转交',
   priority: '调整优先级',
 };
 

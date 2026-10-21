@@ -23,7 +23,7 @@ func NewTaskServiceServer(svcCtx *svc.ServiceContext) *TaskServiceServer {
 	}
 }
 
-// 任务列表：我的任务、我经手的
+// 任务列表：我的任务、待认领（所有人可见）、我经手的
 func (s *TaskServiceServer) ListTasks(ctx context.Context, in *pb.ListTasksReq) (*pb.ListTasksResp, error) {
 	l := taskservicelogic.NewListTasksLogic(ctx, s.svcCtx)
 	return l.ListTasks(in)
@@ -33,6 +33,12 @@ func (s *TaskServiceServer) ListTasks(ctx context.Context, in *pb.ListTasksReq) 
 func (s *TaskServiceServer) GetTask(ctx context.Context, in *pb.TaskIdReq) (*pb.TaskDetail, error) {
 	l := taskservicelogic.NewGetTaskLogic(ctx, s.svcCtx)
 	return l.GetTask(in)
+}
+
+// 认领：认领节点上的待认领任务，任何人都可以认领，先到先得
+func (s *TaskServiceServer) ClaimTask(ctx context.Context, in *pb.TaskIdReq) (*pb.TaskSummary, error) {
+	l := taskservicelogic.NewClaimTaskLogic(ctx, s.svcCtx)
+	return l.ClaimTask(in)
 }
 
 // 开始处理
@@ -47,10 +53,10 @@ func (s *TaskServiceServer) ActTask(ctx context.Context, in *pb.ActTaskReq) (*pb
 	return l.ActTask(in)
 }
 
-// 转派（处理人或 task.admin）
-func (s *TaskServiceServer) Reassign(ctx context.Context, in *pb.ReassignReq) (*pb.TaskSummary, error) {
-	l := taskservicelogic.NewReassignLogic(ctx, s.svcCtx)
-	return l.Reassign(in)
+// 转交：同一节点内交给另一个人，或放回待认领（只限认领节点）。处理人（节点启用了 transfer）或 task.admin，必须写原因
+func (s *TaskServiceServer) TransferTask(ctx context.Context, in *pb.TransferTaskReq) (*pb.TaskSummary, error) {
+	l := taskservicelogic.NewTransferTaskLogic(ctx, s.svcCtx)
+	return l.TransferTask(in)
 }
 
 // 调整优先级（处理人或 task.admin）

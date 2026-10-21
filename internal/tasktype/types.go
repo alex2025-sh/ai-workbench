@@ -87,10 +87,11 @@ const (
 	ActionSnooze     = "snooze"      // 推迟，到期回到待处理并重新通知
 	ActionLink       = "link"        // 打开业务系统链接，不改变状态
 	ActionEscalate   = "escalate"    // 移到下一个节点
+	ActionTransfer   = "transfer"    // 转交：同一节点内换处理人（认领节点还可以放回待认领）
 )
 
 // Actions 是全部动作，按显示顺序排列。
-var Actions = []string{ActionClose, ActionNoResponse, ActionSnooze, ActionLink, ActionEscalate}
+var Actions = []string{ActionClose, ActionNoResponse, ActionSnooze, ActionLink, ActionEscalate, ActionTransfer}
 
 // Node 是一个人工节点。节点按数组顺序组成升级链，escalate 移到下一个。
 type Node struct {
@@ -100,7 +101,7 @@ type Node struct {
 	Actions  []string `json:"actions"`
 	Link     *Link    `json:"link,omitempty"`   // 启用 link 时必填
 	Snooze   []string `json:"snooze,omitempty"` // 可选的推迟时长，缺省为 DefaultSnooze
-	Lark     bool     `json:"lark,omitempty"`   // 进入节点、分配到人、推迟到期时发 Lark 通知
+	Lark     bool     `json:"lark,omitempty"`   // 分配到人、转交、推迟到期时私聊处理人（认领节点进入时总是发群）
 }
 
 // DefaultSnooze 是节点没有配置推迟时长时的选项。
@@ -124,10 +125,11 @@ func (n Node) Has(action string) bool {
 	return false
 }
 
-// 分配器类型：任务进入节点时总是直接分配给一个人。
+// 分配器类型。relation、pool 进入节点时直接分配给一个人；claim 进入「待认领」，通知到群，任何人都可以认领。
 const (
 	AssigneeRelation = "relation" // 按业务关系找到一个人（如 VIP → RM），查不到时交给兜底人
 	AssigneePool     = "pool"     // 从一批人中按策略选一个
+	AssigneeClaim    = "claim"    // 通知到 Lark 群，打开链接的人自己认领（不限人员），先到先得
 )
 
 // 人员池的选择策略。
@@ -143,7 +145,13 @@ type Assignee struct {
 	Fallback string   `json:"fallback,omitempty"` // relation：查不到时的兜底人
 	Users    []string `json:"users,omitempty"`    // pool：候选人
 	Strategy string   `json:"strategy,omitempty"` // pool：选择策略，缺省 random
+	Chat     string   `json:"chat,omitempty"`     // claim：Lark 群 chat_id
+	// RemindAfter 是 claim 节点进入待认领后多久仍无人认领时再提醒一次群，如 2h；缺省不再提醒。
+	RemindAfter string `json:"remind_after,omitempty"`
 }
+
+// Claim 报告节点是否为认领模式。
+func (n Node) Claim() bool { return n.Assignee.Kind == AssigneeClaim }
 
 // Link 是 redirect link 动作的按钮。
 type Link struct {

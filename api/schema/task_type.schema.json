@@ -260,7 +260,8 @@
               "no_response",
               "snooze",
               "link",
-              "escalate"
+              "escalate",
+              "transfer"
             ]
           }
         },
@@ -294,13 +295,13 @@
         "lark": {
           "type": "boolean",
           "default": false,
-          "description": "进入节点、分配到人、推迟到期时发 Lark 通知。"
+          "description": "分配到人、转交、推迟到期时私聊处理人；认领节点进入时总是发到群。"
         }
       }
     },
     "assignee": {
       "type": "object",
-      "description": "节点的分配器：任务进入节点时直接分配给一个人。",
+      "description": "节点的分配器：relation、pool 进入节点时直接分配给一个人；claim 通知到 Lark 群，任何人打开链接后认领。",
       "required": [
         "kind"
       ],
@@ -308,7 +309,8 @@
         "kind": {
           "enum": [
             "relation",
-            "pool"
+            "pool",
+            "claim"
           ]
         }
       },
@@ -381,6 +383,34 @@
                 ],
                 "default": "random",
                 "description": "从候选人中选一个的策略：random 随机。"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "claim"
+              }
+            }
+          },
+          "then": {
+            "additionalProperties": false,
+            "required": [
+              "kind",
+              "chat"
+            ],
+            "properties": {
+              "kind": true,
+              "chat": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Lark 群 chat_id：进入节点时把卡片发到这个群，群成员点开链接后认领。"
+              },
+              "remind_after": {
+                "$ref": "#/$defs/duration",
+                "description": "进入待认领后多久仍无人认领时再提醒一次群，如 2h；缺省不再提醒。"
               }
             }
           }

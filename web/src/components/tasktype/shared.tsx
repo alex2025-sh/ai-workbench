@@ -45,15 +45,16 @@ export function IssueList({ issues }: { issues: Issue[] }) {
 
 export const fieldTypeLabel: Record<FieldType, string> = { text: '文本', number: '数字', money: '金额', datetime: '日期时间', enum: '枚举' };
 export const piiLabel: Record<string, string> = { mask_middle: '中间打码', hash: '哈希', drop: '不显示' };
-export const actionLabel: Record<ActionKey, string> = { close: '已处理', no_response: '无需处理', snooze: '推迟', link: '业务链接', escalate: '升级' };
+export const actionLabel: Record<ActionKey, string> = { close: '已处理', no_response: '无需处理', snooze: '推迟', link: '业务链接', escalate: '升级', transfer: '转交' };
 export const actionHelp: Record<ActionKey, string> = {
   close: '任务完结，结果「已处理」',
   no_response: '任务完结，结果「无需处理」',
   snooze: '推迟，到期后回到待处理并重新通知',
   link: '打开业务系统链接，不改变任务状态',
   escalate: '交给下一个节点处理',
+  transfer: '留在当前节点，交给另一个人（认领节点还可以放回待认领）',
 };
-export const allActions: ActionKey[] = ['close', 'no_response', 'snooze', 'link', 'escalate'];
+export const allActions: ActionKey[] = ['close', 'no_response', 'snooze', 'link', 'escalate', 'transfer'];
 
 /** 一行样例数据：优先用试跑 SQL 的第一行，否则按字段类型生成。 */
 export function sampleValues(body: TaskTypeBody, row?: Record<string, unknown>): { key: string; values: Record<string, unknown> } {
@@ -88,6 +89,9 @@ export function assigneeText(body: TaskTypeBody, a: TaskTypeBody['nodes'][number
   if (a.kind === 'relation') {
     const f = body.fields.find((x) => x.name === a.field);
     return `业务关系 ${a.relation || '?'}（${f?.label || a.field || '?'}）→ 兜底 ${a.fallback || '?'}`;
+  }
+  if (a.kind === 'claim') {
+    return `群 ${a.chat || '?'} 认领${a.remind_after ? `，${a.remind_after} 无人认领再提醒` : ''}`;
   }
   const n = a.users?.length ?? 0;
   return n === 0 ? '随机：未填候选人' : n === 1 ? a.users![0] : `${n} 人中随机：${a.users!.join('、')}`;

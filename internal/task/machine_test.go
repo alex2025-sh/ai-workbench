@@ -12,14 +12,16 @@ import (
 
 var now = time.Date(2026, 10, 20, 8, 0, 0, 0, time.UTC)
 
-// def：rm（个人关系，close/snooze/escalate）→ lead（人员池，close/no_response/snooze 1d）。
+// def：rm（业务关系，可转交）→ lead（人员池，不可转交）→ desk（认领，群 oc_desk，2 小时未认领再提醒）。
 var def = &tasktype.TaskType{
 	Key: "t", Priority: "P1",
 	Nodes: []tasktype.Node{
-		{ID: "rm", Name: "RM", Lark: true, Actions: []string{"close", "snooze", "link", "escalate"},
+		{ID: "rm", Name: "RM", Lark: true, Actions: []string{"close", "snooze", "link", "escalate", "transfer"},
 			Assignee: tasktype.Assignee{Kind: "relation", Relation: "vip_rm", Field: "uid", Fallback: "lead"}},
-		{ID: "lead", Name: "组长", Actions: []string{"close", "no_response", "snooze"}, Snooze: []string{"1d"},
+		{ID: "lead", Name: "组长", Actions: []string{"close", "no_response", "snooze", "escalate"}, Snooze: []string{"1d"},
 			Assignee: tasktype.Assignee{Kind: "pool", Users: []string{"carol", "dave"}}},
+		{ID: "desk", Name: "值班", Lark: true, Actions: []string{"close", "transfer"},
+			Assignee: tasktype.Assignee{Kind: "claim", Chat: "oc_desk", RemindAfter: "2h"}},
 	},
 }
 
@@ -30,6 +32,14 @@ func created(t *testing.T) Task {
 		t.Fatal(err)
 	}
 	return res.Task
+}
+
+func TestCreateIntoClaimNode(t *testing.T) {
+	claimFirst := &tasktype.TaskType{Key: "c", Nodes: def.Nodes[2:]}
+	res, err := Apply(claimFirst, &Task{}, Event{Kind: EvCreate, Now: now, Target: assign.Target{By: "claim"}})
+	if err != nil || res.Task.Status != TaskStatusUnassigned || res.Task.AssigneeID != "" || len(res.Notify) != 1 || res.Notify[0].Chat != "oc_desk" {
+		t.Fatalf("create = %+v %v", res, err)
+	}
 }
 
 func TestCreate(t *testing.T) {
@@ -55,6 +65,11 @@ func TestTransitions(t *testing.T) {
 	snoozed.Status, snoozed.SnoozeUntil = TaskStatusSnoozed, &until
 	closed := alice
 	closed.Status, closed.Resolution = TaskStatusSolved, ResolutionHandled
+	remindAt := now.Add(-time.Minute)
+	open := alice // 认领节点上待认领
+	open.NodeID, open.Status, open.AssigneeID, open.RemindAt = "desk", TaskStatusUnassigned, "", &remindAt
+	desk := alice // 认领节点上已认领
+	desk.NodeID, desk.AssigneeID = "desk", "erin"
 
 	cases := []struct {
 		name   string
@@ -95,7 +110,29 @@ func TestTransitions(t *testing.T) {
 		}},
 		{"escalate without target", alice, Event{Kind: EvAct, Actor: "alice", Action: "escalate"}, ErrState, 0, nil},
 		{"escalate on stale node", alice, Event{Kind: EvAct, Actor: "alice", Action: "escalate", Target: assign.Target{Assignee: "dave"}, ExpectNode: "lead"}, ErrStale, 0, nil},
-		{"escalate from last node", lead, Event{Kind: EvAct, Actor: "carol", Action: "escalate"}, ErrState, 0, nil},
+		{"escalate from last node", desk, Event{Kind: EvAct, Actor: "erin", Action: "escalate"}, ErrState, 0, nil},
+		{"escalate into claim node", lead, Event{Kind: EvAct, Actor: "carol", Action: "escalate", Target: assign.Target{By: "claim"}, Now: now}, nil, TaskStatusUnassigned, func(t *testing.T, r Result) {
+			if r.Task.NodeID != "desk" || r.Task.AssigneeID != "" || !r.Task.RemindAt.Equal(now.Add(2*time.Hour)) {
+				t.Errorf("escalate = %+v", r.Task)
+			}
+			if len(r.Notify) != 1 || r.Notify[0].Chat != "oc_desk" {
+				t.Errorf("notify = %+v", r.Notify)
+			}
+		}},
+		{"claim", open, Event{Kind: EvClaim, Actor: "frank"}, nil, TaskStatusPending, func(t *testing.T, r Result) {
+			if r.Task.AssigneeID != "frank" || r.Task.RemindAt != nil || len(r.Notify) != 0 {
+				t.Errorf("claim = %+v", r)
+			}
+		}},
+		{"claim taken", desk, Event{Kind: EvClaim, Actor: "frank"}, ErrState, 0, nil},
+		{"claim on non-claim node", alice, Event{Kind: EvClaim, Actor: "frank"}, ErrState, 0, nil},
+		{"act before claim", open, Event{Kind: EvAct, Actor: "frank", Action: "close"}, ErrForbidden, 0, nil},
+		{"remind", open, Event{Kind: EvRemind, Now: now}, nil, TaskStatusUnassigned, func(t *testing.T, r Result) {
+			if r.Task.RemindAt != nil || len(r.Notify) != 1 || r.Notify[0].Chat != "oc_desk" {
+				t.Errorf("remind = %+v", r)
+			}
+		}},
+		{"remind too early", open, Event{Kind: EvRemind, Now: now.Add(-time.Hour)}, ErrState, 0, nil},
 		{"wake", snoozed, Event{Kind: EvWake, Now: now}, nil, TaskStatusPending, func(t *testing.T, r Result) {
 			if r.Task.SnoozeUntil != nil || len(r.Notify) != 1 || r.Notify[0].User != "alice" {
 				t.Errorf("wake = %+v %+v", r.Task, r.Notify)
@@ -113,13 +150,26 @@ func TestTransitions(t *testing.T) {
 			}
 		}},
 		{"act on closed", closed, Event{Kind: EvAct, Actor: "alice", Action: "close"}, ErrState, 0, nil},
-		{"reassign by assignee", alice, Event{Kind: EvReassign, Actor: "alice", Assignee: "bob"}, nil, TaskStatusPending, func(t *testing.T, r Result) {
-			if r.Task.AssigneeID != "bob" || r.Participant != "alice" || r.Notify[0].User != "bob" {
-				t.Errorf("reassign = %+v", r)
+		{"transfer by assignee", alice, Event{Kind: EvTransfer, Actor: "alice", Assignee: "bob", Note: "休假"}, nil, TaskStatusPending, func(t *testing.T, r Result) {
+			if r.Task.AssigneeID != "bob" || r.Task.NodeID != "rm" || r.Participant != "alice" || r.Notify[0].User != "bob" || r.Detail["note"] != "休假" {
+				t.Errorf("transfer = %+v", r)
 			}
 		}},
-		{"reassign by other", alice, Event{Kind: EvReassign, Actor: "bob", Assignee: "bob"}, ErrForbidden, 0, nil},
-		{"reassign by admin", lead, Event{Kind: EvReassign, Actor: "ops", Admin: true, Assignee: "bob"}, nil, TaskStatusPending, nil},
+		{"transfer needs a reason", alice, Event{Kind: EvTransfer, Actor: "alice", Assignee: "bob"}, ErrState, 0, nil},
+		{"transfer by other", alice, Event{Kind: EvTransfer, Actor: "bob", Assignee: "bob", Note: "x"}, ErrForbidden, 0, nil},
+		{"transfer not enabled", lead, Event{Kind: EvTransfer, Actor: "carol", Assignee: "bob", Note: "x"}, ErrForbidden, 0, nil},
+		{"transfer by admin", lead, Event{Kind: EvTransfer, Actor: "ops", Admin: true, Assignee: "bob", Note: "x"}, nil, TaskStatusPending, nil},
+		{"release only on claim node", alice, Event{Kind: EvTransfer, Actor: "alice", Note: "x"}, ErrState, 0, nil},
+		{"release back for claiming", desk, Event{Kind: EvTransfer, Actor: "erin", Note: "不熟悉", Now: now}, nil, TaskStatusUnassigned, func(t *testing.T, r Result) {
+			if r.Task.AssigneeID != "" || r.Participant != "erin" || r.Notify[0].Chat != "oc_desk" || r.Task.RemindAt == nil {
+				t.Errorf("release = %+v", r)
+			}
+		}},
+		{"admin assigns an unclaimed task", open, Event{Kind: EvTransfer, Actor: "ops", Admin: true, Assignee: "bob", Note: "x"}, nil, TaskStatusPending, func(t *testing.T, r Result) {
+			if r.Task.AssigneeID != "bob" || r.Task.RemindAt != nil {
+				t.Errorf("assign = %+v", r.Task)
+			}
+		}},
 		{"priority", alice, Event{Kind: EvPriority, Actor: "alice", Priority: TaskPriorityP0}, nil, TaskStatusPending, func(t *testing.T, r Result) {
 			if r.Task.Priority != TaskPriorityP0 {
 				t.Errorf("priority = %v", r.Task.Priority)

@@ -42,8 +42,9 @@ CREATE TABLE `task` (
   `node_id`      varchar(64)  NOT NULL COMMENT '当前人工节点',
   `status`       smallint     NOT NULL COMMENT '-1 unassigned / 0 pending / 1 processing / 2 snoozed / 3 solved',
   `priority`     smallint     NOT NULL DEFAULT 2 COMMENT '0 P0 ... 3 P3',
-  `assignee_id`  varchar(64)  NOT NULL DEFAULT '' COMMENT '当前处理人',
+  `assignee_id`  varchar(64)  NOT NULL DEFAULT '' COMMENT '当前处理人；待认领时为空',
   `snooze_until` datetime(3)  NULL,
+  `remind_at`    datetime(3)  NULL COMMENT '待认领时再次提醒群的时间（节点配置了 remind_after），提醒一次后清空',
   `resolution`   varchar(32)  NOT NULL DEFAULT '' COMMENT 'handled / no_response / auto_closed',
   `source_at`    bigint       NOT NULL DEFAULT 0 COMMENT '推送来源的 occurred_at（毫秒），丢弃更旧的消息',
   `version`      bigint       NOT NULL DEFAULT 0 COMMENT '每次状态转移加一',
@@ -54,6 +55,7 @@ CREATE TABLE `task` (
   UNIQUE KEY `uk_track` (`task_type`, `track_key`),
   KEY `idx_assignee` (`assignee_id`, `status`, `priority`),
   KEY `idx_snooze` (`status`, `snooze_until`),
+  KEY `idx_remind` (`status`, `remind_at`),
   KEY `idx_type_status` (`task_type`, `status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin /*T! SHARD_ROW_ID_BITS=4 */ COMMENT='任务';
 

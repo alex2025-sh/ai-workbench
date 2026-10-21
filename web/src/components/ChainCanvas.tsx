@@ -22,7 +22,7 @@ const H = 96;
 const GAP = 70;
 const TERMINAL = 64;
 
-const actionText: Record<string, string> = { close: '已处理', no_response: '无需处理', snooze: '推迟', link: '链接', escalate: '升级' };
+const actionText: Record<string, string> = { close: '已处理', no_response: '无需处理', snooze: '推迟', link: '链接', escalate: '升级', transfer: '转交' };
 
 interface Data extends Record<string, unknown> {
   node?: ChainNode;

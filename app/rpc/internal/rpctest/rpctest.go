@@ -15,7 +15,7 @@ import (
 )
 
 // Env 是一套跑过首次扫描的环境：A1001、A1002 在 rm.alice 名下；A1007 查不到 RM，交给兜底人 lead@example.com；
-// A1003 随机分给 reviewer.dave / reviewer.erin 之一。
+// A1003 在认领节点上待认领（群 oc_vip_review）。
 type Env struct {
 	*bootstrap.TestEnv
 	Svc *svc.ServiceContext

@@ -57,7 +57,7 @@ func TestWorkbench(t *testing.T) {
 	if a2 == nil || a2.TaskTypeName != "VIP 工单已等待 48 小时" || !a2.CanStart || a2.Card.NodeName != "RM 跟进" {
 		t.Fatalf("A1002 summary = %+v", a2)
 	}
-	if got := keys(a2.Actions); len(got) != 4 || got[0] != "close" || got[3] != "escalate" {
+	if got := keys(a2.Actions); len(got) != 4 || got[0] != "close" || got[3] != "escalate" || !a2.CanTransfer {
 		t.Fatalf("A1002 actions = %v", got)
 	}
 	for _, a := range a2.Actions {
@@ -72,18 +72,38 @@ func TestWorkbench(t *testing.T) {
 		}
 	}
 
-	// 业务关系查不到 → 兜底人；人员池 → 随机一位候选人。
+	// 业务关系查不到 → 兜底人。
 	a7 := byTitle(list(t, env, lead, "").Items, "VIP 工单待审核：A1007")
 	if a7 == nil || a7.AssigneeId != lead || !a7.CanStart {
 		t.Fatalf("A1007 (fallback) = %+v", a7)
 	}
-	a3 := byTitle(append(list(t, env, dave, "").Items, list(t, env, erin, "").Items...), "VIP 工单超过 7 天未完成：A1003")
-	if a3 == nil || (a3.AssigneeId != dave && a3.AssigneeId != erin) {
-		t.Fatalf("A1003 (pool) = %+v", a3)
+	// 认领节点：待认领所有人可见、可认领；认领前没有节点动作，先到先得。
+	a3 := byTitle(list(t, env, "stranger@example.com", "claimable").Items, "VIP 工单超过 7 天未完成：A1003")
+	if a3 == nil || a3.Status != pb.TaskStatus_TASK_STATUS_UNASSIGNED || !a3.CanClaim || !a3.ClaimNode || a3.CanTransfer || len(keys(a3.Actions)) != 1 {
+		t.Fatalf("A1003 (claim) = %+v", a3)
 	}
-	d, err := NewGetTaskLogic(rpctest.As(a3.AssigneeId), env.Svc).GetTask(&pb.TaskIdReq{Id: a3.Id})
-	if err != nil || d.ReadOnly || len(d.Nodes) != 1 || !d.Nodes[0].Current || d.Nodes[0].Assignee == "" {
+	d, err := NewGetTaskLogic(rpctest.As(dave), env.Svc).GetTask(&pb.TaskIdReq{Id: a3.Id})
+	if err != nil || d.ReadOnly || len(d.Nodes) != 1 || !d.Nodes[0].Current || d.Nodes[0].Assignee != "通知到群 oc_vip_review 认领，2h 无人认领再提醒一次" {
 		t.Fatalf("A1003 detail = %+v %v", d, err)
+	}
+	if c, err := NewClaimTaskLogic(rpctest.As(dave), env.Svc).ClaimTask(&pb.TaskIdReq{Id: a3.Id}); err != nil || c.AssigneeId != dave || !c.CanTransfer || len(c.Actions) != 4 {
+		t.Fatalf("claim = %+v %v", c, err)
+	}
+	if _, err := NewClaimTaskLogic(rpctest.As(erin), env.Svc).ClaimTask(&pb.TaskIdReq{Id: a3.Id}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("second claim: %v", err)
+	}
+	// 转交：必须写原因；放回待认领后 erin 认领，详情里记转交次数。
+	if _, err := NewTransferTaskLogic(rpctest.As(dave), env.Svc).TransferTask(&pb.TransferTaskReq{Id: a3.Id}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("transfer without reason: %v", err)
+	}
+	if r, err := NewTransferTaskLogic(rpctest.As(dave), env.Svc).TransferTask(&pb.TransferTaskReq{Id: a3.Id, Reason: "不熟悉", ExpectNode: "review"}); err != nil || r.Status != pb.TaskStatus_TASK_STATUS_UNASSIGNED {
+		t.Fatalf("release = %+v %v", r, err)
+	}
+	if _, err := NewClaimTaskLogic(rpctest.As(erin), env.Svc).ClaimTask(&pb.TaskIdReq{Id: a3.Id}); err != nil {
+		t.Fatal(err)
+	}
+	if d, err := NewGetTaskLogic(rpctest.As(dave), env.Svc).GetTask(&pb.TaskIdReq{Id: a3.Id}); err != nil || !d.ReadOnly || d.TransferCount != 1 {
+		t.Fatalf("dave after release = %+v %v", d, err)
 	}
 
 	// 升级：A1002 随机交给一位组长；原 RM 只读可见，陌生人看不到。
@@ -126,13 +146,19 @@ func TestWorkbench(t *testing.T) {
 		t.Fatalf("no_response = %+v %v", done, err)
 	}
 
-	// 转派与优先级：处理人或 task.admin。
+	// 转交与优先级：处理人或 task.admin。
 	a1 := byTitle(mine.Items, "VIP 工单待审核：A1001")
-	if _, err := NewReassignLogic(rpctest.As(carol), env.Svc).Reassign(&pb.ReassignReq{Id: a1.Id, AssigneeId: carol, Reason: "x"}); status.Code(err) != codes.PermissionDenied {
-		t.Fatalf("reassign by other: %v", err)
+	if !a1.CanTransfer || a1.ClaimNode {
+		t.Fatalf("A1001 transfer flags = %+v", a1)
 	}
-	if r, err := NewReassignLogic(rpctest.As("ops@example.com"), env.Svc).Reassign(&pb.ReassignReq{Id: a1.Id, AssigneeId: carol, Reason: "RM 休假"}); err != nil || r.AssigneeId != carol {
-		t.Fatalf("admin reassign = %+v %v", r, err)
+	if _, err := NewTransferTaskLogic(rpctest.As(carol), env.Svc).TransferTask(&pb.TransferTaskReq{Id: a1.Id, AssigneeId: carol, Reason: "x"}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("transfer by other: %v", err)
+	}
+	if _, err := NewTransferTaskLogic(rpctest.As(alice), env.Svc).TransferTask(&pb.TransferTaskReq{Id: a1.Id, Reason: "x"}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("release on a non-claim node: %v", err)
+	}
+	if r, err := NewTransferTaskLogic(rpctest.As("ops@example.com"), env.Svc).TransferTask(&pb.TransferTaskReq{Id: a1.Id, AssigneeId: carol, Reason: "RM 休假"}); err != nil || r.AssigneeId != carol {
+		t.Fatalf("admin transfer = %+v %v", r, err)
 	}
 	if r, err := NewUpdatePriorityLogic(rpctest.As(carol), env.Svc).UpdatePriority(&pb.UpdatePriorityReq{Id: a1.Id, Priority: pb.TaskPriority_TASK_PRIORITY_P0}); err != nil || r.Priority != pb.TaskPriority_TASK_PRIORITY_P0 {
 		t.Fatalf("priority = %+v %v", r, err)

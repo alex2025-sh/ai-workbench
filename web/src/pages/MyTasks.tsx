@@ -1,4 +1,4 @@
-// 任务工作台：我的任务 / 我经手的，按优先级分区的卡片网格。
+// 任务工作台：我的任务 / 待认领 / 我经手的，按优先级分区的卡片网格。
 //
 // 每个优先级是一个分区，各自查询、各自游标分页（「查看更多」），分区标题的计数来自后端第一页返回的
 // counts（与筛选条件相同、不受分页影响），所以计数是准确的。没有任务的分区不显示。
@@ -48,7 +48,7 @@ export default function MyTasks() {
   const fetchPage = useCallback(
     (priority: TaskPriority, cursor: string): Promise<ListTasksResp> => {
       const page = { cursor, page_size: PAGE_SIZE };
-      // 团队队列只有待认领 / 待分配的任务；我经手的显示全部状态（含已完结），都不按状态筛选
+      // 待认领只有待认领状态；我经手的显示全部状态（含已完结），都不按状态筛选
       return taskApi.list({ scope: tab, statuses: tab === 'mine' ? statuses : [], priorities: [priority], page });
     },
     [tab, statuses],
@@ -104,6 +104,7 @@ export default function MyTasks() {
         onChange={(k) => setTab(k as TabKey)}
         items={[
           { key: 'mine', label: '我的任务' },
+          { key: 'claimable', label: '待认领' },
           { key: 'involved', label: '我经手的' },
         ]}
         tabBarExtraContent={
@@ -133,7 +134,7 @@ export default function MyTasks() {
         </Space>
       </Space>
 
-      {nothing && <Empty style={{ marginTop: 48 }} description={{ mine: '没有任务', involved: '没有经手过、现在不在你名下的任务' }[tab]} />}
+      {nothing && <Empty style={{ marginTop: 48 }} description={{ mine: '没有任务', claimable: '没有待认领的任务', involved: '没有经手过、现在不在你名下的任务' }[tab]} />}
 
       {visible.map((p) => {
         const s = sections[p];
@@ -148,7 +149,7 @@ export default function MyTasks() {
                 {p.replace('TASK_PRIORITY_', '')}
               </Typography.Title>
               <Typography.Text strong>
-                {s.counts.map((c) => `${taskStatusLabel[c.status]} ${c.count}`).join(' · ')}
+                {tab === 'claimable' ? `${n} 个待认领` : s.counts.map((c) => `${taskStatusLabel[c.status]} ${c.count}`).join(' · ')}
               </Typography.Text>
             </Space>
             {s.error && <Alert type="error" showIcon message={s.error} style={{ marginBottom: 12 }} />}

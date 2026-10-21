@@ -53,11 +53,14 @@ service TaskTypeService {
 
 // 任务工作台
 service TaskService {
-  // 任务列表：我的任务、我经手的
+  // 任务列表：我的任务、待认领（所有人可见）、我经手的
   rpc ListTasks(ListTasksReq) returns (ListTasksResp); // POST /byai_platform/api/v1/task/list
 
   // 任务详情：卡片、业务字段、节点链、历史，以及调用人可做的操作
   rpc GetTask(TaskIdReq) returns (TaskDetail); // POST /byai_platform/api/v1/task/get
+
+  // 认领：认领节点上的待认领任务，任何人都可以认领，先到先得
+  rpc ClaimTask(TaskIdReq) returns (TaskSummary); // POST /byai_platform/api/v1/task/claim
 
   // 开始处理
   rpc StartProcessing(TaskIdReq) returns (TaskSummary); // POST /byai_platform/api/v1/task/start
@@ -65,8 +68,8 @@ service TaskService {
   // 节点动作：close、no_response、snooze、escalate（link 在前端打开，不经过后端）
   rpc ActTask(ActTaskReq) returns (TaskSummary); // POST /byai_platform/api/v1/task/act
 
-  // 转派（处理人或 task.admin）
-  rpc Reassign(ReassignReq) returns (TaskSummary); // POST /byai_platform/api/v1/task/reassign
+  // 转交：同一节点内交给另一个人，或放回待认领（只限认领节点）。处理人（节点启用了 transfer）或 task.admin，必须写原因
+  rpc TransferTask(TransferTaskReq) returns (TaskSummary); // POST /byai_platform/api/v1/task/transfer
 
   // 调整优先级（处理人或 task.admin）
   rpc UpdatePriority(UpdatePriorityReq) returns (TaskSummary); // POST /byai_platform/api/v1/task/priority
@@ -103,7 +106,7 @@ message NameList {
 // 存储与 Go 代码使用 internal/task.TaskStatus（-1/0/1/2/3），转换统一用 StatusToProto / StatusFromProto。
 enum TaskStatus {
   TASK_STATUS_UNSPECIFIED = 0;
-  TASK_STATUS_UNASSIGNED = 1;  // 存储值 -1：保留（进入节点时总是直接分配给一个人）
+  TASK_STATUS_UNASSIGNED = 1;  // 存储值 -1：待认领（认领节点上还没有人认领）
   TASK_STATUS_PENDING = 2;     // 存储值 0
   TASK_STATUS_PROCESSING = 3;  // 存储值 1
   TASK_STATUS_SNOOZED = 4;     // 存储值 2
@@ -283,8 +286,12 @@ message TaskSummary {
   int64 updated_at = 15;
   Card card = 16;
   // 调用人可以做的操作（服务端仍会校验）
-  repeated ActionOption actions = 17;
+  repeated ActionOption actions = 17;  // 节点动作（不含 transfer，转交见 can_transfer）
+  reserved 9, 10, 18, 19;
   bool can_start = 20;
+  bool can_claim = 21;     // 待认领，调用人可以认领
+  bool can_transfer = 22;  // 调用人可以转交
+  bool claim_node = 23;    // 当前节点是认领节点：转交时可以放回待认领
 }
 
 message TaskCount {
@@ -294,7 +301,7 @@ message TaskCount {
 }
 
 message ListTasksReq {
-  string scope = 1;  // mine（默认）/ involved
+  string scope = 1;  // mine（默认）/ claimable（待认领）/ involved
   repeated TaskStatus statuses = 2;
   repeated TaskPriority priorities = 3;
   string task_type = 4;
@@ -322,7 +329,7 @@ message NodeView {
 }
 
 message HistoryItem {
-  string kind = 1;  // created / started / close / no_response / snooze / escalate / woke / gone / reassigned / priority
+  string kind = 1;  // created / claimed / started / close / no_response / snooze / escalate / transferred / woke / reminded / gone / priority
   string actor = 2;
   string node_id = 3;
   string node_name = 4;
@@ -337,9 +344,10 @@ message TaskDetail {
   repeated KV fields = 2;  // 全部业务字段（已脱敏），按字段顺序
   repeated NodeView nodes = 3;
   repeated HistoryItem history = 4;
-  bool can_reassign = 6;
+  reserved 5, 6;
   bool can_update_priority = 7;
-  bool read_only = 8;  // 经手人只能查看
+  bool read_only = 8;        // 经手人只能查看
+  int32 transfer_count = 9;  // 转交次数
 }
 
 message ActTaskReq {
@@ -350,10 +358,11 @@ message ActTaskReq {
   string expect_node = 5;  // 调用人看到的节点；任务已离开该节点时拒绝，避免误操作
 }
 
-message ReassignReq {
+message TransferTaskReq {
   int64 id = 1;
-  string assignee_id = 2;
-  string reason = 3;
+  string assignee_id = 2;  // 为空表示放回待认领（只限认领节点）
+  string reason = 3;       // 必填
+  string expect_node = 4;  // 非空时要求任务仍在该节点
 }
 
 message UpdatePriorityReq {

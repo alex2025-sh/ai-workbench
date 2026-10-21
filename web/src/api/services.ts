@@ -23,7 +23,9 @@ export const taskApi = {
   get: (id: string) => call<TaskDetail>('task/get', { id }),
   start: (id: string) => call<TaskSummary>('task/start', { id }),
   act: (req: { id: string; action: string; snooze_ms?: string; note?: string; expect_node?: string }) => call<TaskSummary>('task/act', req),
-  reassign: (id: string, assignee_id: string, reason: string) => call<TaskSummary>('task/reassign', { id, assignee_id, reason }),
+  claim: (id: string) => call<TaskSummary>('task/claim', { id }),
+  /** assignee_id 为空表示放回待认领（只限认领节点）。 */
+  transfer: (req: { id: string; assignee_id: string; reason: string; expect_node?: string }) => call<TaskSummary>('task/transfer', req),
   priority: (id: string, priority: TaskPriority) => call<TaskSummary>('task/priority', { id, priority }),
 };
 

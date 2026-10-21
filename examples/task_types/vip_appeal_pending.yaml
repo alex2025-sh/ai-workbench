@@ -39,6 +39,6 @@ nodes:
   - id: rm
     name: RM 跟进
     assignee: { kind: relation, relation: vip_rm, field: uid, fallback: lead@example.com }   # 没有 RM 时交给 VIP 客服组长
-    actions: [close, no_response, snooze, link]
+    actions: [close, no_response, snooze, link, transfer]
     link: { label: 打开工单, url: "https://risk.example.com/appeal/{appeal_id}" }
     lark: true

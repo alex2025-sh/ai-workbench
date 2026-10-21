@@ -4,7 +4,7 @@
 // 右侧：状态与操作（认领 / 分配 / 开始处理 / 节点动作 / 转派 / 调整优先级）、处理历史。
 // 经手人（如升级前的 RM）与团队成员可以查看整个流程，但只有当前处理人能处理。
 import { ArrowLeftOutlined, EyeOutlined } from '@ant-design/icons';
-import { Alert, App as AntApp, Button, Card, Col, Descriptions, Input, Modal, Result, Row, Select, Space, Spin, Tag, Timeline, Typography } from 'antd';
+import { Alert, App as AntApp, Card, Col, Descriptions, Result, Row, Select, Space, Spin, Tag, Timeline, Typography } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { ApiError, decodeJson } from '../api/client';
@@ -25,11 +25,12 @@ function historyText(h: HistoryItem): string {
   const parts = [historyLabel[h.kind] ?? h.kind];
   if (h.kind === 'snooze' && d.snooze_until) parts.push(`至 ${fmtTime(String(d.snooze_until))}`);
   if (h.kind === 'escalate') parts.push(`离开「${h.node_name}」`);
-  if (h.kind === 'reassigned') parts.push(`${d.from || '—'} → ${d.to}`);
+  if (h.kind === 'transferred') parts.push(d.to ? `${d.from || '待认领'} → ${d.to}` : `${d.from}，放回待认领`);
   if (h.kind === 'priority') parts.push(`P${d.from} → P${d.to}`);
   if (h.kind === 'created') parts.push(`进入「${h.node_name}」`);
-  if (d.assignee) parts.push(`，交给 ${d.assignee}${assignedBy[String(d.assigned_by)] ?? ''}`);
-  if (d.note) parts.push(`：${d.note}`);
+  if (d.assignee) parts[parts.length - 1] += `，交给 ${d.assignee}${assignedBy[String(d.assigned_by)] ?? ''}`;
+  else if (d.assigned_by === 'claim' && h.kind !== 'transferred') parts[parts.length - 1] += '，通知到群等待认领';
+  if (d.note) parts[parts.length - 1] += `：${d.note}`;
   return parts.join(' ');
 }
 
@@ -38,9 +39,6 @@ export default function TaskDetail() {
   const { message } = AntApp.useApp();
   const [d, setD] = useState<Detail>();
   const [error, setError] = useState<ApiError | Error>();
-  const [reassign, setReassign] = useState(false);
-  const [to, setTo] = useState('');
-  const [reason, setReason] = useState('');
 
   const load = useCallback(() => {
     taskApi.get(id).then(setD, (e) => setError(e as Error));
@@ -118,12 +116,13 @@ export default function TaskDetail() {
                   {
                     key: 'a',
                     label: '处理人',
-                    children: t.assignee_id || '—',
+                    children: t.assignee_id || (t.status === 'TASK_STATUS_UNASSIGNED' ? '待认领' : '—'),
                   },
                   ...(t.status === 'TASK_STATUS_SNOOZED' ? [{ key: 'z', label: '推迟至', children: fmtTime(t.snooze_until, 'YYYY-MM-DD HH:mm') }] : []),
                   ...(terminal ? [{ key: 'r', label: '结果', children: resolutionLabel[t.resolution] ?? t.resolution }] : []),
                   { key: 'k', label: '数据源 key', children: <Typography.Text code copyable>{t.biz_key}</Typography.Text> },
                   { key: 'c', label: '创建', children: fmtTime(t.created_at, 'YYYY-MM-DD HH:mm') },
+                  ...(d.transfer_count > 0 ? [{ key: 't', label: '转交次数', children: d.transfer_count }] : []),
                 ]}
               />
               {!terminal && (
@@ -131,14 +130,10 @@ export default function TaskDetail() {
                   <TaskActions task={t} layout="detail" onChanged={load} />
                 </div>
               )}
-              {(d.can_reassign || d.can_update_priority) && (
+              {d.can_update_priority && (
                 <Space wrap style={{ marginTop: 12 }}>
-                  {d.can_reassign && (
-                    <Button size="small" onClick={() => setReassign(true)}>
-                      转派
-                    </Button>
-                  )}
-                  {d.can_update_priority && (
+                  <Typography.Text type="secondary">优先级</Typography.Text>
+                  {(
                     <Select
                       size="small"
                       value={t.priority}
@@ -176,29 +171,6 @@ export default function TaskDetail() {
           </Space>
         </Col>
       </Row>
-      <Modal
-        title="转派"
-        open={reassign}
-        okText="转派"
-        cancelText="取消"
-        okButtonProps={{ disabled: !to || !reason }}
-        onCancel={() => setReassign(false)}
-        onOk={async () => {
-          try {
-            await taskApi.reassign(t.id, to, reason);
-            message.success('已转派');
-            setReassign(false);
-            load();
-          } catch (e) {
-            message.error(String((e as Error).message));
-          }
-        }}
-      >
-        <Space direction="vertical" style={{ width: '100%' }}>
-          <Input placeholder="新处理人（email）" value={to} onChange={(e) => setTo(e.target.value)} />
-          <Input.TextArea rows={2} placeholder="原因（必填）" value={reason} onChange={(e) => setReason(e.target.value)} />
-        </Space>
-      </Modal>
     </>
   );
 }

@@ -1,8 +1,8 @@
 // Command wbctl 是任务类型的命令行工具：
 //
-//	wbctl validate FILE...              校验任务类型（YAML 或 JSON）：结构与语义，不检查团队与数据源是否存在
+//	wbctl validate FILE...              校验任务类型（YAML 或 JSON）：结构与语义，不检查数据源连接与业务关系是否存在
 //	wbctl json FILE                     把 YAML 转成任务类型 JSON 输出（即前端提交的同一种 JSON）
-//	wbctl publish -f CONFIG FILE...     直接发布到平台库（本地开发用；会检查团队、数据源连接与业务关系）
+//	wbctl publish -f CONFIG FILE...     直接发布到平台库（本地开发用；会检查数据源连接与业务关系）
 //
 // CONFIG 为 app/worker 的配置文件（只用其中的平台库、数据源连接与关系表）。
 package main

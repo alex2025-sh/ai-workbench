@@ -39,12 +39,12 @@ func TestValidateIssues(t *testing.T) {
 	cases := []struct {
 		name, from, to, path string
 	}{
-		{"escalate on last node", `"actions":["close","no_response","snooze"]`, `"actions":["close","escalate"]`, "nodes.1.actions"},
+		{"escalate on last node", `"actions":["close","no_response","snooze","transfer"]`, `"actions":["close","escalate"]`, "nodes.1.actions"},
 		{"unknown card field", `"title":"VIP 工单已等待 48 小时：{appeal_id}"`, `"title":"{nope}"`, "card.title"},
 		{"link without config", `"link":{"label":"打开工单","url":"https://risk.example.com/appeal/{appeal_id}"},`, ``, "nodes.0.link"},
 		{"bad cron", `"schedule":"*/1 * * * *"`, `"schedule":"every minute"`, "source.schedule"},
 		{"write query", `select concat`, `delete from appeal; select concat`, "source.query"},
-		{"unknown action", `"actions":["close","no_response","snooze"]`, `"actions":["close","approve"]`, "nodes.1.actions.1"},
+		{"unknown action", `"actions":["close","no_response","snooze","transfer"]`, `"actions":["close","approve"]`, "nodes.1.actions.1"},
 		{"empty pool", `"users":["lead@example.com","lead.carol@example.com"]`, `"users":[]`, "nodes.1.assignee.users"},
 		{"missing fallback", `"fallback":"lead@example.com",`, ``, "nodes.0.assignee"},
 		{"relation field", `"field":"uid"`, `"field":"user_id"`, "nodes.0.assignee.field"},
