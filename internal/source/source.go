@@ -142,7 +142,7 @@ type Runner struct {
 	Registry    Registry
 	Datasources Datasources
 	Tasks       *task.Store
-	Relations   assign.Relations
+	Assign      *assign.Service
 	States      model.SourceStateModel
 	Now         func() time.Time
 }
@@ -284,7 +284,7 @@ func (r *Runner) RunSQL(ctx context.Context, key string) Stats {
 }
 
 func (r *Runner) create(ctx context.Context, def *tasktype.TaskType, version int, key string, vals map[string]any, sourceAt int64) (bool, error) {
-	to, err := assign.Resolve(ctx, r.Relations, def.Nodes[0], vals)
+	to, err := r.Assign.Resolve(ctx, def.Nodes[0], assign.WithKey(vals, key))
 	if err != nil {
 		return false, err
 	}

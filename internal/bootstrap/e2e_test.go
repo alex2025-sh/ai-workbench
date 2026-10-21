@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,8 +53,10 @@ func TestVIPAppeal(t *testing.T) {
 	e := NewTestEnv(t)
 	ctx := context.Background()
 	tick(t, e)
+	reviewers := []string{"reviewer.dave@example.com", "reviewer.erin@example.com"}
+	leads := []string{"lead@example.com", "lead.carol@example.com"}
 
-	// 首次扫描：每张待审核的工单按提交时间落进一个任务类型。
+	// 首次扫描：每张待审核的工单按提交时间落进一个任务类型，进入节点时直接分配给一个人。
 	a1 := open(t, e, "vip_appeal_pending", "A1001")
 	a7 := open(t, e, "vip_appeal_pending", "A1007")
 	a2 := open(t, e, "vip_appeal_48h", "A1002")
@@ -60,11 +64,11 @@ func TestVIPAppeal(t *testing.T) {
 	switch {
 	case a1 == nil || a1.AssigneeID != "rm.alice@example.com" || a1.Status != task.TaskStatusPending || a1.Priority != task.TaskPriorityP2:
 		t.Fatalf("A1001 = %+v", a1)
-	case a7 == nil || !a7.InQueue() || a7.TeamKey != "vip_cs_leads" || a7.TeamMode != "claim":
+	case a7 == nil || a7.AssigneeID != "lead@example.com": // 没有 RM：兜底人
 		t.Fatalf("A1007 (no RM) = %+v", a7)
 	case a2 == nil || a2.AssigneeID != "rm.alice@example.com" || a2.NodeID != "rm" || a2.Priority != task.TaskPriorityP1:
 		t.Fatalf("A1002 = %+v", a2)
-	case a3 == nil || !a3.InQueue() || a3.TeamKey != "vip_review" || a3.TeamMode != "assign":
+	case a3 == nil || !slices.Contains(reviewers, a3.AssigneeID): // 人员池随机
 		t.Fatalf("A1003 = %+v", a3)
 	}
 	for _, other := range []string{"A1004", "A1005", "A1006"} {
@@ -74,19 +78,22 @@ func TestVIPAppeal(t *testing.T) {
 			}
 		}
 	}
-	// 通知：RM 私聊两条；认领模式发到组长群；分配模式私发给分配者。
 	if got := sent(e, "rm.alice@example.com"); len(got) != 2 {
 		t.Fatalf("alice got %d cards", len(got))
 	}
-	if got := sent(e, "oc_vip_cs_leads"); len(got) != 1 || got[0].Kind != notify.KindChat {
-		t.Fatalf("leads chat = %+v", got)
+	if got := sent(e, "lead@example.com"); len(got) != 1 || got[0].Kind != notify.KindUser {
+		t.Fatalf("fallback card = %+v", got)
 	}
-	card := sent(e, "lead@example.com")
+	card := sent(e, a3.AssigneeID)
 	if len(card) != 1 || card[0].Card.NodeName != "VIP 审核小组" || card[0].Card.TaskURL != fmt.Sprintf("http://wb.local/tasks/%d", a3.ID) {
-		t.Fatalf("assigner card = %+v", card)
+		t.Fatalf("reviewer card = %+v", card)
 	}
 	if f := card[0].Card.Fields; len(f) == 0 || f[0].Label != "工单类型" {
 		t.Fatalf("card fields = %+v", f)
+	}
+	hist, _ := e.Tasks.History(ctx, a7.ID)
+	if len(hist) != 1 || !strings.Contains(string(hist[0].Detail), `"assigned_by": "fallback"`) {
+		t.Fatalf("A1007 history = %s", hist[0].Detail)
 	}
 
 	// 再扫一次：没有变化，不重复建任务、不重发通知。
@@ -96,29 +103,33 @@ func TestVIPAppeal(t *testing.T) {
 		t.Fatalf("second scan sent %d new cards", got-before)
 	}
 
-	// A1002：RM 升级给组长 → 进入 vip_cs_leads 认领队列，通知发到组长群。
-	if _, err := e.Tasks.Do(ctx, a2.ID, task.Event{Kind: task.EvAct, Actor: "rm.alice@example.com", Action: "escalate", ExpectNode: "rm",
-		Target: targetOf(t, e, "vip_appeal_48h", "lead")}); err != nil {
+	// A1002：RM 升级 → 从两位组长中随机分给一位并通知；原 RM 仍能看到（经手人），但不能再处理。
+	def, _, _ := e.Registry.Latest(ctx, "vip_appeal_48h")
+	next, _ := def.Next("rm")
+	to, err := e.Assign.Resolve(ctx, next, tasktype.DecodeValues(a2.Fields))
+	if err != nil {
 		t.Fatal(err)
 	}
-	if got := sent(e, "oc_vip_cs_leads"); len(got) != 2 || got[1].Card.NodeName != "VIP 客服组长" {
-		t.Fatalf("escalation card = %+v", got)
-	}
-	// 组员认领；原 RM 仍能看到（经手人），但不能再处理。
-	if _, err := e.Tasks.Do(ctx, a2.ID, task.Event{Kind: task.EvClaim, Actor: "lead.carol@example.com"}); err != nil {
+	if _, err := e.Tasks.Do(ctx, a2.ID, task.Event{Kind: task.EvAct, Actor: "rm.alice@example.com", Action: "escalate", ExpectNode: "rm", Target: to}); err != nil {
 		t.Fatal(err)
 	}
 	cur, _ := e.Tasks.Get(ctx, a2.ID)
-	if acc, _ := e.Tasks.AccessOf(ctx, cur, "rm.alice@example.com", false); !acc.View {
+	if cur.NodeID != "lead" || !slices.Contains(leads, cur.AssigneeID) || cur.Status != task.TaskStatusPending {
+		t.Fatalf("escalated = %+v", cur)
+	}
+	if got := sent(e, cur.AssigneeID); len(got) == 0 || got[len(got)-1].Card.NodeName != "VIP 客服组长" {
+		t.Fatalf("escalation card = %+v", got)
+	}
+	if ok, _ := e.Tasks.CanView(ctx, cur, "rm.alice@example.com", false); !ok {
 		t.Fatal("previous handler should still see the task")
 	}
-	if acc, _ := e.Tasks.AccessOf(ctx, cur, "stranger@example.com", false); acc.View {
+	if ok, _ := e.Tasks.CanView(ctx, cur, "stranger@example.com", false); ok {
 		t.Fatal("stranger should not see the task")
 	}
 	if _, err := e.Tasks.Do(ctx, a2.ID, task.Event{Kind: task.EvAct, Actor: "rm.alice@example.com", Action: "close"}); !errors.Is(err, task.ErrForbidden) {
 		t.Fatalf("previous handler close: %v", err)
 	}
-	if _, err := e.Tasks.Do(ctx, a2.ID, task.Event{Kind: task.EvAct, Actor: "lead.carol@example.com", Action: "close"}); err != nil {
+	if _, err := e.Tasks.Do(ctx, a2.ID, task.Event{Kind: task.EvAct, Actor: cur.AssigneeID, Action: "close"}); err != nil {
 		t.Fatal(err)
 	}
 	// 手工完结后工单仍在结果里：不重建。
@@ -131,27 +142,9 @@ func TestVIPAppeal(t *testing.T) {
 		t.Fatalf("alice involved = %+v", mine)
 	}
 
-	// A1003：组长分配给组员；组员推迟 1 小时，到期回到待处理并重新通知。
-	queue, _ := e.Tasks.List(ctx, task.ListQuery{Scope: task.ScopeQueue, User: "lead@example.com", Limit: 20})
-	if len(queue) != 2 { // A1007（组长是 vip_cs_leads 成员）与 A1003（vip_review 分配者）
-		t.Fatalf("lead queue = %d", len(queue))
-	}
-	if q, _ := e.Tasks.List(ctx, task.ListQuery{Scope: task.ScopeQueue, User: "reviewer.dave@example.com", Limit: 20}); len(q) != 0 {
-		t.Fatalf("executor should not see assign-mode queue: %+v", q)
-	}
-	if _, err := e.Tasks.Do(ctx, a3.ID, task.Event{Kind: task.EvAssign, Actor: "reviewer.dave@example.com", Assignee: "reviewer.dave@example.com"}); !errors.Is(err, task.ErrForbidden) {
-		t.Fatalf("executor assign: %v", err)
-	}
-	if _, err := e.Tasks.Do(ctx, a3.ID, task.Event{Kind: task.EvAssign, Actor: "lead@example.com", Assignee: "outsider@example.com"}); !errors.Is(err, task.ErrState) {
-		t.Fatalf("assign outsider: %v", err)
-	}
-	if _, err := e.Tasks.Do(ctx, a3.ID, task.Event{Kind: task.EvAssign, Actor: "lead@example.com", Assignee: "reviewer.dave@example.com"}); err != nil {
-		t.Fatal(err)
-	}
-	if got := sent(e, "reviewer.dave@example.com"); len(got) != 1 {
-		t.Fatalf("dave cards = %d", len(got))
-	}
-	if _, err := e.Tasks.Do(ctx, a3.ID, task.Event{Kind: task.EvAct, Actor: "reviewer.dave@example.com", Action: "snooze", Snooze: time.Hour}); err != nil {
+	// A1003：组员推迟 1 小时，到期回到待处理并重新通知。
+	reviewer := a3.AssigneeID
+	if _, err := e.Tasks.Do(ctx, a3.ID, task.Event{Kind: task.EvAct, Actor: reviewer, Action: "snooze", Snooze: time.Hour}); err != nil {
 		t.Fatal(err)
 	}
 	tick(t, e)
@@ -160,11 +153,11 @@ func TestVIPAppeal(t *testing.T) {
 	}
 	e.Advance(time.Hour)
 	tick(t, e)
-	if cur, _ := e.Tasks.Get(ctx, a3.ID); cur.Status != task.TaskStatusPending || cur.AssigneeID != "reviewer.dave@example.com" {
+	if cur, _ := e.Tasks.Get(ctx, a3.ID); cur.Status != task.TaskStatusPending || cur.AssigneeID != reviewer {
 		t.Fatalf("after wake: %+v", cur)
 	}
-	if got := sent(e, "reviewer.dave@example.com"); len(got) != 2 {
-		t.Fatalf("dave should be notified again on wake, got %d", len(got))
+	if got := sent(e, reviewer); len(got) != 2 {
+		t.Fatalf("reviewer should be notified again on wake, got %d", len(got))
 	}
 
 	// A1001 审核通过：下一轮扫描自动关闭。
@@ -180,11 +173,11 @@ func TestVIPAppeal(t *testing.T) {
 	if cur, _ := e.Tasks.Get(ctx, a7.ID); cur.Resolution != task.ResolutionAutoClosed {
 		t.Fatalf("A1007 old window = %+v", cur)
 	}
-	if got := open(t, e, "vip_appeal_48h", "A1007"); got == nil || got.TeamKey != "vip_cs_leads" {
+	if got := open(t, e, "vip_appeal_48h", "A1007"); got == nil || got.AssigneeID != "lead@example.com" {
 		t.Fatalf("A1007 new window = %+v", got)
 	}
 
-	// A1002 审核完成后被驳回重新提交：先离开结果（解除跟踪），再以新的提交时间出现，生成新任务。
+	// A1002 被驳回后重新提交：先离开结果（解除跟踪），再以新的提交时间出现，生成新任务。
 	testdb.Exec(t, e.Biz, "UPDATE appeal SET appeal_status = 'REJECTED' WHERE appeal_id = 'A1002'")
 	tick(t, e)
 	testdb.Exec(t, e.Biz, "UPDATE appeal SET appeal_status = 'COMMITED', commit_time = commit_time + 60 WHERE appeal_id = 'A1002'")
@@ -193,27 +186,14 @@ func TestVIPAppeal(t *testing.T) {
 		t.Fatalf("resubmitted A1002 = %+v", got)
 	}
 
-	// 任务历史。
-	hist, _ := e.Tasks.History(ctx, a2.ID)
+	hist, _ = e.Tasks.History(ctx, a2.ID)
 	var kinds []string
 	for _, h := range hist {
 		kinds = append(kinds, h.Kind)
 	}
-	if fmt.Sprint(kinds) != "[created escalate claimed close gone]" {
+	if fmt.Sprint(kinds) != "[created escalate close gone]" {
 		t.Fatalf("A1002 history = %v", kinds)
 	}
-}
-
-// targetOf 求某个节点的去向（escalate 前由调用方在事务外求好）。
-func targetOf(t *testing.T, e *TestEnv, key, node string) (to struct{ Assignee, Team, Mode string }) {
-	t.Helper()
-	def, _, err := e.Registry.Latest(context.Background(), key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	n, _, _ := def.Node(node)
-	to.Team, to.Mode = n.Assignee.Team, n.Assignee.Mode
-	return to
 }
 
 func TestOutboxRetry(t *testing.T) {
@@ -257,7 +237,7 @@ func TestPush(t *testing.T) {
 	body := []byte(`{"key":"kyc_review","name":"KYC 复核","source":{"kind":"api"},
 		"fields":[{"name":"uid","label":"用户","pii":"mask_middle"},{"name":"amount","label":"金额","type":"money"}],
 		"card":{"title":"KYC 复核：{key}","fields":["uid","amount"]},
-		"nodes":[{"id":"ops","name":"运营","assignee":{"kind":"team","team":"vip_cs_leads","mode":"claim"},"actions":["close"]}]}`)
+		"nodes":[{"id":"ops","name":"运营","assignee":{"kind":"pool","users":["ops@example.com"]},"actions":["close"]}]}`)
 	if _, issues, err := e.Registry.PublishBody(ctx, body, "test", e.Now()); err != nil {
 		t.Fatal(err, issues)
 	}

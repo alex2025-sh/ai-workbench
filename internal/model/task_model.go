@@ -38,17 +38,15 @@ type (
 		N        int64 `db:"n"`
 	}
 
-	// TaskFilter 是任务列表的条件。Assignee、Queue、Involved 三选一。
+	// TaskFilter 是任务列表的条件。Assignee、Involved 二选一。
 	TaskFilter struct {
-		Assignee    string   // 我的任务
-		ClaimTeams  []string // 团队队列：这些团队中认领模式的任务
-		AssignTeams []string // 团队队列：这些团队中分配模式的任务（调用人是分配者）
-		Involved    string   // 我经手的：参与过、但现在不在我名下的任务
-		Statuses    []int64
-		Priorities  []int64
-		TaskType    string
-		After       *TaskCursor
-		Limit       int
+		Assignee   string // 我的任务
+		Involved   string // 我经手的：参与过、但现在不在我名下的任务
+		Statuses   []int64
+		Priorities []int64
+		TaskType   string
+		After      *TaskCursor
+		Limit      int
 	}
 
 	// TaskCursor 是上一页最后一行的排序键。
@@ -131,17 +129,6 @@ func (f TaskFilter) where() ([]string, []any) {
 	switch {
 	case f.Assignee != "":
 		where, args = append(where, "`assignee_id` = ?"), append(args, f.Assignee)
-	case len(f.ClaimTeams) > 0 || len(f.AssignTeams) > 0:
-		var or []string
-		if len(f.ClaimTeams) > 0 {
-			or = append(or, "(`team_mode` = 'claim' and `team_key` in ("+placeholders(len(f.ClaimTeams))+"))")
-			args = appendStrings(args, f.ClaimTeams)
-		}
-		if len(f.AssignTeams) > 0 {
-			or = append(or, "(`team_mode` = 'assign' and `team_key` in ("+placeholders(len(f.AssignTeams))+"))")
-			args = appendStrings(args, f.AssignTeams)
-		}
-		where = append(where, "`status` = -1", "("+strings.Join(or, " or ")+")")
 	case f.Involved != "":
 		where = append(where, "`id` in (select `task_id` from `task_participant` where `user_id` = ?)", "`assignee_id` <> ?")
 		args = append(args, f.Involved, f.Involved)
@@ -167,10 +154,3 @@ func (f TaskFilter) where() ([]string, []any) {
 }
 
 func placeholders(n int) string { return strings.TrimSuffix(strings.Repeat("?,", n), ",") }
-
-func appendStrings(args []any, vs []string) []any {
-	for _, v := range vs {
-		args = append(args, v)
-	}
-	return args
-}

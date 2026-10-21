@@ -17,6 +17,7 @@ const (
 	lead  = "lead@example.com"
 	carol = "lead.carol@example.com"
 	dave  = "reviewer.dave@example.com"
+	erin  = "reviewer.erin@example.com"
 )
 
 func list(t *testing.T, env *rpctest.Env, user, scope string) *pb.ListTasksResp {
@@ -71,30 +72,27 @@ func TestWorkbench(t *testing.T) {
 		}
 	}
 
-	// 队列：组长能看到认领队列与分配队列；分配队列里只有分配者能分配。
-	q := list(t, env, lead, "queue")
-	a3 := byTitle(q.Items, "VIP 工单超过 7 天未完成：A1003")
-	a7 := byTitle(q.Items, "VIP 工单待审核：A1007")
-	if a3 == nil || !a3.CanAssign || !a3.CanClaim || a7 == nil || !a7.CanClaim || a7.CanAssign {
-		t.Fatalf("lead queue = %+v", q.Items)
+	// 业务关系查不到 → 兜底人；人员池 → 随机一位候选人。
+	a7 := byTitle(list(t, env, lead, "").Items, "VIP 工单待审核：A1007")
+	if a7 == nil || a7.AssigneeId != lead || !a7.CanStart {
+		t.Fatalf("A1007 (fallback) = %+v", a7)
 	}
-	if got := list(t, env, dave, "queue"); len(got.Items) != 0 {
-		t.Fatalf("executor sees assign queue: %+v", got.Items)
+	a3 := byTitle(append(list(t, env, dave, "").Items, list(t, env, erin, "").Items...), "VIP 工单超过 7 天未完成：A1003")
+	if a3 == nil || (a3.AssigneeId != dave && a3.AssigneeId != erin) {
+		t.Fatalf("A1003 (pool) = %+v", a3)
 	}
-	d, err := NewGetTaskLogic(rpctest.As(lead), env.Svc).GetTask(&pb.TaskIdReq{Id: a3.Id})
-	if err != nil || len(d.TeamMembers) != 3 || len(d.Nodes) != 1 || !d.Nodes[0].Current {
+	d, err := NewGetTaskLogic(rpctest.As(a3.AssigneeId), env.Svc).GetTask(&pb.TaskIdReq{Id: a3.Id})
+	if err != nil || d.ReadOnly || len(d.Nodes) != 1 || !d.Nodes[0].Current || d.Nodes[0].Assignee == "" {
 		t.Fatalf("A1003 detail = %+v %v", d, err)
 	}
-	if _, err := NewAssignTaskLogic(rpctest.As(lead), env.Svc).AssignTask(&pb.AssignTaskReq{Id: a3.Id, AssigneeId: dave}); err != nil {
-		t.Fatal(err)
-	}
 
-	// 升级：A1002 交给组长团队；原 RM 只读可见，陌生人看不到。
+	// 升级：A1002 随机交给一位组长；原 RM 只读可见，陌生人看不到。
 	got, err := NewActTaskLogic(rpctest.As(alice), env.Svc).ActTask(&pb.ActTaskReq{Id: a2.Id, Action: "escalate", ExpectNode: "rm", Note: "RM 无法推动"})
-	if err != nil || got.Status != pb.TaskStatus_TASK_STATUS_UNASSIGNED || got.NodeId != "lead" || got.TeamKey != "vip_cs_leads" {
+	if err != nil || got.Status != pb.TaskStatus_TASK_STATUS_PENDING || got.NodeId != "lead" || (got.AssigneeId != lead && got.AssigneeId != carol) {
 		t.Fatalf("escalate = %+v %v", got, err)
 	}
-	if _, err := NewActTaskLogic(rpctest.As(alice), env.Svc).ActTask(&pb.ActTaskReq{Id: a2.Id, Action: "escalate", ExpectNode: "rm"}); status.Code(err) != codes.Aborted && status.Code(err) != codes.FailedPrecondition {
+	leader := got.AssigneeId
+	if _, err := NewActTaskLogic(rpctest.As(alice), env.Svc).ActTask(&pb.ActTaskReq{Id: a2.Id, Action: "escalate", ExpectNode: "rm"}); status.Code(err) != codes.Aborted && status.Code(err) != codes.FailedPrecondition && status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("double escalate: %v", err)
 	}
 	ro, err := NewGetTaskLogic(rpctest.As(alice), env.Svc).GetTask(&pb.TaskIdReq{Id: a2.Id})
@@ -109,14 +107,21 @@ func TestWorkbench(t *testing.T) {
 		t.Fatalf("alice involved = %+v", involved.Items)
 	}
 
-	// 组员不认领直接处理：处理即认领。
-	if _, err := NewActTaskLogic(rpctest.As(carol), env.Svc).ActTask(&pb.ActTaskReq{Id: a2.Id, Action: "snooze", SnoozeMs: int64(24 * time.Hour / time.Millisecond)}); err != nil {
+	// 只有当前处理人能处理。
+	other := lead
+	if leader == lead {
+		other = carol
+	}
+	if _, err := NewActTaskLogic(rpctest.As(other), env.Svc).ActTask(&pb.ActTaskReq{Id: a2.Id, Action: "no_response"}); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("non-assignee act: %v", err)
+	}
+	if _, err := NewActTaskLogic(rpctest.As(leader), env.Svc).ActTask(&pb.ActTaskReq{Id: a2.Id, Action: "snooze", SnoozeMs: int64(24 * time.Hour / time.Millisecond)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewActTaskLogic(rpctest.As(carol), env.Svc).ActTask(&pb.ActTaskReq{Id: a2.Id, Action: "snooze", SnoozeMs: 1000}); status.Code(err) != codes.FailedPrecondition {
+	if _, err := NewActTaskLogic(rpctest.As(leader), env.Svc).ActTask(&pb.ActTaskReq{Id: a2.Id, Action: "snooze", SnoozeMs: 1000}); status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("snooze not an option: %v", err)
 	}
-	done, err := NewActTaskLogic(rpctest.As(carol), env.Svc).ActTask(&pb.ActTaskReq{Id: a2.Id, Action: "no_response"})
+	done, err := NewActTaskLogic(rpctest.As(leader), env.Svc).ActTask(&pb.ActTaskReq{Id: a2.Id, Action: "no_response"})
 	if err != nil || done.Status != pb.TaskStatus_TASK_STATUS_SOLVED || done.Resolution != "no_response" {
 		t.Fatalf("no_response = %+v %v", done, err)
 	}
@@ -145,7 +150,7 @@ func TestListPaging(t *testing.T) {
 	seen := map[int64]bool{}
 	cursor := ""
 	for page := 0; page < 5; page++ {
-		resp, err := NewListTasksLogic(rpctest.As(lead), env.Svc).ListTasks(&pb.ListTasksReq{Scope: "queue", Page: &pb.PageReq{Cursor: cursor, PageSize: 1}})
+		resp, err := NewListTasksLogic(rpctest.As(alice), env.Svc).ListTasks(&pb.ListTasksReq{Page: &pb.PageReq{Cursor: cursor, PageSize: 1}})
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -1,32 +1,42 @@
 // 第 3 步：人工节点链。画布显示 start → 节点 → end，连线由动作生成（escalate 连下一个节点，close / no_response 连 end），
-// 不能手画；点节点在右侧编辑：名称、处理人（个人关系或团队）、可用的动作、业务链接、推迟时长、是否发 Lark。
+// 不能手画；点节点在下方编辑：名称、处理人（业务关系 + 兜底人，或一批人中随机）、可用的动作、业务链接、推迟时长、是否发 Lark。
+// 节点 id 由前端自动生成且不展示：任务行记录所在节点的 id，改名、调整顺序都不影响在途任务。
 import { ArrowLeftOutlined, ArrowRightOutlined, DeleteOutlined } from '@ant-design/icons';
 import { Button, Card, Checkbox, Col, Descriptions, Empty, Form, Input, Popconfirm, Radio, Row, Select, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd';
 import { useEffect, useState } from 'react';
-import { catalogApi, teamApi } from '../../api/services';
-import type { ActionKey, Issue, TaskTypeBody, Team, TTNode } from '../../api/types';
+import { catalogApi } from '../../api/services';
+import type { ActionKey, Issue, TaskTypeBody, TTAssignee, TTNode } from '../../api/types';
 import { ChainCanvas } from '../ChainCanvas';
 import { actionHelp, actionLabel, allActions, assigneeText, issuesAt, IssueList } from './shared';
 
 const snoozeChoices = ['30m', '1h', '2h', '4h', '1d', '3d', '7d'];
 const snoozeText = (d: string) => d.replace('m', ' 分钟').replace('h', ' 小时').replace('d', ' 天');
 
-function newNode(taken: string[]): TTNode {
-  let i = taken.length + 1;
-  while (taken.includes(`node_${i}`)) i++;
-  return { id: `node_${i}`, name: '新节点', assignee: { kind: 'team', team: '', mode: 'claim' }, actions: ['close'], lark: true };
+/** 节点 id：n_ + 6 位随机 base36，与已有节点不重复。 */
+export function newNodeId(taken: string[]): string {
+  for (;;) {
+    const id = `n_${Math.random().toString(36).slice(2, 8).padEnd(6, '0')}`;
+    if (!taken.includes(id)) return id;
+  }
 }
+
+const emptyAssignee = (kind: TTAssignee['kind'], relations: string[]): TTAssignee =>
+  kind === 'relation' ? { kind, relation: relations[0] ?? '', field: '', fallback: '' } : { kind, users: [], strategy: 'random' };
+
+function newNode(taken: string[]): TTNode {
+  return { id: newNodeId(taken), name: '新节点', assignee: emptyAssignee('pool', []), actions: ['close'], lark: true };
+}
+
+const emailLike = /^[^\s@]+@[^\s@]+$/;
 
 export function NodesStep(props: { body: TaskTypeBody; onChange?: (b: TaskTypeBody) => void; issues: Issue[]; selected?: string; onSelect?: (id?: string) => void }) {
   const { body, onChange } = props;
   const ro = !onChange;
-  const [teams, setTeams] = useState<Team[]>([]);
   const [relations, setRelations] = useState<string[]>([]);
   const [sel, setSel] = useState<string | undefined>(props.selected ?? (ro ? undefined : body.nodes[0]?.id));
   useEffect(() => setSel((s) => props.selected ?? s), [props.selected]);
   useEffect(() => {
     if (ro) return;
-    teamApi.list().then((r) => setTeams(r.items), () => undefined);
     catalogApi.relations().then((r) => setRelations(r.names), () => undefined);
   }, [ro]);
 
@@ -91,7 +101,7 @@ export function NodesStep(props: { body: TaskTypeBody; onChange?: (b: TaskTypeBo
           dataSource={nodes}
           scroll={{ x: 'max-content' }}
           columns={[
-            { title: '节点', render: (_, n) => <Space direction="vertical" size={0}><b>{n.name}</b><Typography.Text type="secondary" code>{n.id}</Typography.Text></Space> },
+            { title: '节点', render: (_, n) => <b>{n.name}</b> },
             { title: '处理人', render: (_, n) => assigneeText(body, n.assignee) },
             {
               title: '动作',
@@ -114,7 +124,6 @@ export function NodesStep(props: { body: TaskTypeBody; onChange?: (b: TaskTypeBo
 
   const nodeIssues = idx >= 0 ? issuesAt(props.issues, `nodes.${idx}`) : [];
   const fieldOptions = body.fields.map((f) => ({ value: f.name, label: f.label ? `${f.label}（${f.name}）` : f.name }));
-  const teamOptions = teams.map((t) => ({ value: t.key, label: `${t.name}（${t.key}）` }));
   const a = node?.assignee;
   return (
     <Card size="small" title={`节点（${nodes.length}）`}>
@@ -130,26 +139,17 @@ export function NodesStep(props: { body: TaskTypeBody; onChange?: (b: TaskTypeBo
           <Col xs={24} lg={14}>
             <IssueList issues={nodeIssues} />
             <Form layout="vertical">
-              <Space wrap align="start">
-                <Form.Item label="节点名称" style={{ marginBottom: 12, width: 240 }}>
-                  <Input value={node.name} onChange={(e) => update({ name: e.target.value })} placeholder="如：RM 跟进" />
-                </Form.Item>
-                <Form.Item label="节点 id" tooltip="任务记录当前所在的节点，发布后不要随意修改" style={{ marginBottom: 12, width: 180 }}>
-                  <Input value={node.id} onChange={(e) => update({ id: e.target.value.trim() })} style={{ fontFamily: 'ui-monospace, Menlo, monospace' }} />
-                </Form.Item>
-              </Space>
+              <Form.Item label="节点名称" style={{ marginBottom: 12, maxWidth: 320 }}>
+                <Input value={node.name} onChange={(e) => update({ name: e.target.value })} placeholder="如：RM 跟进" />
+              </Form.Item>
               <Form.Item label="处理人" style={{ marginBottom: 12 }}>
                 <Radio.Group
                   value={a!.kind}
                   optionType="button"
-                  onChange={(e) =>
-                    update({
-                      assignee: e.target.value === 'relation' ? { kind: 'relation', relation: relations[0] ?? '', field: '', fallback_team: '' } : { kind: 'team', team: '', mode: 'claim' },
-                    })
-                  }
+                  onChange={(e) => update({ assignee: emptyAssignee(e.target.value, relations) })}
                   options={[
-                    { value: 'relation', label: '个人（业务关系）' },
-                    { value: 'team', label: '团队' },
+                    { value: 'relation', label: '按业务关系' },
+                    { value: 'pool', label: '一批人中随机' },
                   ]}
                 />
               </Form.Item>
@@ -161,26 +161,36 @@ export function NodesStep(props: { body: TaskTypeBody; onChange?: (b: TaskTypeBo
                   <Form.Item label="按哪个字段查" style={{ marginBottom: 12, width: 200 }}>
                     <Select value={a!.field || undefined} onChange={(v) => update({ assignee: { ...a!, field: v } })} options={fieldOptions} />
                   </Form.Item>
-                  <Form.Item label="查不到时交给" tooltip="进入该团队的认领队列" style={{ marginBottom: 12, width: 220 }}>
-                    <Select value={a!.fallback_team || undefined} onChange={(v) => update({ assignee: { ...a!, fallback_team: v } })} options={teamOptions} />
+                  <Form.Item
+                    label="查不到时交给"
+                    tooltip="兜底人：业务关系里查不到处理人时，任务交给这个人"
+                    validateStatus={a!.fallback && !emailLike.test(a!.fallback) ? 'warning' : undefined}
+                    help={a!.fallback && !emailLike.test(a!.fallback) ? '请填写邮箱' : undefined}
+                    style={{ marginBottom: 12, width: 260 }}
+                  >
+                    <Input value={a!.fallback} onChange={(e) => update({ assignee: { ...a!, fallback: e.target.value.trim() } })} placeholder="lead@example.com" />
                   </Form.Item>
                 </Space>
               ) : (
-                <Space wrap align="start">
-                  <Form.Item label="团队" style={{ marginBottom: 12, width: 240 }}>
-                    <Select value={a!.team || undefined} onChange={(v) => update({ assignee: { ...a!, team: v } })} options={teamOptions} placeholder="选择团队" />
-                  </Form.Item>
-                  <Form.Item label="分派方式" style={{ marginBottom: 12 }}>
-                    <Radio.Group
-                      value={a!.mode ?? 'claim'}
-                      onChange={(e) => update({ assignee: { ...a!, mode: e.target.value } })}
-                      options={[
-                        { value: 'claim', label: '成员认领' },
-                        { value: 'assign', label: '分配者指定' },
-                      ]}
-                    />
-                  </Form.Item>
-                </Space>
+                <Form.Item
+                  label="候选人"
+                  tooltip="进入节点时从中随机选一人处理；输入邮箱后回车，可填多人"
+                  style={{ marginBottom: 12, maxWidth: 520 }}
+                >
+                  <Select
+                    mode="tags"
+                    open={false}
+                    tokenSeparators={[',', '，', ' ', ';']}
+                    value={a!.users ?? []}
+                    onChange={(v: string[]) => update({ assignee: { ...a!, users: [...new Set(v.map((x) => x.trim()).filter(Boolean))], strategy: 'random' } })}
+                    placeholder="reviewer.dave@example.com, reviewer.erin@example.com"
+                    tagRender={({ label, closable, onClose, value }) => (
+                      <Tag closable={closable} onClose={onClose} color={emailLike.test(String(value)) ? undefined : 'warning'} style={{ marginInlineEnd: 4 }}>
+                        {label}
+                      </Tag>
+                    )}
+                  />
+                </Form.Item>
               )}
               <Form.Item label="处理人可以" style={{ marginBottom: 12 }}>
                 <Space direction="vertical" size={4}>
@@ -216,7 +226,7 @@ export function NodesStep(props: { body: TaskTypeBody; onChange?: (b: TaskTypeBo
                   />
                 </Form.Item>
               )}
-              <Form.Item label="Lark 通知" tooltip="进入节点、分配到人、推迟到期时发送；认领模式发到团队群" style={{ marginBottom: 12 }}>
+              <Form.Item label="Lark 通知" tooltip="进入节点、转派、推迟到期时发给处理人" style={{ marginBottom: 12 }}>
                 <Switch checked={!!node.lark} onChange={(v) => update({ lark: v })} />
               </Form.Item>
             </Form>

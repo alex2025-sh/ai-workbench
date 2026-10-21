@@ -124,23 +124,25 @@ func (n Node) Has(action string) bool {
 	return false
 }
 
-// 分配器类型与团队模式。
+// 分配器类型：任务进入节点时总是直接分配给一个人。
 const (
-	AssigneeRelation = "relation" // 个人：按业务关系找到一个人，如 VIP → RM
-	AssigneeTeam     = "team"     // 团队
+	AssigneeRelation = "relation" // 按业务关系找到一个人（如 VIP → RM），查不到时交给兜底人
+	AssigneePool     = "pool"     // 从一批人中按策略选一个
+)
 
-	ModeClaim  = "claim"  // 进入团队队列，执行者认领
-	ModeAssign = "assign" // 交给团队的分配者，由分配者指定执行者
+// 人员池的选择策略。
+const (
+	StrategyRandom = "random"
 )
 
 // Assignee 是节点的分配器。
 type Assignee struct {
-	Kind         string `json:"kind"`
-	Relation     string `json:"relation,omitempty"`      // relation：关系名，如 vip_rm
-	Field        string `json:"field,omitempty"`         // relation：主体字段，如 uid
-	FallbackTeam string `json:"fallback_team,omitempty"` // relation：查不到时进入该团队的认领队列
-	Team         string `json:"team,omitempty"`          // team：团队 key
-	Mode         string `json:"mode,omitempty"`          // team：claim / assign
+	Kind     string   `json:"kind"`
+	Relation string   `json:"relation,omitempty"` // relation：关系名，如 vip_rm
+	Field    string   `json:"field,omitempty"`    // relation：主体字段，如 uid
+	Fallback string   `json:"fallback,omitempty"` // relation：查不到时的兜底人
+	Users    []string `json:"users,omitempty"`    // pool：候选人
+	Strategy string   `json:"strategy,omitempty"` // pool：选择策略，缺省 random
 }
 
 // Link 是 redirect link 动作的按钮。

@@ -31,31 +31,6 @@ CREATE TABLE `task_type_version` (
   UNIQUE KEY `uk_key_version` (`type_key`, `version`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='任务类型的已发布版本';
 
--- 团队：节点的处理人可以是团队（认领模式或分配模式）
-CREATE TABLE `team` (
-  `id`         bigint unsigned NOT NULL AUTO_INCREMENT,
-  `team_key`   varchar(64)  NOT NULL,
-  `name`       varchar(128) NOT NULL,
-  `chat_id`    varchar(128) NOT NULL DEFAULT '' COMMENT 'Lark 群，认领模式的通知发到这里',
-  `updated_by` varchar(64)  NOT NULL DEFAULT '',
-  `created_at` datetime(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-  `updated_at` datetime(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_team_key` (`team_key`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='团队';
-
--- 团队成员：assigner（分配者，同时也是执行者）或 executor（执行者）
-CREATE TABLE `team_member` (
-  `id`         bigint unsigned NOT NULL AUTO_INCREMENT,
-  `team_key`   varchar(64)  NOT NULL,
-  `user_id`    varchar(64)  NOT NULL,
-  `role`       varchar(16)  NOT NULL COMMENT 'assigner / executor',
-  `created_at` datetime(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_team_user` (`team_key`, `user_id`),
-  KEY `idx_user` (`user_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin COMMENT='团队成员';
-
 -- 任务：任务行就是流程状态的唯一事实来源
 CREATE TABLE `task` (
   `id`           bigint unsigned NOT NULL AUTO_INCREMENT,
@@ -67,9 +42,7 @@ CREATE TABLE `task` (
   `node_id`      varchar(64)  NOT NULL COMMENT '当前人工节点',
   `status`       smallint     NOT NULL COMMENT '-1 unassigned / 0 pending / 1 processing / 2 snoozed / 3 solved',
   `priority`     smallint     NOT NULL DEFAULT 2 COMMENT '0 P0 ... 3 P3',
-  `assignee_id`  varchar(64)  NOT NULL DEFAULT '' COMMENT '当前处理人；空 = 在团队队列',
-  `team_key`     varchar(64)  NOT NULL DEFAULT '' COMMENT '当前团队队列',
-  `team_mode`    varchar(16)  NOT NULL DEFAULT '' COMMENT 'claim / assign；只在团队队列中有意义',
+  `assignee_id`  varchar(64)  NOT NULL DEFAULT '' COMMENT '当前处理人',
   `snooze_until` datetime(3)  NULL,
   `resolution`   varchar(32)  NOT NULL DEFAULT '' COMMENT 'handled / no_response / auto_closed',
   `source_at`    bigint       NOT NULL DEFAULT 0 COMMENT '推送来源的 occurred_at（毫秒），丢弃更旧的消息',
@@ -80,7 +53,6 @@ CREATE TABLE `task` (
   PRIMARY KEY (`id`) /*T![clustered_index] NONCLUSTERED */,
   UNIQUE KEY `uk_track` (`task_type`, `track_key`),
   KEY `idx_assignee` (`assignee_id`, `status`, `priority`),
-  KEY `idx_team` (`team_key`, `status`, `priority`),
   KEY `idx_snooze` (`status`, `snooze_until`),
   KEY `idx_type_status` (`task_type`, `status`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_bin /*T! SHARD_ROW_ID_BITS=4 */ COMMENT='任务';
@@ -89,7 +61,7 @@ CREATE TABLE `task` (
 CREATE TABLE `task_event` (
   `id`          bigint unsigned NOT NULL AUTO_INCREMENT,
   `task_id`     bigint unsigned NOT NULL,
-  `kind`        varchar(32)  NOT NULL COMMENT 'created / claimed / assigned / started / snoozed / woke / escalated / closed / reassigned / priority / refreshed',
+  `kind`        varchar(32)  NOT NULL COMMENT 'created / started / close / no_response / snooze / escalate / woke / gone / reassigned / priority',
   `actor`       varchar(64)  NOT NULL DEFAULT '' COMMENT '操作人；系统为 system',
   `node_id`     varchar(64)  NOT NULL DEFAULT '',
   `from_status` smallint     NOT NULL,
@@ -115,8 +87,8 @@ CREATE TABLE `task_participant` (
 CREATE TABLE `outbox` (
   `id`         bigint unsigned NOT NULL AUTO_INCREMENT,
   `task_id`    bigint unsigned NOT NULL,
-  `kind`       varchar(32)  NOT NULL COMMENT 'lark_user / lark_chat',
-  `target`     varchar(128) NOT NULL COMMENT '用户 id 或群 chat_id',
+  `kind`       varchar(32)  NOT NULL COMMENT 'lark_user',
+  `target`     varchar(128) NOT NULL COMMENT '接收人（用户 id）',
   `payload`    json         NOT NULL COMMENT '渲染好的卡片',
   `idem_key`   varchar(191) NOT NULL,
   `status`     tinyint      NOT NULL DEFAULT 0 COMMENT '0 待投递 / 1 已投递 / 2 放弃',

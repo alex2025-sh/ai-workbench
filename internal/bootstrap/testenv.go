@@ -13,7 +13,7 @@ import (
 	"github.com/alex2025-sh/ai-workbench/internal/tasktype"
 )
 
-// TestEnv 是端到端测试的环境：临时平台库（含 mock 团队）、mock 业务库、三个 VIP 示例已发布、可拨动的时钟。
+// TestEnv 是端到端测试的环境：临时平台库、mock 业务库、三个 VIP 示例已发布、可拨动的时钟。
 type TestEnv struct {
 	*Services
 	Platform string // 平台库 DSN
@@ -47,7 +47,7 @@ func RepoFile(rel string) string {
 // NewTestEnv 准备环境并发布 examples/task_types 下的全部示例。需要 WB_TEST_MYSQL，未设置时跳过。
 func NewTestEnv(t *testing.T) *TestEnv {
 	t.Helper()
-	e := &TestEnv{Platform: testdb.New(t, "deploy/sql/*.sql", "deploy/mock/teams.sql"), Biz: testdb.New(t, "deploy/mock/appeal.sql")}
+	e := &TestEnv{Platform: testdb.New(t, "deploy/sql/*.sql"), Biz: testdb.New(t, "deploy/mock/appeal.sql")}
 	e.clock.now = time.Now().Truncate(time.Second)
 	s, err := Build(Config{
 		DataSource: e.Platform, Datasources: map[string]string{"appeal_ro": e.Biz},

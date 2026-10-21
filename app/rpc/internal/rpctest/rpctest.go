@@ -14,8 +14,8 @@ import (
 	"github.com/alex2025-sh/ai-workbench/internal/bootstrap"
 )
 
-// Env 是一套跑过首次扫描的环境：A1001、A1002 在 rm.alice 名下；A1007 在 vip_cs_leads 认领队列；
-// A1003 在 vip_review 分配队列（分配者 lead@example.com）。
+// Env 是一套跑过首次扫描的环境：A1001、A1002 在 rm.alice 名下；A1007 查不到 RM，交给兜底人 lead@example.com；
+// A1003 随机分给 reviewer.dave / reviewer.erin 之一。
 type Env struct {
 	*bootstrap.TestEnv
 	Svc *svc.ServiceContext

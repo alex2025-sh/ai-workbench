@@ -45,7 +45,8 @@ func TestValidateIssues(t *testing.T) {
 		{"bad cron", `"schedule":"*/1 * * * *"`, `"schedule":"every minute"`, "source.schedule"},
 		{"write query", `select concat`, `delete from appeal; select concat`, "source.query"},
 		{"unknown action", `"actions":["close","no_response","snooze"]`, `"actions":["close","approve"]`, "nodes.1.actions.1"},
-		{"missing team", `{"kind":"team","mode":"claim","team":"vip_cs_leads"}`, `{"kind":"team","mode":"claim"}`, "nodes.1.assignee"},
+		{"empty pool", `"users":["lead@example.com","lead.carol@example.com"]`, `"users":[]`, "nodes.1.assignee.users"},
+		{"missing fallback", `"fallback":"lead@example.com",`, ``, "nodes.0.assignee"},
 		{"relation field", `"field":"uid"`, `"field":"user_id"`, "nodes.0.assignee.field"},
 	}
 	for _, c := range cases {
@@ -67,12 +68,16 @@ func TestValidateIssues(t *testing.T) {
 
 func TestSchemaMessages(t *testing.T) {
 	base := string(load(t, "vip_appeal_48h.yaml"))
-	_, issues := Validate([]byte(strings.Replace(base, `"team":"vip_cs_leads"`, `"team":""`, 1)))
-	if len(issues) != 1 || issues[0].Path != "nodes.1.assignee.team" || issues[0].Message != "团队不能为空" {
+	_, issues := Validate([]byte(strings.Replace(base, `"fallback":"lead@example.com"`, `"fallback":""`, 1)))
+	if len(issues) != 1 || issues[0].Path != "nodes.0.assignee.fallback" || issues[0].Message != "兜底人不能为空" {
 		t.Fatalf("issues = %v", issues)
 	}
-	_, issues = Validate([]byte(strings.Replace(base, `{"kind":"team","mode":"claim","team":"vip_cs_leads"}`, `{"kind":"team","mode":"claim"}`, 1)))
-	if len(issues) != 1 || issues[0].Path != "nodes.1.assignee.team" || issues[0].Message != "缺少团队" {
+	_, issues = Validate([]byte(strings.Replace(base, `"fallback":"lead@example.com",`, ``, 1)))
+	if len(issues) != 1 || issues[0].Path != "nodes.0.assignee.fallback" || issues[0].Message != "缺少兜底人" {
+		t.Fatalf("issues = %v", issues)
+	}
+	_, issues = Validate([]byte(strings.Replace(base, `"users":["lead@example.com","lead.carol@example.com"]`, `"users":[]`, 1)))
+	if len(issues) != 1 || issues[0].Path != "nodes.1.assignee.users" || issues[0].Message != "候选人至少需要 1 项" {
 		t.Fatalf("issues = %v", issues)
 	}
 }

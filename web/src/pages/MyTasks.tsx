@@ -1,8 +1,8 @@
-// 任务工作台：我的任务 / 团队队列 / 我经手的，按优先级分区的卡片网格。
+// 任务工作台：我的任务 / 我经手的，按优先级分区的卡片网格。
 //
 // 每个优先级是一个分区，各自查询、各自游标分页（「查看更多」），分区标题的计数来自后端第一页返回的
 // counts（与筛选条件相同、不受分页影响），所以计数是准确的。没有任务的分区不显示。
-// 卡片上的操作是同步生效的，提交后立即重新加载该分区（任务可能离开当前分区，如认领后移到「我的任务」）。
+// 卡片上的操作是同步生效的，提交后立即重新加载该分区（任务可能离开当前分区，如升级后移到「我经手的」）。
 import { ReloadOutlined } from '@ant-design/icons';
 import { Alert, Button, Col, Empty, Row, Skeleton, Space, Tabs, Tag, Typography } from 'antd';
 import { useCallback, useEffect, useState } from 'react';
@@ -104,7 +104,6 @@ export default function MyTasks() {
         onChange={(k) => setTab(k as TabKey)}
         items={[
           { key: 'mine', label: '我的任务' },
-          { key: 'queue', label: '团队队列' },
           { key: 'involved', label: '我经手的' },
         ]}
         tabBarExtraContent={
@@ -134,7 +133,7 @@ export default function MyTasks() {
         </Space>
       </Space>
 
-      {nothing && <Empty style={{ marginTop: 48 }} description={{ mine: '没有任务', queue: '团队队列里没有待认领或待分配的任务', involved: '没有经手过、现在不在你名下的任务' }[tab]} />}
+      {nothing && <Empty style={{ marginTop: 48 }} description={{ mine: '没有任务', involved: '没有经手过、现在不在你名下的任务' }[tab]} />}
 
       {visible.map((p) => {
         const s = sections[p];
@@ -149,7 +148,7 @@ export default function MyTasks() {
                 {p.replace('TASK_PRIORITY_', '')}
               </Typography.Title>
               <Typography.Text strong>
-                {tab === 'queue' ? `${n} 个待认领或待分配` : s.counts.map((c) => `${taskStatusLabel[c.status]} ${c.count}`).join(' · ')}
+                {s.counts.map((c) => `${taskStatusLabel[c.status]} ${c.count}`).join(' · ')}
               </Typography.Text>
             </Space>
             {s.error && <Alert type="error" showIcon message={s.error} style={{ marginBottom: 12 }} />}

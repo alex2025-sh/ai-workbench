@@ -3,16 +3,15 @@ package task
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/alex2025-sh/ai-workbench/internal/model"
-	"github.com/alex2025-sh/ai-workbench/internal/team"
 )
 
 // 列表的范围。
 const (
 	ScopeMine     = "mine"     // 我名下的任务
-	ScopeQueue    = "queue"    // 我所在团队的队列：认领模式下待认领、我是分配者的待分配
 	ScopeInvolved = "involved" // 我经手过、现在不在我名下的任务（只读）
 )
 
@@ -43,17 +42,6 @@ func (s *Store) filter(ctx context.Context, q ListQuery) (model.TaskFilter, erro
 		f.Priorities = append(f.Priorities, int64(v))
 	}
 	switch q.Scope {
-	case ScopeQueue:
-		roles, err := s.Teams.RolesOf(ctx, q.User)
-		if err != nil {
-			return f, err
-		}
-		for key, role := range roles {
-			f.ClaimTeams = append(f.ClaimTeams, key)
-			if role == team.RoleAssigner {
-				f.AssignTeams = append(f.AssignTeams, key)
-			}
-		}
 	case ScopeInvolved:
 		f.Involved = q.User
 	default:
@@ -124,26 +112,18 @@ func (s *Store) History(ctx context.Context, id int64) ([]HistoryItem, error) {
 	return out, nil
 }
 
-// Access 是调用人对一个任务的权限。
-type Access struct {
-	View bool   // 能看：处理人、经手人、当前团队成员、管理员
-	Role string // 在任务当前团队中的角色
-}
-
-// AccessOf 求调用人对任务的权限。整个流程经手过的人都能看，但只有当前处理人（或队列中能认领的人）能处理。
-func (s *Store) AccessOf(ctx context.Context, t *Task, user string, admin bool) (Access, error) {
-	a := Access{View: admin || (user != "" && t.AssigneeID == user)}
-	if t.TeamKey != "" && user != "" {
-		tm, err := s.Teams.Get(ctx, t.TeamKey)
-		if err == nil {
-			a.Role = tm.Role(user)
-			a.View = a.View || a.Role != ""
-		}
+// CanView 报告调用人能否查看任务：当前处理人、经手人（升级或转派前处理过的人）与 task.admin。
+// 只有当前处理人能处理。
+func (s *Store) CanView(ctx context.Context, t *Task, user string, admin bool) (bool, error) {
+	if admin || (user != "" && t.AssigneeID == user) {
+		return true, nil
 	}
-	if !a.View && user != "" {
-		if _, err := s.parts.FindOneByTaskIdUserId(ctx, uint64(t.ID), user); err == nil {
-			a.View = true
-		}
+	if user == "" {
+		return false, nil
 	}
-	return a, nil
+	_, err := s.parts.FindOneByTaskIdUserId(ctx, uint64(t.ID), user)
+	if errors.Is(err, model.ErrNotFound) {
+		return false, nil
+	}
+	return err == nil, err
 }

@@ -7,12 +7,10 @@ import TaskDetail from './pages/TaskDetail';
 import TaskTypeDetail from './pages/TaskTypeDetail';
 import TaskTypeEditor from './pages/TaskTypeEditor';
 import TaskTypes from './pages/TaskTypes';
-import Teams from './pages/Teams';
 
 const menu = [
   { key: '/tasks', label: '任务工作台' },
   { key: '/config/task-types', label: '任务类型' },
-  { key: '/config/teams', label: '团队' },
 ];
 
 export default function App() {
@@ -57,7 +55,6 @@ export default function App() {
           <Route path="/config/task-types" element={<TaskTypes />} />
           <Route path="/config/task-types/:key" element={<TaskTypeDetail />} />
           <Route path="/config/task-types/:key/edit" element={<TaskTypeEditor />} />
-          <Route path="/config/teams" element={<Teams />} />
           <Route path="*" element={<Navigate to="/tasks" replace />} />
         </Routes>
       </Layout.Content>

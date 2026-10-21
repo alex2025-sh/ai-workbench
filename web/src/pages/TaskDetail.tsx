@@ -17,15 +17,18 @@ import { fmtTime, historyLabel, priorityColor, priorityLabel, resolutionLabel, t
 
 const priorities: TaskPriority[] = ['TASK_PRIORITY_P0', 'TASK_PRIORITY_P1', 'TASK_PRIORITY_P2', 'TASK_PRIORITY_P3'];
 
+// 进入节点时处理人是怎么选出来的（assign.Target.By）
+const assignedBy: Record<string, string> = { relation: '（业务关系）', fallback: '（业务关系查不到，兜底人）', random: '（随机）' };
+
 function historyText(h: HistoryItem): string {
   const d = decodeJson<Record<string, unknown>>(h.detail_json) ?? {};
   const parts = [historyLabel[h.kind] ?? h.kind];
-  if (h.kind === 'assigned') parts.push(`给 ${d.assignee}`);
   if (h.kind === 'snooze' && d.snooze_until) parts.push(`至 ${fmtTime(String(d.snooze_until))}`);
   if (h.kind === 'escalate') parts.push(`离开「${h.node_name}」`);
-  if (h.kind === 'reassigned') parts.push(`${d.from || '队列'} → ${d.to}`);
+  if (h.kind === 'reassigned') parts.push(`${d.from || '—'} → ${d.to}`);
   if (h.kind === 'priority') parts.push(`P${d.from} → P${d.to}`);
   if (h.kind === 'created') parts.push(`进入「${h.node_name}」`);
+  if (d.assignee) parts.push(`，交给 ${d.assignee}${assignedBy[String(d.assigned_by)] ?? ''}`);
   if (d.note) parts.push(`：${d.note}`);
   return parts.join(' ');
 }
@@ -72,7 +75,7 @@ export default function TaskDetail() {
           showIcon
           icon={<EyeOutlined />}
           style={{ marginBottom: 16 }}
-          message={t.assignee_id ? `任务现在由 ${t.assignee_id} 处理，你可以查看整个流程，但不能处理。` : `任务在团队 ${t.team_key} 的队列中，你可以查看，但不能处理。`}
+          message={`任务现在由 ${t.assignee_id || '—'} 处理，你可以查看整个流程，但不能处理。`}
         />
       )}
       <Row gutter={[16, 16]}>
@@ -115,7 +118,7 @@ export default function TaskDetail() {
                   {
                     key: 'a',
                     label: '处理人',
-                    children: t.assignee_id || (t.team_key ? `团队 ${t.team_key}（${t.team_mode === 'assign' ? '待分配' : '待认领'}）` : '—'),
+                    children: t.assignee_id || '—',
                   },
                   ...(t.status === 'TASK_STATUS_SNOOZED' ? [{ key: 'z', label: '推迟至', children: fmtTime(t.snooze_until, 'YYYY-MM-DD HH:mm') }] : []),
                   ...(terminal ? [{ key: 'r', label: '结果', children: resolutionLabel[t.resolution] ?? t.resolution }] : []),
@@ -125,7 +128,7 @@ export default function TaskDetail() {
               />
               {!terminal && (
                 <div style={{ marginTop: 12 }}>
-                  <TaskActions task={t} layout="detail" members={d.team_members} onChanged={load} />
+                  <TaskActions task={t} layout="detail" onChanged={load} />
                 </div>
               )}
               {(d.can_reassign || d.can_update_priority) && (

@@ -5,74 +5,207 @@
   "description": "任务类型 = 数据源 + 业务字段 + 人工节点链 + 卡片。字段说明见 docs/task-type-spec.md。",
   "type": "object",
   "additionalProperties": false,
-  "required": ["key", "name", "source", "fields", "card", "nodes"],
+  "required": [
+    "key",
+    "name",
+    "source",
+    "fields",
+    "card",
+    "nodes"
+  ],
   "properties": {
-    "key": { "$ref": "#/$defs/id", "description": "任务类型标识，创建后不可修改。" },
-    "namespace": { "type": "string", "maxLength": 64, "description": "所属团队或业务域，如 cs_vip。" },
-    "name": { "type": "string", "minLength": 1, "maxLength": 128 },
-    "description": { "type": "string", "maxLength": 2000 },
-    "priority": { "enum": ["P0", "P1", "P2", "P3"], "default": "P2", "description": "新任务的优先级。" },
-    "source": { "$ref": "#/$defs/source" },
+    "key": {
+      "$ref": "#/$defs/id",
+      "description": "任务类型标识，创建后不可修改。"
+    },
+    "namespace": {
+      "type": "string",
+      "maxLength": 64,
+      "description": "所属团队或业务域，如 cs_vip。"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "priority": {
+      "enum": [
+        "P0",
+        "P1",
+        "P2",
+        "P3"
+      ],
+      "default": "P2",
+      "description": "新任务的优先级。"
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
     "fields": {
       "type": "array",
       "description": "业务字段，顺序即配置页与详情页的显示顺序。SQL 来源的字段名就是查询结果的列名（key 列除外）。",
-      "items": { "$ref": "#/$defs/field" }
+      "items": {
+        "$ref": "#/$defs/field"
+      }
     },
-    "card": { "$ref": "#/$defs/card" },
+    "card": {
+      "$ref": "#/$defs/card"
+    },
     "nodes": {
       "type": "array",
       "minItems": 1,
       "maxItems": 10,
       "description": "人工节点链：任务创建时进入第一个节点，escalate 进入下一个，close / no_response 结束。",
-      "items": { "$ref": "#/$defs/node" }
+      "items": {
+        "$ref": "#/$defs/node"
+      }
     }
   },
   "$defs": {
-    "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
-    "template": { "type": "string", "maxLength": 1000, "description": "文本模板，{字段名} 替换为字段值，{key} 为数据源给出的 key。" },
-    "duration": { "type": "string", "pattern": "^([0-9]+(ms|s|m|h|d))+$", "description": "时长，如 30m、4h、1d。" },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{0,63}$"
+    },
+    "template": {
+      "type": "string",
+      "maxLength": 1000,
+      "description": "文本模板，{字段名} 替换为字段值，{key} 为数据源给出的 key。"
+    },
+    "duration": {
+      "type": "string",
+      "pattern": "^([0-9]+(ms|s|m|h|d))+$",
+      "description": "时长，如 30m、4h、1d。"
+    },
     "source": {
       "type": "object",
-      "required": ["kind"],
-      "properties": { "kind": { "enum": ["sql", "api", "kafka"] } },
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "sql",
+            "api",
+            "kafka"
+          ]
+        }
+      },
       "allOf": [
         {
-          "if": { "properties": { "kind": { "const": "sql" } } },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "sql"
+              }
+            }
+          },
           "then": {
             "additionalProperties": false,
-            "required": ["kind", "datasource", "schedule", "query"],
+            "required": [
+              "kind",
+              "datasource",
+              "schedule",
+              "query"
+            ],
             "properties": {
               "kind": true,
-              "datasource": { "type": "string", "minLength": 1, "description": "平台注册的只读数据源连接名。" },
-              "schedule": { "type": "string", "minLength": 9, "description": "5 段 cron，如 */1 * * * *。" },
-              "timezone": { "type": "string", "default": "Asia/Shanghai" },
-              "query": { "type": "string", "minLength": 1, "maxLength": 20000, "description": "单条 SELECT，必须有一列叫 key。结果集就是当前待办：新出现的 key 创建任务，消失的 key 自动关闭任务。" }
+              "datasource": {
+                "type": "string",
+                "minLength": 1,
+                "description": "平台注册的只读数据源连接名。"
+              },
+              "schedule": {
+                "type": "string",
+                "minLength": 9,
+                "description": "5 段 cron，如 */1 * * * *。"
+              },
+              "timezone": {
+                "type": "string",
+                "default": "Asia/Shanghai"
+              },
+              "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 20000,
+                "description": "单条 SELECT，必须有一列叫 key。结果集就是当前待办：新出现的 key 创建任务，消失的 key 自动关闭任务。"
+              }
             }
           }
         },
         {
-          "if": { "properties": { "kind": { "enum": ["api", "kafka"] } } },
-          "then": { "additionalProperties": false, "properties": { "kind": true } }
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "api",
+                  "kafka"
+                ]
+              }
+            }
+          },
+          "then": {
+            "additionalProperties": false,
+            "properties": {
+              "kind": true
+            }
+          }
         }
       ]
     },
     "field": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name"],
+      "required": [
+        "name"
+      ],
       "properties": {
-        "name": { "$ref": "#/$defs/id" },
-        "label": { "type": "string", "maxLength": 64 },
-        "type": { "enum": ["text", "number", "money", "datetime", "enum"], "default": "text" },
-        "pii": { "enum": ["mask_middle", "hash", "drop"], "description": "脱敏方式，工作台与 Lark 都按此显示。" },
+        "name": {
+          "$ref": "#/$defs/id"
+        },
+        "label": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "type": {
+          "enum": [
+            "text",
+            "number",
+            "money",
+            "datetime",
+            "enum"
+          ],
+          "default": "text"
+        },
+        "pii": {
+          "enum": [
+            "mask_middle",
+            "hash",
+            "drop"
+          ],
+          "description": "脱敏方式，工作台与 Lark 都按此显示。"
+        },
         "options": {
           "type": "array",
           "description": "enum 字段的取值与显示名。",
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["value", "label"],
-            "properties": { "value": { "type": "string" }, "label": { "type": "string" } }
+            "required": [
+              "value",
+              "label"
+            ],
+            "properties": {
+              "value": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              }
+            }
           }
         }
       }
@@ -80,64 +213,175 @@
     "card": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["title"],
+      "required": [
+        "title"
+      ],
       "properties": {
-        "title": { "$ref": "#/$defs/template" },
-        "fields": { "type": "array", "items": { "$ref": "#/$defs/id" }, "description": "卡片上的 KV，字段名，顺序即显示顺序。" }
+        "title": {
+          "$ref": "#/$defs/template"
+        },
+        "fields": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/id"
+          },
+          "description": "卡片上的 KV，字段名，顺序即显示顺序。"
+        }
       }
     },
     "node": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "name", "assignee", "actions"],
+      "required": [
+        "id",
+        "name",
+        "assignee",
+        "actions"
+      ],
       "properties": {
-        "id": { "$ref": "#/$defs/id" },
-        "name": { "type": "string", "minLength": 1, "maxLength": 64 },
-        "assignee": { "$ref": "#/$defs/assignee" },
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "assignee": {
+          "$ref": "#/$defs/assignee"
+        },
         "actions": {
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": { "enum": ["close", "no_response", "snooze", "link", "escalate"] }
+          "items": {
+            "enum": [
+              "close",
+              "no_response",
+              "snooze",
+              "link",
+              "escalate"
+            ]
+          }
         },
         "link": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["label", "url"],
+          "required": [
+            "label",
+            "url"
+          ],
           "description": "启用 link 时必填。",
-          "properties": { "label": { "type": "string", "minLength": 1, "maxLength": 32 }, "url": { "$ref": "#/$defs/template" } }
+          "properties": {
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32
+            },
+            "url": {
+              "$ref": "#/$defs/template"
+            }
+          }
         },
-        "snooze": { "type": "array", "items": { "$ref": "#/$defs/duration" }, "maxItems": 6, "description": "可选的推迟时长，缺省为 1h、4h、1d。" },
-        "lark": { "type": "boolean", "default": false, "description": "进入节点、分配到人、推迟到期时发 Lark 通知。" }
+        "snooze": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/duration"
+          },
+          "maxItems": 6,
+          "description": "可选的推迟时长，缺省为 1h、4h、1d。"
+        },
+        "lark": {
+          "type": "boolean",
+          "default": false,
+          "description": "进入节点、分配到人、推迟到期时发 Lark 通知。"
+        }
       }
     },
     "assignee": {
       "type": "object",
-      "required": ["kind"],
-      "properties": { "kind": { "enum": ["relation", "team"] } },
+      "description": "节点的分配器：任务进入节点时直接分配给一个人。",
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "relation",
+            "pool"
+          ]
+        }
+      },
       "allOf": [
         {
-          "if": { "properties": { "kind": { "const": "relation" } } },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "relation"
+              }
+            }
+          },
           "then": {
             "additionalProperties": false,
-            "required": ["kind", "relation", "field", "fallback_team"],
+            "required": [
+              "kind",
+              "relation",
+              "field",
+              "fallback"
+            ],
             "properties": {
               "kind": true,
-              "relation": { "type": "string", "minLength": 1, "description": "业务关系名，如 vip_rm（VIP → RM）。" },
-              "field": { "$ref": "#/$defs/id", "description": "关系的主体字段，如 uid。" },
-              "fallback_team": { "$ref": "#/$defs/id", "description": "关系查不到人时进入该团队的认领队列。" }
+              "relation": {
+                "type": "string",
+                "minLength": 1,
+                "description": "业务关系名，如 vip_rm（VIP → RM）。"
+              },
+              "field": {
+                "$ref": "#/$defs/id",
+                "description": "关系的主体字段，如 uid。"
+              },
+              "fallback": {
+                "type": "string",
+                "minLength": 1,
+                "description": "关系查不到人时的兜底人（用户 id / email）。"
+              }
             }
           }
         },
         {
-          "if": { "properties": { "kind": { "const": "team" } } },
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "pool"
+              }
+            }
+          },
           "then": {
             "additionalProperties": false,
-            "required": ["kind", "team", "mode"],
+            "required": [
+              "kind",
+              "users"
+            ],
             "properties": {
               "kind": true,
-              "team": { "$ref": "#/$defs/id" },
-              "mode": { "enum": ["claim", "assign"], "description": "claim：执行者认领；assign：分配者指定执行者。" }
+              "users": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 100,
+                "uniqueItems": true,
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "候选人（用户 id / email）。"
+              },
+              "strategy": {
+                "enum": [
+                  "random"
+                ],
+                "default": "random",
+                "description": "从候选人中选一个的策略：random 随机。"
+              }
             }
           }
         }

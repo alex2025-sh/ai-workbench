@@ -87,7 +87,8 @@ export function sampleValues(body: TaskTypeBody, row?: Record<string, unknown>):
 export function assigneeText(body: TaskTypeBody, a: TaskTypeBody['nodes'][number]['assignee']): string {
   if (a.kind === 'relation') {
     const f = body.fields.find((x) => x.name === a.field);
-    return `业务关系 ${a.relation || '?'}（${f?.label || a.field || '?'}）→ 兜底 ${a.fallback_team || '?'}`;
+    return `业务关系 ${a.relation || '?'}（${f?.label || a.field || '?'}）→ 兜底 ${a.fallback || '?'}`;
   }
-  return `团队 ${a.team || '?'} · ${a.mode === 'assign' ? '分配者指定' : '认领'}`;
+  const n = a.users?.length ?? 0;
+  return n === 0 ? '随机：未填候选人' : n === 1 ? a.users![0] : `${n} 人中随机：${a.users!.join('、')}`;
 }

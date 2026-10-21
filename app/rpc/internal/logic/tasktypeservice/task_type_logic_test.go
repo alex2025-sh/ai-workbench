@@ -25,7 +25,7 @@ func TestTaskTypeLifecycle(t *testing.T) {
 		t.Fatalf("get = %+v %v", got, err)
 	}
 
-	// 新建 → 草稿有问题（团队未填）→ 保存修正 → 发布需要权限。
+	// 新建 → 草稿有问题（候选人未填）→ 保存修正 → 发布需要权限。
 	d, err := NewCreateTaskTypeLogic(dev, env.Svc).CreateTaskType(&pb.CreateTaskTypeReq{Key: "demo", Name: "演示", Namespace: "cs_vip"})
 	if err != nil || len(d.Issues) == 0 {
 		t.Fatalf("create = %+v %v", d, err)
@@ -37,7 +37,7 @@ func TestTaskTypeLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tt.Nodes[0].Assignee.Team = "vip_cs_leads"
+	tt.Nodes[0].Assignee.Users = []string{"lead@example.com"}
 	tt.Source.Datasource, tt.Source.Query = "appeal_ro", "select appeal_id as `key`, appeal_type as title from appeal where appeal_status = 'COMMITED'"
 	body, _ := json.Marshal(tt)
 	saved, err := NewSaveTaskTypeDraftLogic(dev, env.Svc).SaveTaskTypeDraft(&pb.SaveTaskTypeDraftReq{Key: "demo", Revision: d.Revision, BodyJson: body})
@@ -58,13 +58,13 @@ func TestTaskTypeLifecycle(t *testing.T) {
 	// 草稿有问题时不发布，返回问题列表。
 	d2, _ := NewGetTaskTypeDraftLogic(ops, env.Svc).GetTaskTypeDraft(&pb.TaskTypeKeyReq{Key: "demo"})
 	tt, _ = tasktype.Parse(d2.BodyJson)
-	tt.Nodes[0].Assignee.Team = "nope"
+	tt.Nodes[0].Assignee = tasktype.Assignee{Kind: tasktype.AssigneeRelation, Relation: "nope", Field: "title", Fallback: "lead@example.com"}
 	bad, _ := json.Marshal(tt)
 	if _, err := NewSaveTaskTypeDraftLogic(ops, env.Svc).SaveTaskTypeDraft(&pb.SaveTaskTypeDraftReq{Key: "demo", Revision: d2.Revision, BodyJson: bad}); err != nil {
 		t.Fatal(err)
 	}
 	pub, err = NewPublishTaskTypeDraftLogic(ops, env.Svc).PublishTaskTypeDraft(&pb.TaskTypeKeyReq{Key: "demo"})
-	if err != nil || pub.Version != nil || len(pub.Issues) != 1 || pub.Issues[0].Path != "nodes.0.assignee.team" {
+	if err != nil || pub.Version != nil || len(pub.Issues) != 1 || pub.Issues[0].Path != "nodes.0.assignee.relation" {
 		t.Fatalf("publish invalid = %+v %v", pub, err)
 	}
 

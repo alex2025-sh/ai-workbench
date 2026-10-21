@@ -13,7 +13,6 @@ import type {
   TaskStatus,
   TaskSummary,
   TaskTypeSummary,
-  Team,
   TrialSqlResp,
   VersionInfo,
 } from './types';
@@ -22,8 +21,6 @@ export const taskApi = {
   list: (req: { scope: Scope; statuses?: TaskStatus[]; priorities?: TaskPriority[]; task_type?: string; page?: PageReq }) =>
     call<ListTasksResp>('task/list', req),
   get: (id: string) => call<TaskDetail>('task/get', { id }),
-  claim: (id: string) => call<TaskSummary>('task/claim', { id }),
-  assign: (id: string, assignee_id: string) => call<TaskSummary>('task/assign', { id, assignee_id }),
   start: (id: string) => call<TaskSummary>('task/start', { id }),
   act: (req: { id: string; action: string; snooze_ms?: string; note?: string; expect_node?: string }) => call<TaskSummary>('task/act', req),
   reassign: (id: string, assignee_id: string, reason: string) => call<TaskSummary>('task/reassign', { id, assignee_id, reason }),
@@ -44,12 +41,6 @@ export const taskTypeApi = {
   trialSql: (datasource: string, query: string) => call<TrialSqlResp>('task_type/trial_sql', { datasource, query }),
   previewCard: (req: { body_json: string; node_id?: string; key: string; values_json: string }) =>
     call<{ card: Card | null; issues: Issue[] }>('task_type/preview_card', req),
-};
-
-export const teamApi = {
-  list: () => call<{ items: Team[] }>('team/list', {}),
-  get: (key: string) => call<Team>('team/get', { key }),
-  save: (t: Omit<Team, 'updated_by'>) => call<Team>('team/save', t),
 };
 
 export const catalogApi = {

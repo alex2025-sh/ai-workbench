@@ -106,7 +106,7 @@ func TestForwarding(t *testing.T) {
 	if task["id"] != "7" || task["assignee_id"] != "rm.alice@example.com" {
 		t.Fatalf("task = %v", task)
 	}
-	if _, ok := out["team_members"]; !ok {
+	if _, ok := out["can_reassign"]; !ok {
 		t.Fatalf("snake_case / unpopulated fields missing: %v", out)
 	}
 
@@ -134,7 +134,7 @@ func TestForwarding(t *testing.T) {
 }
 
 func TestMockUsers(t *testing.T) {
-	users, err := mockUsers("../../deploy/mock/vip_rm.yaml", "../../deploy/mock/teams.sql", "../../deploy/mock/permissions.yaml")
+	users, err := mockUsers("../../deploy/mock/vip_rm.yaml", "../../examples/task_types/*.yaml", "../../deploy/mock/permissions.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,10 +145,10 @@ func TestMockUsers(t *testing.T) {
 	if u := got["rm.alice@example.com"]; len(u.Roles) != 1 || u.Roles[0] != "rm" {
 		t.Fatalf("alice = %+v", u)
 	}
-	if u := got["lead@example.com"]; len(u.Groups) != 2 || !slices.Contains(u.Groups, "vip_review:assigner") {
+	if u := got["lead@example.com"]; !slices.Contains(u.Groups, "vip_appeal_48h/lead:pool") || !slices.Contains(u.Groups, "vip_appeal_pending/rm:fallback") {
 		t.Fatalf("lead = %+v", u)
 	}
-	if u := got["ops@example.com"]; !slices.Contains(u.Permissions, "team.admin") {
+	if u := got["ops@example.com"]; !slices.Contains(u.Permissions, "task_type.publish") {
 		t.Fatalf("ops = %+v", u)
 	}
 }

@@ -38,7 +38,7 @@ service TaskTypeService {
   // 丢弃草稿；尚未发布过的任务类型一并删除
   rpc DiscardTaskTypeDraft(TaskTypeKeyReq) returns (Empty); // POST /byai_platform/api/v1/task_type/draft/discard
 
-  // 完整校验草稿（含团队、数据源连接、业务关系是否存在）
+  // 完整校验草稿（含数据源连接、业务关系是否存在）
   rpc ValidateTaskTypeDraft(TaskTypeKeyReq) returns (ValidateResp); // POST /byai_platform/api/v1/task_type/draft/validate
 
   // 发布草稿为新版本（需要 task_type.publish 权限；有问题时不发布）
@@ -51,27 +51,13 @@ service TaskTypeService {
   rpc PreviewCard(PreviewCardReq) returns (PreviewCardResp); // POST /byai_platform/api/v1/task_type/preview_card
 }
 
-// 团队：节点的处理人可以是团队（认领模式或分配模式）
-service TeamService {
-  rpc ListTeams(Empty) returns (ListTeamsResp); // POST /byai_platform/api/v1/team/list
-  rpc GetTeam(TeamKeyReq) returns (Team); // POST /byai_platform/api/v1/team/get
-  // 新建或整体替换团队（含成员）；需要 team.admin 权限
-  rpc SaveTeam(Team) returns (Team); // POST /byai_platform/api/v1/team/save
-}
-
 // 任务工作台
 service TaskService {
-  // 任务列表：我的任务、团队队列、我经手的
+  // 任务列表：我的任务、我经手的
   rpc ListTasks(ListTasksReq) returns (ListTasksResp); // POST /byai_platform/api/v1/task/list
 
   // 任务详情：卡片、业务字段、节点链、历史，以及调用人可做的操作
   rpc GetTask(TaskIdReq) returns (TaskDetail); // POST /byai_platform/api/v1/task/get
-
-  // 认领（认领模式的执行者，或分配模式的分配者领给自己）
-  rpc ClaimTask(TaskIdReq) returns (TaskSummary); // POST /byai_platform/api/v1/task/claim
-
-  // 分配（分配模式的分配者指定执行者）
-  rpc AssignTask(AssignTaskReq) returns (TaskSummary); // POST /byai_platform/api/v1/task/assign
 
   // 开始处理
   rpc StartProcessing(TaskIdReq) returns (TaskSummary); // POST /byai_platform/api/v1/task/start
@@ -117,7 +103,7 @@ message NameList {
 // 存储与 Go 代码使用 internal/task.TaskStatus（-1/0/1/2/3），转换统一用 StatusToProto / StatusFromProto。
 enum TaskStatus {
   TASK_STATUS_UNSPECIFIED = 0;
-  TASK_STATUS_UNASSIGNED = 1;  // 存储值 -1：在团队队列中
+  TASK_STATUS_UNASSIGNED = 1;  // 存储值 -1：保留（进入节点时总是直接分配给一个人）
   TASK_STATUS_PENDING = 2;     // 存储值 0
   TASK_STATUS_PROCESSING = 3;  // 存储值 1
   TASK_STATUS_SNOOZED = 4;     // 存储值 2
@@ -257,30 +243,6 @@ message PreviewCardResp {
 }
 
 // ============================================================================
-// 团队
-
-message TeamMember {
-  string user_id = 1;
-  string role = 2;  // assigner / executor
-}
-
-message Team {
-  string key = 1;
-  string name = 2;
-  string chat_id = 3;  // Lark 群：认领模式的通知发到这里，空则私发给全部成员
-  repeated TeamMember members = 4;
-  string updated_by = 5;
-}
-
-message TeamKeyReq {
-  string key = 1;
-}
-
-message ListTeamsResp {
-  repeated Team items = 1;
-}
-
-// ============================================================================
 // 任务
 
 message KV {
@@ -314,8 +276,6 @@ message TaskSummary {
   TaskStatus status = 6;
   TaskPriority priority = 7;
   string assignee_id = 8;
-  string team_key = 9;
-  string team_mode = 10;  // claim / assign
   string node_id = 11;
   string resolution = 12;
   int64 snooze_until = 13;
@@ -324,8 +284,6 @@ message TaskSummary {
   Card card = 16;
   // 调用人可以做的操作（服务端仍会校验）
   repeated ActionOption actions = 17;
-  bool can_claim = 18;
-  bool can_assign = 19;
   bool can_start = 20;
 }
 
@@ -336,7 +294,7 @@ message TaskCount {
 }
 
 message ListTasksReq {
-  string scope = 1;  // mine（默认）/ queue / involved
+  string scope = 1;  // mine（默认）/ involved
   repeated TaskStatus statuses = 2;
   repeated TaskPriority priorities = 3;
   string task_type = 4;
@@ -357,14 +315,14 @@ message TaskIdReq {
 message NodeView {
   string id = 1;
   string name = 2;
-  string assignee = 3;  // 分配器的文字说明，如「业务关系 vip_rm（用户 UID）」
+  string assignee = 3;  // 分配器的文字说明，如「业务关系 vip_rm（用户 UID），查不到时交给 lead@example.com」
   bool current = 4;
   bool visited = 5;
   repeated string actions = 6;
 }
 
 message HistoryItem {
-  string kind = 1;  // created / claimed / assigned / started / close / no_response / snooze / escalate / woke / gone / reassigned / priority
+  string kind = 1;  // created / started / close / no_response / snooze / escalate / woke / gone / reassigned / priority
   string actor = 2;
   string node_id = 3;
   string node_name = 4;
@@ -379,15 +337,9 @@ message TaskDetail {
   repeated KV fields = 2;  // 全部业务字段（已脱敏），按字段顺序
   repeated NodeView nodes = 3;
   repeated HistoryItem history = 4;
-  repeated string team_members = 5;  // 分配模式下可选的执行者（调用人是分配者时）
   bool can_reassign = 6;
   bool can_update_priority = 7;
-  bool read_only = 8;  // 经手人或团队成员只能查看
-}
-
-message AssignTaskReq {
-  int64 id = 1;
-  string assignee_id = 2;
+  bool read_only = 8;  // 经手人只能查看
 }
 
 message ActTaskReq {

@@ -64,7 +64,7 @@ type TaskTypeServiceClient interface {
 	SaveTaskTypeDraft(ctx context.Context, in *SaveTaskTypeDraftReq, opts ...grpc.CallOption) (*SaveTaskTypeDraftResp, error)
 	// 丢弃草稿；尚未发布过的任务类型一并删除
 	DiscardTaskTypeDraft(ctx context.Context, in *TaskTypeKeyReq, opts ...grpc.CallOption) (*Empty, error)
-	// 完整校验草稿（含团队、数据源连接、业务关系是否存在）
+	// 完整校验草稿（含数据源连接、业务关系是否存在）
 	ValidateTaskTypeDraft(ctx context.Context, in *TaskTypeKeyReq, opts ...grpc.CallOption) (*ValidateResp, error)
 	// 发布草稿为新版本（需要 task_type.publish 权限；有问题时不发布）
 	PublishTaskTypeDraft(ctx context.Context, in *TaskTypeKeyReq, opts ...grpc.CallOption) (*PublishResp, error)
@@ -212,7 +212,7 @@ type TaskTypeServiceServer interface {
 	SaveTaskTypeDraft(context.Context, *SaveTaskTypeDraftReq) (*SaveTaskTypeDraftResp, error)
 	// 丢弃草稿；尚未发布过的任务类型一并删除
 	DiscardTaskTypeDraft(context.Context, *TaskTypeKeyReq) (*Empty, error)
-	// 完整校验草稿（含团队、数据源连接、业务关系是否存在）
+	// 完整校验草稿（含数据源连接、业务关系是否存在）
 	ValidateTaskTypeDraft(context.Context, *TaskTypeKeyReq) (*ValidateResp, error)
 	// 发布草稿为新版本（需要 task_type.publish 权限；有问题时不发布）
 	PublishTaskTypeDraft(context.Context, *TaskTypeKeyReq) (*PublishResp, error)
@@ -539,194 +539,8 @@ var TaskTypeService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	TeamService_ListTeams_FullMethodName = "/workbench.v1.TeamService/ListTeams"
-	TeamService_GetTeam_FullMethodName   = "/workbench.v1.TeamService/GetTeam"
-	TeamService_SaveTeam_FullMethodName  = "/workbench.v1.TeamService/SaveTeam"
-)
-
-// TeamServiceClient is the client API for TeamService service.
-//
-// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
-//
-// 团队：节点的处理人可以是团队（认领模式或分配模式）
-type TeamServiceClient interface {
-	ListTeams(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*ListTeamsResp, error)
-	GetTeam(ctx context.Context, in *TeamKeyReq, opts ...grpc.CallOption) (*Team, error)
-	// 新建或整体替换团队（含成员）；需要 team.admin 权限
-	SaveTeam(ctx context.Context, in *Team, opts ...grpc.CallOption) (*Team, error)
-}
-
-type teamServiceClient struct {
-	cc grpc.ClientConnInterface
-}
-
-func NewTeamServiceClient(cc grpc.ClientConnInterface) TeamServiceClient {
-	return &teamServiceClient{cc}
-}
-
-func (c *teamServiceClient) ListTeams(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*ListTeamsResp, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(ListTeamsResp)
-	err := c.cc.Invoke(ctx, TeamService_ListTeams_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *teamServiceClient) GetTeam(ctx context.Context, in *TeamKeyReq, opts ...grpc.CallOption) (*Team, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(Team)
-	err := c.cc.Invoke(ctx, TeamService_GetTeam_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *teamServiceClient) SaveTeam(ctx context.Context, in *Team, opts ...grpc.CallOption) (*Team, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(Team)
-	err := c.cc.Invoke(ctx, TeamService_SaveTeam_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-// TeamServiceServer is the server API for TeamService service.
-// All implementations must embed UnimplementedTeamServiceServer
-// for forward compatibility.
-//
-// 团队：节点的处理人可以是团队（认领模式或分配模式）
-type TeamServiceServer interface {
-	ListTeams(context.Context, *Empty) (*ListTeamsResp, error)
-	GetTeam(context.Context, *TeamKeyReq) (*Team, error)
-	// 新建或整体替换团队（含成员）；需要 team.admin 权限
-	SaveTeam(context.Context, *Team) (*Team, error)
-	mustEmbedUnimplementedTeamServiceServer()
-}
-
-// UnimplementedTeamServiceServer must be embedded to have
-// forward compatible implementations.
-//
-// NOTE: this should be embedded by value instead of pointer to avoid a nil
-// pointer dereference when methods are called.
-type UnimplementedTeamServiceServer struct{}
-
-func (UnimplementedTeamServiceServer) ListTeams(context.Context, *Empty) (*ListTeamsResp, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method ListTeams not implemented")
-}
-func (UnimplementedTeamServiceServer) GetTeam(context.Context, *TeamKeyReq) (*Team, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method GetTeam not implemented")
-}
-func (UnimplementedTeamServiceServer) SaveTeam(context.Context, *Team) (*Team, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method SaveTeam not implemented")
-}
-func (UnimplementedTeamServiceServer) mustEmbedUnimplementedTeamServiceServer() {}
-func (UnimplementedTeamServiceServer) testEmbeddedByValue()                     {}
-
-// UnsafeTeamServiceServer may be embedded to opt out of forward compatibility for this service.
-// Use of this interface is not recommended, as added methods to TeamServiceServer will
-// result in compilation errors.
-type UnsafeTeamServiceServer interface {
-	mustEmbedUnimplementedTeamServiceServer()
-}
-
-func RegisterTeamServiceServer(s grpc.ServiceRegistrar, srv TeamServiceServer) {
-	// If the following call pancis, it indicates UnimplementedTeamServiceServer was
-	// embedded by pointer and is nil.  This will cause panics if an
-	// unimplemented method is ever invoked, so we test this at initialization
-	// time to prevent it from happening at runtime later due to I/O.
-	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
-		t.testEmbeddedByValue()
-	}
-	s.RegisterService(&TeamService_ServiceDesc, srv)
-}
-
-func _TeamService_ListTeams_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(Empty)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(TeamServiceServer).ListTeams(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: TeamService_ListTeams_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(TeamServiceServer).ListTeams(ctx, req.(*Empty))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _TeamService_GetTeam_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(TeamKeyReq)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(TeamServiceServer).GetTeam(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: TeamService_GetTeam_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(TeamServiceServer).GetTeam(ctx, req.(*TeamKeyReq))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _TeamService_SaveTeam_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(Team)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(TeamServiceServer).SaveTeam(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: TeamService_SaveTeam_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(TeamServiceServer).SaveTeam(ctx, req.(*Team))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-// TeamService_ServiceDesc is the grpc.ServiceDesc for TeamService service.
-// It's only intended for direct use with grpc.RegisterService,
-// and not to be introspected or modified (even as a copy)
-var TeamService_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "workbench.v1.TeamService",
-	HandlerType: (*TeamServiceServer)(nil),
-	Methods: []grpc.MethodDesc{
-		{
-			MethodName: "ListTeams",
-			Handler:    _TeamService_ListTeams_Handler,
-		},
-		{
-			MethodName: "GetTeam",
-			Handler:    _TeamService_GetTeam_Handler,
-		},
-		{
-			MethodName: "SaveTeam",
-			Handler:    _TeamService_SaveTeam_Handler,
-		},
-	},
-	Streams:  []grpc.StreamDesc{},
-	Metadata: "workbench.proto",
-}
-
-const (
 	TaskService_ListTasks_FullMethodName       = "/workbench.v1.TaskService/ListTasks"
 	TaskService_GetTask_FullMethodName         = "/workbench.v1.TaskService/GetTask"
-	TaskService_ClaimTask_FullMethodName       = "/workbench.v1.TaskService/ClaimTask"
-	TaskService_AssignTask_FullMethodName      = "/workbench.v1.TaskService/AssignTask"
 	TaskService_StartProcessing_FullMethodName = "/workbench.v1.TaskService/StartProcessing"
 	TaskService_ActTask_FullMethodName         = "/workbench.v1.TaskService/ActTask"
 	TaskService_Reassign_FullMethodName        = "/workbench.v1.TaskService/Reassign"
@@ -739,14 +553,10 @@ const (
 //
 // 任务工作台
 type TaskServiceClient interface {
-	// 任务列表：我的任务、团队队列、我经手的
+	// 任务列表：我的任务、我经手的
 	ListTasks(ctx context.Context, in *ListTasksReq, opts ...grpc.CallOption) (*ListTasksResp, error)
 	// 任务详情：卡片、业务字段、节点链、历史，以及调用人可做的操作
 	GetTask(ctx context.Context, in *TaskIdReq, opts ...grpc.CallOption) (*TaskDetail, error)
-	// 认领（认领模式的执行者，或分配模式的分配者领给自己）
-	ClaimTask(ctx context.Context, in *TaskIdReq, opts ...grpc.CallOption) (*TaskSummary, error)
-	// 分配（分配模式的分配者指定执行者）
-	AssignTask(ctx context.Context, in *AssignTaskReq, opts ...grpc.CallOption) (*TaskSummary, error)
 	// 开始处理
 	StartProcessing(ctx context.Context, in *TaskIdReq, opts ...grpc.CallOption) (*TaskSummary, error)
 	// 节点动作：close、no_response、snooze、escalate（link 在前端打开，不经过后端）
@@ -779,26 +589,6 @@ func (c *taskServiceClient) GetTask(ctx context.Context, in *TaskIdReq, opts ...
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(TaskDetail)
 	err := c.cc.Invoke(ctx, TaskService_GetTask_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *taskServiceClient) ClaimTask(ctx context.Context, in *TaskIdReq, opts ...grpc.CallOption) (*TaskSummary, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(TaskSummary)
-	err := c.cc.Invoke(ctx, TaskService_ClaimTask_FullMethodName, in, out, cOpts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *taskServiceClient) AssignTask(ctx context.Context, in *AssignTaskReq, opts ...grpc.CallOption) (*TaskSummary, error) {
-	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(TaskSummary)
-	err := c.cc.Invoke(ctx, TaskService_AssignTask_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -851,14 +641,10 @@ func (c *taskServiceClient) UpdatePriority(ctx context.Context, in *UpdatePriori
 //
 // 任务工作台
 type TaskServiceServer interface {
-	// 任务列表：我的任务、团队队列、我经手的
+	// 任务列表：我的任务、我经手的
 	ListTasks(context.Context, *ListTasksReq) (*ListTasksResp, error)
 	// 任务详情：卡片、业务字段、节点链、历史，以及调用人可做的操作
 	GetTask(context.Context, *TaskIdReq) (*TaskDetail, error)
-	// 认领（认领模式的执行者，或分配模式的分配者领给自己）
-	ClaimTask(context.Context, *TaskIdReq) (*TaskSummary, error)
-	// 分配（分配模式的分配者指定执行者）
-	AssignTask(context.Context, *AssignTaskReq) (*TaskSummary, error)
 	// 开始处理
 	StartProcessing(context.Context, *TaskIdReq) (*TaskSummary, error)
 	// 节点动作：close、no_response、snooze、escalate（link 在前端打开，不经过后端）
@@ -882,12 +668,6 @@ func (UnimplementedTaskServiceServer) ListTasks(context.Context, *ListTasksReq) 
 }
 func (UnimplementedTaskServiceServer) GetTask(context.Context, *TaskIdReq) (*TaskDetail, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method GetTask not implemented")
-}
-func (UnimplementedTaskServiceServer) ClaimTask(context.Context, *TaskIdReq) (*TaskSummary, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method ClaimTask not implemented")
-}
-func (UnimplementedTaskServiceServer) AssignTask(context.Context, *AssignTaskReq) (*TaskSummary, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method AssignTask not implemented")
 }
 func (UnimplementedTaskServiceServer) StartProcessing(context.Context, *TaskIdReq) (*TaskSummary, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method StartProcessing not implemented")
@@ -954,42 +734,6 @@ func _TaskService_GetTask_Handler(srv interface{}, ctx context.Context, dec func
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(TaskServiceServer).GetTask(ctx, req.(*TaskIdReq))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _TaskService_ClaimTask_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(TaskIdReq)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(TaskServiceServer).ClaimTask(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: TaskService_ClaimTask_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(TaskServiceServer).ClaimTask(ctx, req.(*TaskIdReq))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _TaskService_AssignTask_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(AssignTaskReq)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(TaskServiceServer).AssignTask(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: TaskService_AssignTask_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(TaskServiceServer).AssignTask(ctx, req.(*AssignTaskReq))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -1080,14 +824,6 @@ var TaskService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetTask",
 			Handler:    _TaskService_GetTask_Handler,
-		},
-		{
-			MethodName: "ClaimTask",
-			Handler:    _TaskService_ClaimTask_Handler,
-		},
-		{
-			MethodName: "AssignTask",
-			Handler:    _TaskService_AssignTask_Handler,
 		},
 		{
 			MethodName: "StartProcessing",

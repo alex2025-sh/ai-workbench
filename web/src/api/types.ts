@@ -55,8 +55,6 @@ export interface TaskSummary {
   status: TaskStatus;
   priority: TaskPriority;
   assignee_id: string;
-  team_key: string;
-  team_mode: '' | 'claim' | 'assign';
   node_id: string;
   resolution: string;
   snooze_until: Int64;
@@ -64,8 +62,6 @@ export interface TaskSummary {
   updated_at: Int64;
   card: Card | null;
   actions: ActionOption[];
-  can_claim: boolean;
-  can_assign: boolean;
   can_start: boolean;
 }
 
@@ -75,7 +71,7 @@ export interface TaskCount {
   count: Int64;
 }
 
-export type Scope = 'mine' | 'queue' | 'involved';
+export type Scope = 'mine' | 'involved';
 
 export interface ListTasksResp {
   items: TaskSummary[];
@@ -108,7 +104,6 @@ export interface TaskDetail {
   fields: KV[];
   nodes: NodeView[];
   history: HistoryItem[];
-  team_members: string[];
   can_reassign: boolean;
   can_update_priority: boolean;
   read_only: boolean;
@@ -164,21 +159,6 @@ export interface TrialSqlResp {
   has_more: boolean;
 }
 
-// ---- 团队
-
-export interface TeamMember {
-  user_id: string;
-  role: 'assigner' | 'executor';
-}
-
-export interface Team {
-  key: string;
-  name: string;
-  chat_id: string;
-  members: TeamMember[];
-  updated_by: string;
-}
-
 // ---- 任务类型 JSON（与 api/schema/task_type.schema.json 一致）
 
 export type SourceKind = 'sql' | 'api' | 'kafka';
@@ -193,13 +173,14 @@ export interface TTField {
   options?: { value: string; label: string }[];
 }
 
+/** 处理人：relation 按业务关系查人，查不到交给 fallback；pool 从 users 中按 strategy 选一人。 */
 export interface TTAssignee {
-  kind: 'relation' | 'team';
+  kind: 'relation' | 'pool';
   relation?: string;
   field?: string;
-  fallback_team?: string;
-  team?: string;
-  mode?: 'claim' | 'assign';
+  fallback?: string;
+  users?: string[];
+  strategy?: 'random';
 }
 
 export interface TTNode {

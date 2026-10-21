@@ -2,7 +2,6 @@
 package bootstrap
 
 import (
-	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -17,7 +16,6 @@ import (
 	"github.com/alex2025-sh/ai-workbench/internal/registry"
 	"github.com/alex2025-sh/ai-workbench/internal/source"
 	"github.com/alex2025-sh/ai-workbench/internal/task"
-	"github.com/alex2025-sh/ai-workbench/internal/team"
 	"github.com/alex2025-sh/ai-workbench/internal/ticker"
 )
 
@@ -47,7 +45,7 @@ func ReadCommitted(dsn string) string {
 type Services struct {
 	Conn        sqlx.SqlConn
 	Registry    *registry.Registry
-	Teams       *team.Store
+	Assign      *assign.Service
 	Tasks       *task.Store
 	Sources     *source.Runner
 	Datasources source.Datasources
@@ -65,7 +63,7 @@ func Build(c Config, now func() time.Time) (*Services, error) {
 	}
 	sqlx.DisableStmtLog()
 	conn := sqlx.NewMysql(ReadCommitted(c.DataSource))
-	s := &Services{Conn: conn, Teams: team.NewStore(conn), Lark: &notify.Mock{}, Datasources: source.Datasources{}}
+	s := &Services{Conn: conn, Lark: &notify.Mock{}, Datasources: source.Datasources{}}
 
 	for name, dsn := range c.Datasources {
 		db, err := sql.Open("mysql", dsn)
@@ -91,14 +89,15 @@ func Build(c Config, now func() time.Time) (*Services, error) {
 		}
 		s.Authz = p
 	}
+	s.Assign = assign.New(s.Relations)
 	s.Registry = registry.New(conn, refs{s})
 	s.Notify = &notify.Dispatcher{Outbox: model.NewOutboxModel(conn), Sender: s.Lark, Now: now}
-	s.Tasks = task.NewStore(conn, s.Registry, s.Teams, s.Notify, now)
+	s.Tasks = task.NewStore(conn, s.Registry, s.Notify, now)
 	if c.WebBase != "" {
 		base := strings.TrimSuffix(c.WebBase, "/")
 		s.Tasks.TaskURL = func(id int64) string { return fmt.Sprintf("%s/tasks/%d", base, id) }
 	}
-	s.Sources = &source.Runner{Registry: s.Registry, Datasources: s.Datasources, Tasks: s.Tasks, Relations: s.Relations,
+	s.Sources = &source.Runner{Registry: s.Registry, Datasources: s.Datasources, Tasks: s.Tasks, Assign: s.Assign,
 		States: model.NewSourceStateModel(conn), Now: now}
 	s.Ticker = &ticker.Ticker{Sources: s.Sources, Tasks: s.Tasks, Notify: s.Notify}
 	return s, nil
@@ -107,9 +106,6 @@ func Build(c Config, now func() time.Time) (*Services, error) {
 // refs 实现 registry.Refs。
 type refs struct{ s *Services }
 
-func (r refs) TeamExists(ctx context.Context, key string) (bool, error) {
-	return r.s.Teams.Exists(ctx, key)
-}
 func (r refs) DatasourceExists(name string) bool { return r.s.Datasources.Exists(name) }
 func (r refs) RelationExists(name string) bool {
 	for _, n := range r.s.Relations.Names() {

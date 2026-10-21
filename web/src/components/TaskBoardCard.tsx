@@ -1,8 +1,8 @@
 // 任务工作台的卡片：一眼看清「是什么、多急、在哪一步」，常用操作不用进详情就能完成。
 //
 // - 标题行：优先级、状态、卡片标题（与 Lark 卡片一致）。
-// - 正文：任务类型 · 当前节点 · 团队队列 / 推迟至；卡片的前 3 个字段。
-// - 操作：查看；认领 / 分配 / 开始处理；节点动作（服务端按调用人给出）。经手人的只读卡片只有「查看」。
+// - 正文：任务类型 · 当前节点 · 推迟至 / 处理人；卡片的前 3 个字段。
+// - 操作：查看；开始处理；节点动作（服务端按调用人给出）。经手人的只读卡片只有「查看」。
 import { LinkOutlined } from '@ant-design/icons';
 import { App as AntApp, Button, Card, Tag, Tooltip, Typography } from 'antd';
 import { useNavigate } from 'react-router-dom';
@@ -16,15 +16,13 @@ export function TaskBoardCard(props: { task: TaskSummary; onChanged: () => void 
   const { message } = AntApp.useApp();
   const detail = `/tasks/${t.id}`;
   const card = t.card;
-  const queue = t.status === 'TASK_STATUS_UNASSIGNED' && t.team_key;
 
   const meta = [
     t.task_type_name || t.task_type_key,
     card?.node_name,
-    queue ? `团队 ${t.team_key} · ${t.team_mode === 'assign' ? '待分配' : '待认领'}` : null,
     t.status === 'TASK_STATUS_SNOOZED' ? `推迟至 ${fmtTime(t.snooze_until)}` : null,
     t.status === 'TASK_STATUS_SOLVED' ? resolutionLabel[t.resolution] ?? t.resolution : null,
-    t.status !== 'TASK_STATUS_UNASSIGNED' && t.assignee_id ? `处理人 ${t.assignee_id}` : null,
+    t.assignee_id ? `处理人 ${t.assignee_id}` : null,
   ].filter(Boolean);
 
   return (
@@ -39,7 +37,7 @@ export function TaskBoardCard(props: { task: TaskSummary; onChanged: () => void 
             {t.priority.replace('TASK_PRIORITY_', '')}
           </Tag>
           <Tag color={taskStatusColor[t.status]} style={{ marginInlineEnd: 0, flex: 'none' }}>
-            {queue && t.team_mode === 'assign' ? '待分配' : taskStatusLabel[t.status]}
+            {taskStatusLabel[t.status]}
           </Tag>
           <Typography.Text strong ellipsis={{ tooltip: card?.title }} style={{ flex: 1, minWidth: 0 }}>
             {card?.title || `${t.task_type_key} · ${t.biz_key}`}

@@ -55,7 +55,7 @@ func (l *ActTaskLogic) ActTask(in *pb.ActTaskReq) (*pb.TaskSummary, error) {
 		if ev.ExpectNode == "" {
 			ev.ExpectNode = t.NodeID
 		}
-		if ev.Target, err = assign.Resolve(l.ctx, l.svcCtx.Relations, next, tasktype.DecodeValues(t.Fields)); err != nil {
+		if ev.Target, err = l.svcCtx.Assign.Resolve(l.ctx, next, assign.WithKey(tasktype.DecodeValues(t.Fields), t.BizKey)); err != nil {
 			return nil, rpcx.Err(err)
 		}
 	default:

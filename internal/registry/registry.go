@@ -30,9 +30,8 @@ var (
 	ErrInvalidDraft = errors.New("registry: draft has issues")
 )
 
-// Refs 检查任务类型引用的外部对象是否存在（团队、数据源连接、业务关系）。
+// Refs 检查任务类型引用的外部对象是否存在（数据源连接、业务关系）。
 type Refs interface {
-	TeamExists(ctx context.Context, key string) (bool, error)
 	DatasourceExists(name string) bool
 	RelationExists(name string) bool
 }
@@ -221,7 +220,7 @@ func (r *Registry) Create(ctx context.Context, key, namespace, name, description
 		Fields: []tasktype.Field{{Name: "title", Label: "标题"}},
 		Card:   tasktype.Card{Title: name + "：{title}", Fields: []string{"title"}},
 		Nodes: []tasktype.Node{{ID: "handle", Name: "处理", Actions: []string{tasktype.ActionClose, tasktype.ActionSnooze},
-			Assignee: tasktype.Assignee{Kind: tasktype.AssigneeTeam, Mode: tasktype.ModeClaim}, Lark: true}},
+			Assignee: tasktype.Assignee{Kind: tasktype.AssigneePool, Strategy: tasktype.StrategyRandom}, Lark: true}},
 	}
 	raw, _ := json.Marshal(body)
 	_, err := r.types.Insert(ctx, &model.TaskType{TypeKey: key, Namespace: namespace, Name: name, CreatedBy: actor,
@@ -297,7 +296,7 @@ func (r *Registry) DiscardDraft(ctx context.Context, key string) error {
 	return r.types.ClearDraft(ctx, key)
 }
 
-// Validate 完整校验：结构、语义与外部引用（团队、数据源连接、业务关系）。
+// Validate 完整校验：结构、语义与外部引用（数据源连接、业务关系）。
 func (r *Registry) Validate(ctx context.Context, body json.RawMessage) (*tasktype.TaskType, []tasktype.Issue) {
 	t, issues := tasktype.Validate(body)
 	if t == nil || r.Refs == nil {
@@ -307,15 +306,8 @@ func (r *Registry) Validate(ctx context.Context, body json.RawMessage) (*tasktyp
 		issues = append(issues, tasktype.Issue{Path: "source.datasource", Message: fmt.Sprintf("数据源连接 %s 不存在", t.Source.Datasource)})
 	}
 	for i, n := range t.Nodes {
-		team, path := n.Assignee.Team, fmt.Sprintf("nodes.%d.assignee.team", i)
-		if n.Assignee.Kind == tasktype.AssigneeRelation {
-			team, path = n.Assignee.FallbackTeam, fmt.Sprintf("nodes.%d.assignee.fallback_team", i)
-			if !r.Refs.RelationExists(n.Assignee.Relation) {
-				issues = append(issues, tasktype.Issue{Path: fmt.Sprintf("nodes.%d.assignee.relation", i), Message: fmt.Sprintf("业务关系 %s 不存在", n.Assignee.Relation)})
-			}
-		}
-		if ok, err := r.Refs.TeamExists(ctx, team); err != nil || !ok {
-			issues = append(issues, tasktype.Issue{Path: path, Message: fmt.Sprintf("团队 %s 不存在", team)})
+		if n.Assignee.Kind == tasktype.AssigneeRelation && !r.Refs.RelationExists(n.Assignee.Relation) {
+			issues = append(issues, tasktype.Issue{Path: fmt.Sprintf("nodes.%d.assignee.relation", i), Message: fmt.Sprintf("业务关系 %s 不存在", n.Assignee.Relation)})
 		}
 	}
 	return t, issues

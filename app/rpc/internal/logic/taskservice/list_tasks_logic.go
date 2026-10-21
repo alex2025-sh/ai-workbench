@@ -27,7 +27,7 @@ func NewListTasksLogic(ctx context.Context, svcCtx *svc.ServiceContext) *ListTas
 	}
 }
 
-// 任务列表：我的任务、团队队列、我经手的
+// 任务列表：我的任务、我经手的
 func (l *ListTasksLogic) ListTasks(in *pb.ListTasksReq) (*pb.ListTasksResp, error) {
 	c, err := rpcx.RequireCaller(l.ctx, l.svcCtx)
 	if err != nil {
@@ -37,9 +37,9 @@ func (l *ListTasksLogic) ListTasks(in *pb.ListTasksReq) (*pb.ListTasksResp, erro
 	switch q.Scope {
 	case "", task.ScopeMine:
 		q.Scope = task.ScopeMine
-	case task.ScopeQueue, task.ScopeInvolved:
+	case task.ScopeInvolved:
 	default:
-		return nil, rpcx.Invalid("scope must be mine, queue or involved")
+		return nil, rpcx.Invalid("scope must be mine or involved")
 	}
 	for _, s := range in.Statuses {
 		v, ok := task.StatusFromProto(int32(s))

@@ -40,8 +40,8 @@ type (
 	Outbox struct {
 		Id        uint64    `db:"id"`
 		TaskId    uint64    `db:"task_id"`
-		Kind      string    `db:"kind"`    // lark_user / lark_chat
-		Target    string    `db:"target"`  // 用户 id 或群 chat_id
+		Kind      string    `db:"kind"`    // lark_user
+		Target    string    `db:"target"`  // 接收人（用户 id）
 		Payload   string    `db:"payload"` // 渲染好的卡片
 		IdemKey   string    `db:"idem_key"`
 		Status    int64     `db:"status"` // 0 待投递 / 1 已投递 / 2 放弃

@@ -65,7 +65,7 @@ func (s *TaskTypeServiceServer) DiscardTaskTypeDraft(ctx context.Context, in *pb
 	return l.DiscardTaskTypeDraft(in)
 }
 
-// 完整校验草稿（含团队、数据源连接、业务关系是否存在）
+// 完整校验草稿（含数据源连接、业务关系是否存在）
 func (s *TaskTypeServiceServer) ValidateTaskTypeDraft(ctx context.Context, in *pb.TaskTypeKeyReq) (*pb.ValidateResp, error) {
 	l := tasktypeservicelogic.NewValidateTaskTypeDraftLogic(ctx, s.svcCtx)
 	return l.ValidateTaskTypeDraft(in)

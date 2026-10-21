@@ -15,7 +15,6 @@ import (
 	"github.com/alex2025-sh/ai-workbench/internal/model"
 	"github.com/alex2025-sh/ai-workbench/internal/notify"
 	"github.com/alex2025-sh/ai-workbench/internal/tasktype"
-	"github.com/alex2025-sh/ai-workbench/internal/team"
 )
 
 // ErrNotFound 表示任务不存在。
@@ -34,16 +33,15 @@ type Store struct {
 	parts   model.TaskParticipantModel
 	outbox  model.OutboxModel
 	Defs    Defs
-	Teams   *team.Store
 	Notify  *notify.Dispatcher
 	Now     func() time.Time
 	TaskURL func(id int64) string // 工作台任务详情的地址，写进 Lark 卡片的按钮
 }
 
 // NewStore 创建 Store。
-func NewStore(conn sqlx.SqlConn, defs Defs, teams *team.Store, d *notify.Dispatcher, now func() time.Time) *Store {
+func NewStore(conn sqlx.SqlConn, defs Defs, d *notify.Dispatcher, now func() time.Time) *Store {
 	return &Store{conn: conn, tasks: model.NewTaskModel(conn), events: model.NewTaskEventModel(conn),
-		parts: model.NewTaskParticipantModel(conn), outbox: model.NewOutboxModel(conn), Defs: defs, Teams: teams, Notify: d, Now: now,
+		parts: model.NewTaskParticipantModel(conn), outbox: model.NewOutboxModel(conn), Defs: defs, Notify: d, Now: now,
 		TaskURL: func(id int64) string { return fmt.Sprintf("/tasks/%d", id) }}
 }
 
@@ -67,7 +65,7 @@ type CreateCmd struct {
 	Key      string
 	Fields   json.RawMessage
 	SourceAt int64
-	Target   assign.Target // 第一个节点的去向，调用方在事务外求好
+	Target   assign.Target // 第一个节点的处理人，调用方在事务外求好
 }
 
 // Create 创建任务。同一任务类型同一 key 已有跟踪中的任务时返回 created=false。
@@ -127,9 +125,6 @@ func (s *Store) Do(ctx context.Context, id int64, ev Event) (*Task, error) {
 		if err != nil {
 			return err
 		}
-		if err := s.identity(ctx, &cur, &ev); err != nil {
-			return err
-		}
 		res, err := Apply(def, &cur, ev)
 		if err != nil {
 			return err
@@ -148,25 +143,6 @@ func (s *Store) Do(ctx context.Context, id int64, ev Event) (*Task, error) {
 	}
 	s.Notify.Kick(kick)
 	return &out, nil
-}
-
-// identity 求事件需要的团队角色。
-func (s *Store) identity(ctx context.Context, t *Task, ev *Event) error {
-	if t.TeamKey == "" || ev.Actor == "" {
-		return nil
-	}
-	tm, err := s.Teams.Get(ctx, t.TeamKey)
-	if errors.Is(err, team.ErrNotFound) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	ev.ActorRole = tm.Role(ev.Actor)
-	if ev.Kind == EvAssign {
-		ev.AssigneeMember = tm.Role(ev.Assignee) != ""
-	}
-	return nil
 }
 
 // record 在事务内写历史、经手人与 outbox，返回需要立即投递的 outbox id。
@@ -206,53 +182,17 @@ func (s *Store) record(ctx context.Context, session sqlx.Session, def *tasktype.
 	ob := s.outbox.WithSession(session)
 	var ids []uint64
 	for _, n := range res.Notify {
-		targets, err := s.expand(ctx, n)
+		key := fmt.Sprintf("%d:%d:%s:%s", to.ID, to.Version, notify.KindUser, n.User)
+		if err := ob.Add(ctx, &model.Outbox{TaskId: uint64(to.ID), Kind: notify.KindUser, Target: n.User, Payload: string(payload), IdemKey: key, NextAt: s.Now()}); err != nil {
+			return nil, err
+		}
+		o, err := ob.FindOneByIdemKey(ctx, key)
 		if err != nil {
 			return nil, err
 		}
-		for _, tg := range targets {
-			key := fmt.Sprintf("%d:%d:%s:%s", to.ID, to.Version, tg.kind, tg.target)
-			if err := ob.Add(ctx, &model.Outbox{TaskId: uint64(to.ID), Kind: tg.kind, Target: tg.target, Payload: string(payload), IdemKey: key, NextAt: s.Now()}); err != nil {
-				return nil, err
-			}
-			o, err := ob.FindOneByIdemKey(ctx, key)
-			if err != nil {
-				return nil, err
-			}
-			ids = append(ids, o.Id)
-		}
+		ids = append(ids, o.Id)
 	}
 	return ids, nil
-}
-
-type target struct{ kind, target string }
-
-// expand 把通知展开成具体的接收人：团队认领模式发到团队群（没有群时私发给全部成员），分配模式私发给分配者。
-func (s *Store) expand(ctx context.Context, n Notify) ([]target, error) {
-	if n.User != "" {
-		return []target{{notify.KindUser, n.User}}, nil
-	}
-	tm, err := s.Teams.Get(ctx, n.Team)
-	if errors.Is(err, team.ErrNotFound) {
-		return nil, nil // 团队被删除：没有人可通知，任务仍在队列里
-	}
-	if err != nil {
-		return nil, err
-	}
-	var users []string
-	switch {
-	case n.Mode == tasktype.ModeAssign:
-		users = tm.Assigners()
-	case tm.ChatID != "":
-		return []target{{notify.KindChat, tm.ChatID}}, nil
-	default:
-		users = tm.Executors()
-	}
-	out := make([]target, 0, len(users))
-	for _, u := range users {
-		out = append(out, target{notify.KindUser, u})
-	}
-	return out, nil
 }
 
 // ListTracked 返回某个任务类型全部跟踪中的任务。
@@ -293,7 +233,7 @@ func fromRow(r *model.Task) Task {
 	t := Task{
 		ID: int64(r.Id), TaskType: r.TaskType, TypeVersion: int(r.TypeVersion), BizKey: r.BizKey, Tracked: r.TrackKey.Valid,
 		Fields: json.RawMessage(r.Fields), NodeID: r.NodeId, Status: TaskStatus(r.Status), Priority: TaskPriority(r.Priority),
-		AssigneeID: r.AssigneeId, TeamKey: r.TeamKey, TeamMode: r.TeamMode, Resolution: Resolution(r.Resolution),
+		AssigneeID: r.AssigneeId, Resolution: Resolution(r.Resolution),
 		SourceAt: r.SourceAt, Version: r.Version, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 	}
 	if r.SnoozeUntil.Valid {
@@ -310,8 +250,8 @@ func fromRow(r *model.Task) Task {
 func toRow(t Task) *model.Task {
 	r := &model.Task{
 		Id: uint64(t.ID), TaskType: t.TaskType, TypeVersion: int64(t.TypeVersion), BizKey: t.BizKey, Fields: string(t.Fields),
-		NodeId: t.NodeID, Status: int64(t.Status), Priority: int64(t.Priority), AssigneeId: t.AssigneeID, TeamKey: t.TeamKey,
-		TeamMode: t.TeamMode, Resolution: string(t.Resolution), SourceAt: t.SourceAt, Version: t.Version,
+		NodeId: t.NodeID, Status: int64(t.Status), Priority: int64(t.Priority), AssigneeId: t.AssigneeID,
+		Resolution: string(t.Resolution), SourceAt: t.SourceAt, Version: t.Version,
 	}
 	if len(t.Fields) == 0 {
 		r.Fields = "{}"

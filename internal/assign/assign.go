@@ -1,109 +1,146 @@
-// Package assign 求值节点的分配器：个人（业务关系）或团队（认领 / 分配模式）。
+// Package assign 求值节点的分配器：任务进入节点时直接分配给一个人。
+//
+// 一期支持两种分配器（tasktype.Assignee.Kind）：
+//   - relation：按业务关系找到一个人（如 VIP → RM），查不到时交给配置的兜底人；
+//   - pool：从配置的一批人中按策略选一个（目前只有 random）。
+//
+// 扩展点：
+//   - 新的分配方式实现 Resolver 并注册到 Service（如按组织架构、按排班表）；
+//   - 新的业务关系实现 Relations（线上为关系服务，本地读 YAML）；
+//   - 新的选择策略实现 Picker 并注册（如轮询、按负载）。
 package assign
 
 import (
 	"context"
 	"fmt"
-	"os"
-	"strings"
-	"sync"
-
-	"go.yaml.in/yaml/v3"
 
 	"github.com/alex2025-sh/ai-workbench/internal/tasktype"
 )
 
-// Target 是任务进入节点时的去向：具体的人，或团队队列。
+// Target 是分配结果：处理人，以及是怎么分到的（写进任务历史）。
 type Target struct {
-	Assignee string // 非空：直接分配给这个人
-	Team     string // Assignee 为空时：进入该团队的队列
-	Mode     string // 团队模式：claim / assign
+	Assignee string
+	By       string // relation / fallback / random ...
 }
 
-// Relations 提供业务关系，如 VIP uid → 专属 RM。线上来自关系 API，本地读 deploy/mock/vip_rm.yaml。
+// Resolver 是一种分配方式。实现只读取、没有副作用，在事务外调用。
+type Resolver interface {
+	// Kind 是配置中的 assignee.kind。
+	Kind() string
+	// Resolve 返回处理人；vals 是任务的业务字段。
+	Resolve(ctx context.Context, a tasktype.Assignee, vals tasktype.Values) (Target, error)
+}
+
+// Relations 提供业务关系，如 VIP uid → 专属 RM。线上为关系服务，本地读 deploy/mock/vip_rm.yaml。
 type Relations interface {
 	Lookup(ctx context.Context, relation, subject string) ([]string, error)
+	// Names 返回可用的关系名（配置页的下拉选项与发布前的引用检查）。
+	Names() []string
 }
 
-// Resolve 求值节点的分配器。个人关系查不到人时进入兜底团队的认领队列。
-// 只做读取，没有副作用，可以在事务外调用。
-func Resolve(ctx context.Context, rel Relations, n tasktype.Node, vals tasktype.Values) (Target, error) {
-	a := n.Assignee
-	switch a.Kind {
-	case tasktype.AssigneeTeam:
-		return Target{Team: a.Team, Mode: a.Mode}, nil
-	case tasktype.AssigneeRelation:
-		subject := ""
-		if v, ok := vals[a.Field]; ok && v != nil {
-			subject = fmt.Sprint(v)
-		}
-		if subject != "" && rel != nil {
-			who, err := rel.Lookup(ctx, a.Relation, subject)
-			if err != nil {
-				return Target{}, fmt.Errorf("assign: relation %s(%s): %w", a.Relation, subject, err)
-			}
-			if len(who) > 0 && who[0] != "" {
-				return Target{Assignee: who[0]}, nil
-			}
-		}
-		return Target{Team: a.FallbackTeam, Mode: tasktype.ModeClaim}, nil
-	default:
-		return Target{}, fmt.Errorf("assign: unknown assignee kind %q", a.Kind)
+// Picker 从候选人中选一个。key 是任务的去重键，按负载等策略可能用到。
+type Picker interface {
+	Strategy() string
+	Pick(ctx context.Context, users []string, key string) (string, error)
+}
+
+// Service 按 assignee.kind 分发到对应的 Resolver。
+type Service struct {
+	resolvers map[string]Resolver
+}
+
+// New 创建 Service 并注册内置的两种分配方式。
+func New(rel Relations, pickers ...Picker) *Service {
+	s := &Service{resolvers: map[string]Resolver{}}
+	s.Register(RelationResolver{Relations: rel})
+	pool := PoolResolver{Pickers: map[string]Picker{}}
+	for _, p := range append([]Picker{Random{}}, pickers...) {
+		pool.Pickers[p.Strategy()] = p
 	}
+	s.Register(pool)
+	return s
 }
 
-// StaticRelations 是内存中的业务关系表：关系名 → 主体 → 候选人。用于本地开发与测试。
-type StaticRelations struct {
-	mu   sync.RWMutex
-	data map[string]map[string][]string
-}
+// Register 注册（或替换）一种分配方式。
+func (s *Service) Register(r Resolver) { s.resolvers[r.Kind()] = r }
 
-// LoadRelations 从 YAML 文件加载关系表，格式见 deploy/mock/vip_rm.yaml。
-func LoadRelations(path string) (*StaticRelations, error) {
-	raw, err := os.ReadFile(path)
+// Resolve 求值节点的分配器。
+func (s *Service) Resolve(ctx context.Context, n tasktype.Node, vals tasktype.Values) (Target, error) {
+	r, ok := s.resolvers[n.Assignee.Kind]
+	if !ok {
+		return Target{}, fmt.Errorf("assign: unknown assignee kind %q", n.Assignee.Kind)
+	}
+	t, err := r.Resolve(ctx, n.Assignee, vals)
 	if err != nil {
-		return nil, err
+		return Target{}, err
 	}
-	var doc map[string]map[string]string
-	if err := yaml.Unmarshal(raw, &doc); err != nil {
-		return nil, fmt.Errorf("assign: parse %s: %w", path, err)
+	if t.Assignee == "" {
+		return Target{}, fmt.Errorf("assign: node %s resolved to nobody", n.ID)
 	}
-	r := &StaticRelations{}
-	for rel, m := range doc {
-		for subject, who := range m {
-			r.Set(rel, subject, strings.Split(who, ",")...)
+	return t, nil
+}
+
+// RelationResolver：按业务关系找到一个人，查不到时交给兜底人。关系服务出错时返回错误（数据源下一轮重试），不走兜底。
+type RelationResolver struct {
+	Relations Relations
+}
+
+// Kind 实现 Resolver。
+func (RelationResolver) Kind() string { return tasktype.AssigneeRelation }
+
+// Resolve 实现 Resolver。
+func (r RelationResolver) Resolve(ctx context.Context, a tasktype.Assignee, vals tasktype.Values) (Target, error) {
+	subject := ""
+	if v, ok := vals[a.Field]; ok && v != nil {
+		subject = fmt.Sprint(v)
+	}
+	if subject != "" && r.Relations != nil {
+		who, err := r.Relations.Lookup(ctx, a.Relation, subject)
+		if err != nil {
+			return Target{}, fmt.Errorf("assign: relation %s(%s): %w", a.Relation, subject, err)
+		}
+		if len(who) > 0 && who[0] != "" {
+			return Target{Assignee: who[0], By: "relation"}, nil
 		}
 	}
-	return r, nil
+	return Target{Assignee: a.Fallback, By: "fallback"}, nil
 }
 
-// Set 设置一条关系。
-func (r *StaticRelations) Set(relation, subject string, who ...string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.data == nil {
-		r.data = map[string]map[string][]string{}
-	}
-	if r.data[relation] == nil {
-		r.data[relation] = map[string][]string{}
-	}
-	r.data[relation][subject] = who
+// PoolResolver：从一批人中按策略选一个。
+type PoolResolver struct {
+	Pickers map[string]Picker
 }
 
-// Lookup 实现 Relations。
-func (r *StaticRelations) Lookup(_ context.Context, relation, subject string) ([]string, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.data[relation][subject], nil
+// Kind 实现 Resolver。
+func (PoolResolver) Kind() string { return tasktype.AssigneePool }
+
+// Resolve 实现 Resolver。
+func (r PoolResolver) Resolve(ctx context.Context, a tasktype.Assignee, vals tasktype.Values) (Target, error) {
+	strategy := a.Strategy
+	if strategy == "" {
+		strategy = tasktype.StrategyRandom
+	}
+	p, ok := r.Pickers[strategy]
+	if !ok {
+		return Target{}, fmt.Errorf("assign: unknown strategy %q", strategy)
+	}
+	if len(a.Users) == 0 {
+		return Target{}, fmt.Errorf("assign: pool is empty")
+	}
+	key := ""
+	if v, ok := vals[tasktype.KeyPlaceholder]; ok {
+		key = fmt.Sprint(v)
+	}
+	u, err := p.Pick(ctx, a.Users, key)
+	return Target{Assignee: u, By: strategy}, err
 }
 
-// Names 返回已知的关系名（配置页的下拉选项）。
-func (r *StaticRelations) Names() []string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	var out []string
-	for k := range r.data {
-		out = append(out, k)
+// WithKey 把任务的去重 key 放进分配器可见的字段（按 key 选人的策略会用到），不写进任务。
+func WithKey(vals tasktype.Values, key string) tasktype.Values {
+	out := make(tasktype.Values, len(vals)+1)
+	for k, v := range vals {
+		out[k] = v
 	}
+	out[tasktype.KeyPlaceholder] = key
 	return out
 }

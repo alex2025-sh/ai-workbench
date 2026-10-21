@@ -1,8 +1,8 @@
-# VIP 工单超过 7 天：提交超过 7 天仍未审核完成，交给 VIP 审核小组，由组长分配给组员处理。
+# VIP 工单超过 7 天：提交超过 7 天仍未审核完成，随机交给 VIP 审核小组的一位组员处理。
 key: vip_appeal_7d
 namespace: cs_vip
 name: VIP 工单超过 7 天
-description: VIP 工单提交超过 7 天仍未审核完成，由 VIP 审核小组组长分配处理。
+description: VIP 工单提交超过 7 天仍未审核完成，随机交给 VIP 审核小组的一位组员处理。
 priority: P0
 
 source:
@@ -32,7 +32,7 @@ card:
 nodes:
   - id: review
     name: VIP 审核小组
-    assignee: { kind: team, team: vip_review, mode: assign }
+    assignee: { kind: pool, users: [reviewer.dave@example.com, reviewer.erin@example.com], strategy: random }
     actions: [close, no_response, snooze, link]
     link: { label: 打开工单, url: "https://risk.example.com/appeal/{appeal_id}" }
     lark: true

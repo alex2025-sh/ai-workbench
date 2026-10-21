@@ -16,7 +16,6 @@ import (
 type (
 	ActTaskReq        = pb.ActTaskReq
 	ActionOption      = pb.ActionOption
-	AssignTaskReq     = pb.AssignTaskReq
 	Card              = pb.Card
 	HistoryItem       = pb.HistoryItem
 	KV                = pb.KV
@@ -32,14 +31,10 @@ type (
 	UpdatePriorityReq = pb.UpdatePriorityReq
 
 	TaskService interface {
-		// 任务列表：我的任务、团队队列、我经手的
+		// 任务列表：我的任务、我经手的
 		ListTasks(ctx context.Context, in *ListTasksReq, opts ...grpc.CallOption) (*ListTasksResp, error)
 		// 任务详情：卡片、业务字段、节点链、历史，以及调用人可做的操作
 		GetTask(ctx context.Context, in *TaskIdReq, opts ...grpc.CallOption) (*TaskDetail, error)
-		// 认领（认领模式的执行者，或分配模式的分配者领给自己）
-		ClaimTask(ctx context.Context, in *TaskIdReq, opts ...grpc.CallOption) (*TaskSummary, error)
-		// 分配（分配模式的分配者指定执行者）
-		AssignTask(ctx context.Context, in *AssignTaskReq, opts ...grpc.CallOption) (*TaskSummary, error)
 		// 开始处理
 		StartProcessing(ctx context.Context, in *TaskIdReq, opts ...grpc.CallOption) (*TaskSummary, error)
 		// 节点动作：close、no_response、snooze、escalate（link 在前端打开，不经过后端）
@@ -61,7 +56,7 @@ func NewTaskService(cli zrpc.Client) TaskService {
 	}
 }
 
-// 任务列表：我的任务、团队队列、我经手的
+// 任务列表：我的任务、我经手的
 func (m *defaultTaskService) ListTasks(ctx context.Context, in *ListTasksReq, opts ...grpc.CallOption) (*ListTasksResp, error) {
 	client := pb.NewTaskServiceClient(m.cli.Conn())
 	return client.ListTasks(ctx, in, opts...)
@@ -71,18 +66,6 @@ func (m *defaultTaskService) ListTasks(ctx context.Context, in *ListTasksReq, op
 func (m *defaultTaskService) GetTask(ctx context.Context, in *TaskIdReq, opts ...grpc.CallOption) (*TaskDetail, error) {
 	client := pb.NewTaskServiceClient(m.cli.Conn())
 	return client.GetTask(ctx, in, opts...)
-}
-
-// 认领（认领模式的执行者，或分配模式的分配者领给自己）
-func (m *defaultTaskService) ClaimTask(ctx context.Context, in *TaskIdReq, opts ...grpc.CallOption) (*TaskSummary, error) {
-	client := pb.NewTaskServiceClient(m.cli.Conn())
-	return client.ClaimTask(ctx, in, opts...)
-}
-
-// 分配（分配模式的分配者指定执行者）
-func (m *defaultTaskService) AssignTask(ctx context.Context, in *AssignTaskReq, opts ...grpc.CallOption) (*TaskSummary, error) {
-	client := pb.NewTaskServiceClient(m.cli.Conn())
-	return client.AssignTask(ctx, in, opts...)
 }
 
 // 开始处理

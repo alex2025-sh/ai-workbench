@@ -9,7 +9,6 @@ import (
 	ingestserviceServer "github.com/alex2025-sh/ai-workbench/app/rpc/internal/server/ingestservice"
 	taskserviceServer "github.com/alex2025-sh/ai-workbench/app/rpc/internal/server/taskservice"
 	tasktypeserviceServer "github.com/alex2025-sh/ai-workbench/app/rpc/internal/server/tasktypeservice"
-	teamserviceServer "github.com/alex2025-sh/ai-workbench/app/rpc/internal/server/teamservice"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/internal/svc"
 	"github.com/alex2025-sh/ai-workbench/app/rpc/pb"
 
@@ -20,6 +19,7 @@ import (
 	"google.golang.org/grpc/reflection"
 )
 
+// 在仓库根目录运行：go run ./app/rpc -f app/rpc/etc/workbench.yaml
 // 在仓库根目录运行：go run ./app/rpc -f app/rpc/etc/workbench.yaml
 var configFile = flag.String("f", "app/rpc/etc/workbench.yaml", "the config file")
 
@@ -32,7 +32,6 @@ func main() {
 
 	s := zrpc.MustNewServer(c.RpcServerConf, func(grpcServer *grpc.Server) {
 		pb.RegisterTaskTypeServiceServer(grpcServer, tasktypeserviceServer.NewTaskTypeServiceServer(ctx))
-		pb.RegisterTeamServiceServer(grpcServer, teamserviceServer.NewTeamServiceServer(ctx))
 		pb.RegisterTaskServiceServer(grpcServer, taskserviceServer.NewTaskServiceServer(ctx))
 		pb.RegisterCatalogServiceServer(grpcServer, catalogserviceServer.NewCatalogServiceServer(ctx))
 		pb.RegisterIngestServiceServer(grpcServer, ingestserviceServer.NewIngestServiceServer(ctx))

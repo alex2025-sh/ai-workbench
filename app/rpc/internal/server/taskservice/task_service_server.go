@@ -23,7 +23,7 @@ func NewTaskServiceServer(svcCtx *svc.ServiceContext) *TaskServiceServer {
 	}
 }
 
-// 任务列表：我的任务、团队队列、我经手的
+// 任务列表：我的任务、我经手的
 func (s *TaskServiceServer) ListTasks(ctx context.Context, in *pb.ListTasksReq) (*pb.ListTasksResp, error) {
 	l := taskservicelogic.NewListTasksLogic(ctx, s.svcCtx)
 	return l.ListTasks(in)
@@ -33,18 +33,6 @@ func (s *TaskServiceServer) ListTasks(ctx context.Context, in *pb.ListTasksReq) 
 func (s *TaskServiceServer) GetTask(ctx context.Context, in *pb.TaskIdReq) (*pb.TaskDetail, error) {
 	l := taskservicelogic.NewGetTaskLogic(ctx, s.svcCtx)
 	return l.GetTask(in)
-}
-
-// 认领（认领模式的执行者，或分配模式的分配者领给自己）
-func (s *TaskServiceServer) ClaimTask(ctx context.Context, in *pb.TaskIdReq) (*pb.TaskSummary, error) {
-	l := taskservicelogic.NewClaimTaskLogic(ctx, s.svcCtx)
-	return l.ClaimTask(in)
-}
-
-// 分配（分配模式的分配者指定执行者）
-func (s *TaskServiceServer) AssignTask(ctx context.Context, in *pb.AssignTaskReq) (*pb.TaskSummary, error) {
-	l := taskservicelogic.NewAssignTaskLogic(ctx, s.svcCtx)
-	return l.AssignTask(in)
 }
 
 // 开始处理

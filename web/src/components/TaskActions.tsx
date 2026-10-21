@@ -1,21 +1,20 @@
 // 任务上的操作按钮，任务卡片与详情页共用。按钮来自服务端返回的 TaskSummary：
-// 认领 / 分配 / 开始处理由 can_* 决定；节点动作由 actions 决定（服务端已按调用人过滤）。权限以服务端校验为准。
+// 开始处理由 can_start 决定；节点动作由 actions 决定（服务端已按调用人过滤）。权限以服务端校验为准。
 //
 // - 已处理、无需处理：二次确认；
 // - 推迟：选择时长（节点配置的选项）；
 // - 升级：弹窗填写备注，显示升级到哪个节点；
-// - 分配：弹窗从团队成员中选择执行者；
 // - 业务链接：新窗口打开，不改变任务状态。
 import { DownOutlined, ExportOutlined, MoreOutlined } from '@ant-design/icons';
-import { App as AntApp, Button, Dropdown, Input, Modal, Select, Space, Tooltip } from 'antd';
+import { App as AntApp, Button, Dropdown, Input, Modal, Tooltip } from 'antd';
 import type { MenuProps } from 'antd';
 import { useState, type ReactNode } from 'react';
 import { ApiError } from '../api/client';
-import { taskApi, teamApi } from '../api/services';
+import { taskApi } from '../api/services';
 import type { ActionOption, TaskSummary } from '../api/types';
 import { fmtDuration } from '../format';
 
-type Change = 'claimed' | 'assigned' | 'started' | 'acted';
+type Change = 'started' | 'acted';
 
 interface Op {
   key: string;
@@ -34,8 +33,6 @@ export function TaskActions(props: {
   /** card：卡片底部，最多直接显示 inline 个，其余收进「更多」；detail：全部平铺。 */
   layout: 'card' | 'detail';
   inline?: number;
-  /** 分配模式下可选的执行者（详情页由后端给出；卡片上为空时弹窗内加载团队成员）。 */
-  members?: string[];
   onChanged: (change: Change) => void;
   extra?: ReactNode;
 }) {
@@ -44,9 +41,6 @@ export function TaskActions(props: {
   const [busy, setBusy] = useState<string>();
   const [escalate, setEscalate] = useState<ActionOption>();
   const [note, setNote] = useState('');
-  const [assignOpen, setAssignOpen] = useState(false);
-  const [members, setMembers] = useState<string[]>(props.members ?? []);
-  const [assignee, setAssignee] = useState<string>();
 
   const exec = async (key: string, label: string, fn: () => Promise<unknown>, change: Change) => {
     setBusy(key);
@@ -73,22 +67,6 @@ export function TaskActions(props: {
     Modal.confirm({ title: `确认「${o.label}」？`, content, okText: '确认', cancelText: '取消', onOk: () => act(o) });
 
   const ops: Op[] = [];
-  if (t.can_claim && !t.can_assign) {
-    ops.push({ key: 'claim', label: '认领', primary: true, run: () => void exec('claim', '认领', () => taskApi.claim(t.id), 'claimed') });
-  }
-  if (t.can_assign) {
-    ops.push({
-      key: 'assign',
-      label: '分配',
-      primary: true,
-      run: () => {
-        setAssignOpen(true);
-        if (!props.members?.length) {
-          teamApi.get(t.team_key).then((tm) => setMembers(tm.members.map((m) => m.user_id)), () => undefined);
-        }
-      },
-    });
-  }
   if (t.can_start) {
     ops.push({ key: 'start', label: '开始处理', primary: ops.length === 0, run: () => void exec('start', '开始处理', () => taskApi.start(t.id), 'started') });
   }
@@ -200,30 +178,6 @@ export function TaskActions(props: {
       >
         <p>任务将交给下一个节点处理，你仍然可以查看，但不能再处理。</p>
         <Input.TextArea rows={3} placeholder="备注（选填），如已尝试的处理" value={note} onChange={(e) => setNote(e.target.value)} />
-      </Modal>
-      <Modal
-        title="分配给团队成员"
-        open={assignOpen}
-        okText="分配"
-        cancelText="取消"
-        okButtonProps={{ disabled: !assignee }}
-        confirmLoading={busy === 'assign'}
-        onCancel={() => setAssignOpen(false)}
-        onOk={async () => {
-          if (assignee && (await exec('assign', '分配', () => taskApi.assign(t.id, assignee), 'assigned'))) setAssignOpen(false);
-        }}
-        destroyOnClose
-      >
-        <Space direction="vertical" style={{ width: '100%' }}>
-          <Select
-            style={{ width: '100%' }}
-            placeholder="选择执行者"
-            value={assignee}
-            onChange={setAssignee}
-            options={members.map((m) => ({ value: m, label: m }))}
-            showSearch
-          />
-        </Space>
       </Modal>
     </>
   );

@@ -5,4 +5,4 @@ vip_rm:
   "10000002": rm.alice@example.com
   "10000003": rm.bob@example.com
   "10000004": rm.bob@example.com
-  # 10000006 没有 RM：进入节点配置的兜底团队（认领队列）
+  # 10000006 没有 RM：交给节点配置的兜底人

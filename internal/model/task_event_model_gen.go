@@ -39,7 +39,7 @@ type (
 	TaskEvent struct {
 		Id         uint64         `db:"id"`
 		TaskId     uint64         `db:"task_id"`
-		Kind       string         `db:"kind"`  // created / claimed / assigned / started / snoozed / woke / escalated / closed / reassigned / priority / refreshed
+		Kind       string         `db:"kind"`  // created / started / close / no_response / snooze / escalate / woke / gone / reassigned / priority
 		Actor      string         `db:"actor"` // 操作人；系统为 system
 		NodeId     string         `db:"node_id"`
 		FromStatus int64          `db:"from_status"`

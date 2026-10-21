@@ -226,9 +226,9 @@ func schemaIssues(ve *jsonschema.ValidationError) []Issue {
 
 // fieldNames 是常见路径末段的中文名，用于把 JSON Schema 的报错翻译成配置人员看得懂的话。
 var fieldNames = map[string]string{
-	"key": "标识", "name": "名称", "team": "团队", "fallback_team": "兜底团队", "relation": "业务关系", "field": "字段",
+	"key": "标识", "name": "名称", "fallback": "兜底人", "users": "候选人", "strategy": "选择策略", "relation": "业务关系", "field": "字段",
 	"datasource": "数据源连接", "schedule": "调度", "query": "查询", "title": "标题", "label": "显示名", "url": "链接地址",
-	"id": "节点 id", "actions": "动作", "nodes": "节点", "mode": "分派方式", "kind": "类型", "type": "类型", "pii": "脱敏",
+	"id": "节点 id", "actions": "动作", "nodes": "节点", "kind": "类型", "type": "类型", "pii": "脱敏",
 }
 
 // schemaIssue 把一条 JSON Schema 报错翻译成中文；不认识的保持原文。

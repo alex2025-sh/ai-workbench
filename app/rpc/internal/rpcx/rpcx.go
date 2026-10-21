@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -17,7 +18,6 @@ import (
 	"github.com/alex2025-sh/ai-workbench/internal/source"
 	"github.com/alex2025-sh/ai-workbench/internal/task"
 	"github.com/alex2025-sh/ai-workbench/internal/tasktype"
-	"github.com/alex2025-sh/ai-workbench/internal/team"
 )
 
 // Err 把领域错误映射为 gRPC 状态码；已经是 status 的错误原样返回。
@@ -30,7 +30,7 @@ func Err(err error) error {
 	}
 	code := codes.Internal
 	switch {
-	case errors.Is(err, task.ErrNotFound), errors.Is(err, registry.ErrNotFound), errors.Is(err, team.ErrNotFound), errors.Is(err, registry.ErrUnpublished):
+	case errors.Is(err, task.ErrNotFound), errors.Is(err, registry.ErrNotFound), errors.Is(err, registry.ErrUnpublished):
 		code = codes.NotFound
 	case errors.Is(err, task.ErrForbidden):
 		code = codes.PermissionDenied
@@ -106,24 +106,20 @@ var ActionLabels = map[string]string{
 
 // Perms 是调用人对任务的操作权限。
 type Perms struct {
-	View, Act, Claim, Assign, Start bool
-	Role                            string
+	View, Act, Start bool
 }
 
 // PermsOf 求调用人对任务的操作权限，规则与 task.Apply 一致（Apply 仍会再校验）。
 func PermsOf(ctx context.Context, s *svc.ServiceContext, t *task.Task, c Caller) (Perms, error) {
-	acc, err := s.Tasks.AccessOf(ctx, t, c.User, c.Admin)
+	view, err := s.Tasks.CanView(ctx, t, c.User, c.Admin)
 	if err != nil {
 		return Perms{}, err
 	}
-	p := Perms{View: acc.View, Role: acc.Role}
+	p := Perms{View: view}
 	if t.Status.IsTerminal() {
 		return p, nil
 	}
-	claimable := t.InQueue() && ((t.TeamMode == tasktype.ModeAssign && acc.Role == team.RoleAssigner) || (t.TeamMode != tasktype.ModeAssign && acc.Role != ""))
-	p.Claim = claimable
-	p.Assign = t.InQueue() && t.TeamMode == tasktype.ModeAssign && acc.Role == team.RoleAssigner
-	p.Act = t.AssigneeID == c.User || claimable
+	p.Act = t.AssigneeID == c.User
 	p.Start = t.Status == task.TaskStatusPending && t.AssigneeID == c.User
 	return p, nil
 }
@@ -146,10 +142,10 @@ func summary(def *tasktype.TaskType, t *task.Task, p Perms) *pb.TaskSummary {
 	out := &pb.TaskSummary{
 		Id: t.ID, TaskTypeKey: t.TaskType, TaskTypeName: def.Name, TaskTypeVersion: int32(t.TypeVersion), BizKey: t.BizKey,
 		Status: pb.TaskStatus(task.StatusToProto(t.Status)), Priority: pb.TaskPriority(task.PriorityToProto(t.Priority)),
-		AssigneeId: t.AssigneeID, TeamKey: t.TeamKey, TeamMode: t.TeamMode, NodeId: t.NodeID, Resolution: string(t.Resolution),
+		AssigneeId: t.AssigneeID, NodeId: t.NodeID, Resolution: string(t.Resolution),
 		SnoozeUntil: Millis(t.SnoozeUntil), CreatedAt: t.CreatedAt.UnixMilli(), UpdatedAt: t.UpdatedAt.UnixMilli(),
 		Card:     CardPB(def.RenderCard(t.NodeID, t.BizKey, vals, "")),
-		CanClaim: p.Claim, CanAssign: p.Assign, CanStart: p.Start,
+		CanStart: p.Start,
 	}
 	node, _, ok := def.Node(t.NodeID)
 	if !ok {
@@ -209,7 +205,7 @@ func Detail(ctx context.Context, s *svc.ServiceContext, t *task.Task, c Caller) 
 		CanReassign:       !t.Status.IsTerminal() && (t.AssigneeID == c.User || c.Admin),
 		CanUpdatePriority: !t.Status.IsTerminal() && (t.AssigneeID == c.User || c.Admin),
 	}
-	out.ReadOnly = !p.Act && !p.Claim && !out.CanReassign
+	out.ReadOnly = !p.Act && !out.CanReassign
 	for _, kv := range def.Masked(t.BizKey, tasktype.DecodeValues(t.Fields)) {
 		out.Fields = append(out.Fields, &pb.KV{Label: kv.Label, Value: kv.Value})
 	}
@@ -228,11 +224,6 @@ func Detail(ctx context.Context, s *svc.ServiceContext, t *task.Task, c Caller) 
 		out.Nodes = append(out.Nodes, &pb.NodeView{Id: n.ID, Name: n.Name, Assignee: AssigneeText(def, n.Assignee),
 			Current: n.ID == t.NodeID && !t.Status.IsTerminal(), Visited: visited[n.ID], Actions: n.Actions})
 	}
-	if p.Assign {
-		if tm, err := s.Teams.Get(ctx, t.TeamKey); err == nil {
-			out.TeamMembers = tm.Executors()
-		}
-	}
 	return out, nil
 }
 
@@ -244,12 +235,9 @@ func AssigneeText(def *tasktype.TaskType, a tasktype.Assignee) string {
 		if f, ok := def.Field(a.Field); ok && f.Label != "" {
 			field = f.Label
 		}
-		return fmt.Sprintf("业务关系 %s（%s），查不到时进入团队 %s", a.Relation, field, a.FallbackTeam)
-	case tasktype.AssigneeTeam:
-		if a.Mode == tasktype.ModeAssign {
-			return fmt.Sprintf("团队 %s · 分配者指定", a.Team)
-		}
-		return fmt.Sprintf("团队 %s · 认领", a.Team)
+		return fmt.Sprintf("业务关系 %s（%s），查不到时交给 %s", a.Relation, field, a.Fallback)
+	case tasktype.AssigneePool:
+		return fmt.Sprintf("从 %s 中随机分配", strings.Join(a.Users, "、"))
 	}
 	return ""
 }

@@ -43,8 +43,6 @@ export const resolutionLabel: Record<string, string> = {
 /** 动作的中文名（历史记录用）。 */
 export const historyLabel: Record<string, string> = {
   created: '创建',
-  claimed: '认领',
-  assigned: '分配',
   started: '开始处理',
   close: '已处理',
   no_response: '无需处理',

@@ -52,11 +52,11 @@ CREATE TABLE IF NOT EXISTS `appeal` (
 -- 样例数据。commit_time 用相对时间，对应 examples/task_types 下三个任务类型的时间窗口：
 --   A1001  VIP3，刚提交                → 「VIP 工单待审核」，RM rm.alice
 --   A1002  VIP5，提交 50 小时前仍待审核  → 「VIP 工单已等待 48 小时」，RM rm.alice
---   A1003  VIP2，提交 8 天前仍待审核     → 「VIP 工单超过 7 天」，审核小组 vip_review（分配模式）
+--   A1003  VIP2，提交 8 天前仍待审核     → 「VIP 工单超过 7 天」，随机分给审核小组的一位组员
 --   A1004  VIP4，已审核通过             → 不在任何结果里
 --   A1005  非 VIP                      → 不在任何结果里
 --   A1006  VIP1，尚未提交（PENDING）     → 不在任何结果里
---   A1007  VIP1，1 小时前提交，uid 没有 RM → 「VIP 工单待审核」，进入兜底团队 vip_cs_leads 的认领队列
+--   A1007  VIP1，1 小时前提交，uid 没有 RM → 「VIP 工单待审核」，交给兜底人 lead@example.com
 INSERT INTO `appeal`
   (`appeal_type`, `appeal_id`, `appeal_status`, `documents`, `uid`, `biz_code`, `source`, `channel`, `expire_time`, `transaction_id`, `ext`,
    `order_amount`, `business`, `biz_site_id`, `reviewer`, `case_group`, `commit_time`, `vip_label_type`, `vip_level`)

@@ -8,22 +8,26 @@
 // 字段名为 proto 中的 snake_case；int64 输出为字符串、bytes 输出为 base64（proto3 JSON 映射）。
 // 错误返回 {"code": "<gRPC 状态码名>", "message": "..."}，HTTP 状态码与 grpc-gateway 的默认映射一致。
 //
-// 另有开发专用的 GET /dev/users：列出 mock 中的人员、所属组与接口级权限，供前端的「切换身份」使用。
+// 另有开发专用的 GET /dev/users：列出 mock 中的人员、所在节点与接口级权限，供前端的「切换身份」使用。
 package main
 
 import (
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"regexp"
+	"path/filepath"
 	"sort"
 	"time"
 
 	"go.yaml.in/yaml/v3"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+
+	"github.com/alex2025-sh/ai-workbench/internal/pkg/yamljson"
+	"github.com/alex2025-sh/ai-workbench/internal/tasktype"
 )
 
 func main() {
@@ -31,7 +35,7 @@ func main() {
 	target := flag.String("target", "127.0.0.1:9090", "gRPC server address (app/rpc)")
 	protoFile := flag.String("proto", "app/rpc/workbench.proto", "proto file with the HTTP paths")
 	relations := flag.String("relations", "deploy/mock/vip_rm.yaml", "mock relations, for /dev/users")
-	teams := flag.String("teams", "deploy/mock/teams.sql", "mock teams (SQL seed), for /dev/users")
+	examples := flag.String("examples", "examples/task_types/*.yaml", "task types whose pool users and fallbacks are listed in /dev/users")
 	permissions := flag.String("permissions", "deploy/mock/permissions.yaml", "mock permissions, for /dev/users")
 	flag.Parse()
 
@@ -43,7 +47,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	users, err := mockUsers(*relations, *teams, *permissions)
+	users, err := mockUsers(*relations, *examples, *permissions)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -61,16 +65,13 @@ func main() {
 type devUser struct {
 	ID          string   `json:"id"`
 	Roles       []string `json:"roles"`       // rm：业务关系表中的处理人
-	Groups      []string `json:"groups"`      // 所属团队及角色，如 vip_review:assigner
+	Groups      []string `json:"groups"`      // 出现在哪些节点：任务类型/节点:pool（候选人）或 :fallback（兜底人）
 	Permissions []string `json:"permissions"` // 接口级权限，如 task.admin
 }
 
-// teamMember 匹配 deploy/mock/teams.sql 中 team_member 的一行：('team', 'user', 'role')。
-var teamMember = regexp.MustCompile(`\('([a-z0-9_]+)', '([^']+@[^']+)', '(assigner|executor)'\)`)
-
-// mockUsers 从 mock 关系表、团队种子数据与权限表中收集人员：关系表中的处理人标为 rm，团队成员带上团队与角色，并附上权限。
-// 团队以平台库为准（可在团队页修改），这里只读种子数据，供切换身份时参考。
-func mockUsers(relationsFile, teamsFile, permissionsFile string) ([]devUser, error) {
+// mockUsers 从 mock 关系表、示例任务类型与权限表中收集人员：关系表中的处理人标为 rm，
+// 示例节点的候选人与兜底人带上所在节点，并附上权限。线上以发布的任务类型为准，这里只供切换身份时参考。
+func mockUsers(relationsFile, examplesGlob, permissionsFile string) ([]devUser, error) {
 	byID := map[string]*devUser{}
 	get := func(id string) *devUser {
 		if byID[id] == nil {
@@ -89,13 +90,34 @@ func mockUsers(relationsFile, teamsFile, permissionsFile string) ([]devUser, err
 			}
 		}
 	}
-	seed, err := os.ReadFile(teamsFile)
+	files, err := filepath.Glob(examplesGlob)
 	if err != nil {
 		return nil, err
 	}
-	for _, m := range teamMember.FindAllStringSubmatch(string(seed), -1) {
-		u := get(m[2])
-		u.Groups = append(u.Groups, m[1]+":"+m[3])
+	for _, f := range files {
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			return nil, err
+		}
+		body, err := yamljson.Convert(raw)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", f, err)
+		}
+		tt, err := tasktype.Parse(body)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", f, err)
+		}
+		for _, n := range tt.Nodes {
+			where := tt.Key + "/" + n.ID
+			if n.Assignee.Fallback != "" {
+				u := get(n.Assignee.Fallback)
+				u.Groups = append(u.Groups, where+":fallback")
+			}
+			for _, who := range n.Assignee.Users {
+				u := get(who)
+				u.Groups = append(u.Groups, where+":pool")
+			}
+		}
 	}
 	var perms map[string][]string
 	if err := readYAML(permissionsFile, &perms); err != nil {

@@ -53,7 +53,7 @@ type (
 		SaveTaskTypeDraft(ctx context.Context, in *SaveTaskTypeDraftReq, opts ...grpc.CallOption) (*SaveTaskTypeDraftResp, error)
 		// 丢弃草稿；尚未发布过的任务类型一并删除
 		DiscardTaskTypeDraft(ctx context.Context, in *TaskTypeKeyReq, opts ...grpc.CallOption) (*Empty, error)
-		// 完整校验草稿（含团队、数据源连接、业务关系是否存在）
+		// 完整校验草稿（含数据源连接、业务关系是否存在）
 		ValidateTaskTypeDraft(ctx context.Context, in *TaskTypeKeyReq, opts ...grpc.CallOption) (*ValidateResp, error)
 		// 发布草稿为新版本（需要 task_type.publish 权限；有问题时不发布）
 		PublishTaskTypeDraft(ctx context.Context, in *TaskTypeKeyReq, opts ...grpc.CallOption) (*PublishResp, error)
@@ -116,7 +116,7 @@ func (m *defaultTaskTypeService) DiscardTaskTypeDraft(ctx context.Context, in *T
 	return client.DiscardTaskTypeDraft(ctx, in, opts...)
 }
 
-// 完整校验草稿（含团队、数据源连接、业务关系是否存在）
+// 完整校验草稿（含数据源连接、业务关系是否存在）
 func (m *defaultTaskTypeService) ValidateTaskTypeDraft(ctx context.Context, in *TaskTypeKeyReq, opts ...grpc.CallOption) (*ValidateResp, error) {
 	client := pb.NewTaskTypeServiceClient(m.cli.Conn())
 	return client.ValidateTaskTypeDraft(ctx, in, opts...)

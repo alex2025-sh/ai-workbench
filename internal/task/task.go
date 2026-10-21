@@ -26,8 +26,6 @@ type Task struct {
 	Status      TaskStatus
 	Priority    TaskPriority
 	AssigneeID  string
-	TeamKey     string // 团队队列（Assignee 为空时）
-	TeamMode    string // claim / assign
 	SnoozeUntil *time.Time
 	Resolution  Resolution
 	SourceAt    int64
@@ -36,6 +34,3 @@ type Task struct {
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 }
-
-// InQueue 报告任务是否在团队队列里等待认领或分配。
-func (t *Task) InQueue() bool { return t.Status == TaskStatusUnassigned && t.TeamKey != "" }
